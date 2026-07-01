@@ -1,0 +1,1203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Trillion</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #0E0F13;
+    --accent: #2DD4A8;
+    --blue: #3B6FE0;
+    --purple: #7C4DFF;
+    --surface: rgba(14, 15, 19, 0.15);
+    --border: rgba(255, 255, 255, 0.06);
+    --border-strong: rgba(255, 255, 255, 0.1);
+    --card-bg: rgba(22, 23, 29, 0.75);
+    --text: rgba(255, 255, 255, 0.92);
+    --text-dim: rgba(255, 255, 255, 0.45);
+    --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background: var(--bg);
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+  }
+  #scene {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    display: block;
+    z-index: 1;
+    pointer-events: auto; /* canvas is the base interactive layer */
+    touch-action: none;   /* let it handle its own drag/gesture input */
+  }
+
+  /* ============================ HEADER ============================ */
+  .tr-header {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 56px;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 20px;
+    background: var(--surface);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--border);
+  }
+  .tr-brand { display: flex; align-items: center; gap: 9px; }
+  .tr-brand-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px 1px rgba(45, 212, 168, 0.7);
+  }
+  .tr-wordmark {
+    font-size: 15px; font-weight: 600; letter-spacing: 0.2px;
+    color: var(--text);
+  }
+  .tr-header-right { display: flex; align-items: center; gap: 6px; }
+  .tr-icon-btn {
+    position: relative;
+    width: 34px; height: 34px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: none; border-radius: 9px;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: background 0.2s var(--ease), color 0.2s var(--ease);
+  }
+  .tr-icon-btn:hover { background: rgba(255, 255, 255, 0.06); color: var(--text); }
+  .tr-icon-btn svg { width: 18px; height: 18px; }
+  .tr-badge {
+    position: absolute; top: 3px; right: 3px;
+    min-width: 14px; height: 14px; padding: 0 3px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9px; font-weight: 700; line-height: 1;
+    color: #0E0F13; background: var(--accent);
+    border-radius: 7px;
+    box-shadow: 0 0 0 2px rgba(14, 15, 19, 0.6);
+  }
+  .tr-status {
+    width: 10px; height: 10px; border-radius: 50%;
+    margin-left: 8px;
+    background: #6b7280;
+    transition: background 0.3s var(--ease);
+  }
+  .tr-status--idle { background: #6b7280; }
+  .tr-status--listening { background: var(--accent); animation: tr-pulse-teal 1.6s ease-out infinite; }
+  .tr-status--processing { animation: tr-proc 1.1s ease-in-out infinite alternate, tr-pulse-blue 1.1s ease-out infinite; }
+  @keyframes tr-pulse-teal {
+    0%   { box-shadow: 0 0 0 0 rgba(45, 212, 168, 0.55); }
+    70%  { box-shadow: 0 0 0 7px rgba(45, 212, 168, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(45, 212, 168, 0); }
+  }
+  @keyframes tr-pulse-blue {
+    0%   { box-shadow: 0 0 0 0 rgba(124, 77, 255, 0.5); }
+    70%  { box-shadow: 0 0 0 7px rgba(124, 77, 255, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(124, 77, 255, 0); }
+  }
+  @keyframes tr-proc {
+    0%   { background: var(--blue); }
+    100% { background: var(--purple); }
+  }
+
+  /* ========================= ACTIVITY PANEL ========================= */
+  .tr-panel {
+    position: fixed;
+    top: 56px; right: 0; bottom: 0;
+    width: 260px;
+    z-index: 20;
+    background: var(--surface);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border-left: 1px solid var(--border);
+    transition: width 0.3s var(--ease);
+    overflow: hidden;
+  }
+  .tr-panel-head {
+    height: 40px;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 12px 0 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .tr-panel-title {
+    font-size: 10px; font-weight: 600; letter-spacing: 1.4px;
+    text-transform: uppercase; color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .tr-panel-toggle {
+    width: 24px; height: 24px; flex: 0 0 24px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: none; border-radius: 7px;
+    background: transparent; color: var(--text-dim);
+    cursor: pointer; font-size: 14px; line-height: 1;
+    transition: background 0.2s var(--ease), color 0.2s var(--ease), transform 0.3s var(--ease);
+  }
+  .tr-panel-toggle:hover { background: rgba(255, 255, 255, 0.06); color: var(--text); }
+  .tr-panel-body {
+    padding: 8px 0 20px;
+    height: calc(100% - 40px);
+    overflow-y: auto;
+    transition: opacity 0.2s var(--ease);
+  }
+  .tr-panel-body::-webkit-scrollbar { width: 6px; }
+  .tr-panel-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
+
+  .tr-panel.collapsed { width: 36px; }
+  .tr-panel.collapsed .tr-panel-title,
+  .tr-panel.collapsed .tr-panel-body { opacity: 0; pointer-events: none; }
+  .tr-panel.collapsed .tr-panel-head { padding: 0; justify-content: center; }
+  .tr-panel.collapsed .tr-panel-toggle { transform: rotate(180deg); }
+
+  .tr-section { padding: 12px 16px 8px; }
+  .tr-section + .tr-section { border-top: 1px solid var(--border); }
+  .tr-section-head {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 10px; font-weight: 600; letter-spacing: 1.2px;
+    text-transform: uppercase; color: var(--text-dim);
+    margin-bottom: 10px;
+  }
+  .tr-count {
+    font-size: 9px; font-weight: 700;
+    color: var(--accent);
+    background: rgba(45, 212, 168, 0.12);
+    border-radius: 6px; padding: 1px 6px;
+  }
+  .tr-entry {
+    padding: 8px 10px;
+    margin-bottom: 6px;
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border);
+    cursor: default;
+    transform: translateX(30px);
+    opacity: 0;
+    transition: transform 0.3s var(--ease), opacity 0.3s var(--ease), background 0.2s var(--ease);
+  }
+  .tr-entry.in { transform: translateX(0); opacity: 1; }
+  .tr-entry:hover { background: rgba(255, 255, 255, 0.06); }
+  .tr-entry-title { font-size: 12px; font-weight: 500; color: var(--text); }
+  .tr-entry-sub { font-size: 10.5px; color: var(--text-dim); margin-top: 2px; }
+
+  /* ========================= FLOATING CARDS ========================= */
+  .tr-cards {
+    position: fixed; inset: 56px 0 0 0;
+    z-index: 15;
+    pointer-events: none;
+    perspective: 1200px;
+  }
+  .tr-card-wrap {
+    position: absolute;
+    opacity: 0;
+    transform: rotateX(8deg) translateY(12px);
+    animation: tr-card-in 0.6s var(--ease) forwards;
+    pointer-events: none; /* only the card itself catches, not its bounding box */
+  }
+  @keyframes tr-card-in {
+    to { opacity: 1; transform: rotateX(0deg) translateY(0); }
+  }
+  .tr-card {
+    width: 240px;
+    pointer-events: auto;
+    position: relative;
+    padding: 16px 16px 15px;
+    border-radius: 14px;
+    background: var(--card-bg);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+    overflow: hidden;
+    animation: tr-float 4s ease-in-out infinite;
+  }
+  .tr-card::before {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0;
+    height: 2px; background: var(--accent);
+    box-shadow: 0 0 12px rgba(45, 212, 168, 0.6);
+  }
+  .tr-card--revenue { width: 300px; }
+  @keyframes tr-float {
+    0%, 100% { transform: translateY(-6px); }
+    50%      { transform: translateY(6px); }
+  }
+  .tr-card-label {
+    font-size: 10px; font-weight: 600; letter-spacing: 1.2px;
+    text-transform: uppercase; color: var(--text-dim);
+  }
+  .tr-card-value {
+    font-size: 26px; font-weight: 700; color: var(--text);
+    margin-top: 6px; letter-spacing: -0.5px;
+  }
+  .tr-card-body { font-size: 13px; line-height: 1.5; color: var(--text); margin-top: 8px; }
+  .tr-card-meta {
+    display: flex; align-items: center; gap: 6px;
+    margin-top: 12px; font-size: 11px; color: var(--text-dim);
+  }
+  .tr-card-meta .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+  .tr-delta-up { color: var(--accent); font-weight: 600; }
+
+  /* ========================= MIC CONTROL BAR ========================= */
+  .tr-micbar {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    z-index: 25;
+    display: flex; flex-direction: column; align-items: center;
+    gap: 12px;
+    padding-bottom: 28px;
+    pointer-events: none; /* transparent bar; only the button is clickable */
+  }
+  .tr-mic {
+    position: relative;
+    width: 64px; height: 64px;
+    border-radius: 50%;
+    background: #16171D;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    display: flex; align-items: center; justify-content: center;
+    color: #fff;
+    cursor: pointer;
+    pointer-events: auto;
+    transition: border-color 0.25s var(--ease), box-shadow 0.25s var(--ease), transform 0.15s var(--ease);
+  }
+  .tr-mic:hover { transform: translateY(-1px); }
+  .tr-mic:active { transform: scale(0.95); }
+  .tr-mic svg { width: 26px; height: 26px; }
+  .tr-mic .icon-stop { display: none; }
+
+  .tr-mic.listening {
+    border-color: var(--accent);
+    box-shadow: 0 0 24px rgba(45, 212, 168, 0.5);
+  }
+  .tr-mic.listening .icon-mic { display: none; }
+  .tr-mic.listening .icon-stop { display: block; }
+  /* expanding pulse ring: 0 -> 10px spread, opacity 1 -> 0 */
+  .tr-mic.listening::after {
+    content: '';
+    position: absolute; inset: 0;
+    border-radius: 50%;
+    box-shadow: 0 0 0 0 rgba(45, 212, 168, 0.55);
+    animation: tr-mic-pulse 1.4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+    pointer-events: none;
+  }
+  @keyframes tr-mic-pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(45, 212, 168, 0.55); opacity: 1; }
+    100% { box-shadow: 0 0 0 10px rgba(45, 212, 168, 0); opacity: 0; }
+  }
+
+  .tr-mic-hint {
+    font-size: 11px;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.4);
+    letter-spacing: 0.08em;
+    pointer-events: none;
+  }
+
+  /* ========================= COST INDICATOR ========================= */
+  /* The face is a <button> so it matches its header icon-button neighbors
+     (mirroring the element TYPE, not just CSS). */
+  .tr-cost {
+    display: inline-flex; align-items: center; gap: 7px;
+    height: 34px; padding: 0 10px;
+    margin-right: 4px;
+    border: 1px solid var(--border); border-radius: 9px;
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--text); cursor: pointer;
+    font-family: inherit;
+    transition: background 0.2s var(--ease), border-color 0.2s var(--ease);
+  }
+  .tr-cost:hover { background: rgba(255, 255, 255, 0.07); border-color: var(--border-strong); }
+  .tr-cost-amount { font-size: 13px; font-weight: 600; letter-spacing: -0.2px; font-variant-numeric: tabular-nums; }
+  .tr-cost-tag {
+    font-size: 8.5px; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--text-dim);
+    border: 1px solid var(--border); border-radius: 5px; padding: 1px 4px;
+  }
+  .tr-cost-delta { font-size: 10.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .tr-cost-delta.up   { color: #ff6b6b; }        /* spend rising = bad  = red */
+  .tr-cost-delta.down { color: var(--accent); }  /* spend falling = good = teal */
+  .tr-cost-delta.flat { color: var(--text-dim); }
+
+  /* Expand panel — mirrors the floating card's glass language. */
+  .tr-cost-panel {
+    position: fixed; top: 62px; right: 16px;
+    width: 300px; max-height: 72vh;
+    z-index: 40;
+    background: var(--card-bg);
+    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border-strong); border-radius: 14px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+    overflow: hidden;
+    display: none; flex-direction: column;
+  }
+  .tr-cost-panel.open { display: flex; }
+  .tr-cost-panel::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0;
+    height: 2px; background: var(--accent);
+    box-shadow: 0 0 12px rgba(45, 212, 168, 0.6);
+  }
+  .tr-cost-phead { padding: 16px 16px 12px; }
+  .tr-cost-plabel {
+    font-size: 10px; font-weight: 600; letter-spacing: 1.2px;
+    text-transform: uppercase; color: var(--text-dim);
+  }
+  .tr-cost-big { font-size: 30px; font-weight: 700; letter-spacing: -0.5px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .tr-cost-psub { display: flex; gap: 14px; margin-top: 8px; font-size: 11px; color: var(--text-dim); }
+  .tr-cost-psub b { color: var(--text); font-weight: 600; }
+  .tr-cost-sec { border-top: 1px solid var(--border); padding: 12px 16px; }
+  .tr-cost-sec h4 {
+    font-size: 10px; font-weight: 600; letter-spacing: 1.2px;
+    text-transform: uppercase; color: var(--text-dim); margin: 0 0 8px;
+  }
+  .tr-cost-row { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; padding: 3px 0; }
+  .tr-cost-row .k { color: var(--text); }
+  .tr-cost-row .v { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .tr-cost-row .sub { font-size: 10px; color: var(--text-dim); margin-left: 6px; }
+  .tr-cost-savings { color: var(--accent); font-weight: 600; }
+  .tr-cost-days { max-height: 168px; overflow-y: auto; }
+  .tr-cost-days::-webkit-scrollbar { width: 6px; }
+  .tr-cost-days::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.08); border-radius: 3px; }
+  .tr-cost-empty { font-size: 11px; color: var(--text-dim); font-style: italic; }
+
+  /* Budget alert — indicator color states (spend context: amber warn, red over). */
+  .tr-cost.warn { border-color: #e0a63b; }
+  .tr-cost.warn .tr-cost-amount { color: #e0a63b; }
+  .tr-cost.over { border-color: #ff6b6b; box-shadow: 0 0 16px rgba(255, 107, 107, 0.35); }
+  .tr-cost.over .tr-cost-amount { color: #ff6b6b; }
+
+  .tr-cost-budget { margin-top: 10px; }
+  .tr-budget-bar {
+    height: 6px; border-radius: 3px; margin-top: 6px;
+    background: rgba(255, 255, 255, 0.08); overflow: hidden;
+  }
+  .tr-budget-fill { height: 100%; width: 0%; background: var(--accent); transition: width 0.4s var(--ease); }
+
+  /* Daily sparkline. */
+  .tr-spark { display: block; width: 100%; height: 34px; margin-bottom: 10px; overflow: visible; }
+</style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <!-- ============================ HEADER ============================ -->
+  <header class="tr-header">
+    <div class="tr-brand">
+      <span class="tr-brand-dot"></span>
+      <span class="tr-wordmark">Trillion</span>
+    </div>
+    <div class="tr-header-right">
+      <button class="tr-cost" id="tr-cost" aria-label="API cost, month to date" aria-expanded="false" aria-haspopup="dialog">
+        <span class="tr-cost-amount" id="tr-cost-amount">$0.00</span>
+        <span class="tr-cost-tag">API</span>
+        <span class="tr-cost-delta flat" id="tr-cost-delta"></span>
+      </button>
+      <button class="tr-icon-btn" title="Neural map" aria-label="Neural map">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="6" cy="7" r="2.2"/><circle cx="18" cy="6" r="2.2"/>
+          <circle cx="17" cy="17" r="2.2"/><circle cx="7" cy="17" r="2.2"/>
+          <circle cx="12" cy="11.5" r="2.4"/>
+          <path d="M8 7.6l2 3M16.2 7.2l-2.4 3M13.6 13l2.6 2.6M10.2 13.2L8.7 15.3"/>
+        </svg>
+      </button>
+      <button class="tr-icon-btn" title="Alerts" aria-label="Alerts">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/>
+          <path d="M13.7 21a2 2 0 0 1-3.4 0"/>
+        </svg>
+        <span class="tr-badge">3</span>
+      </button>
+      <button class="tr-icon-btn" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+      <span class="tr-status tr-status--listening" id="tr-status" title="Listening"></span>
+    </div>
+  </header>
+
+  <!-- ==================== COST INDICATOR EXPAND PANEL ==================== -->
+  <div class="tr-cost-panel" id="tr-cost-panel" role="dialog" aria-label="API cost breakdown">
+    <div class="tr-cost-phead">
+      <div class="tr-cost-plabel">API Spend · Month to date</div>
+      <div class="tr-cost-big" id="tr-cost-big">$0.00</div>
+      <div class="tr-cost-psub">
+        <span>Today <b id="tr-cost-today">$0.00</b></span>
+        <span id="tr-cost-delta2"></span>
+      </div>
+      <div class="tr-cost-budget" id="tr-cost-budget" style="display:none;">
+        <div class="tr-cost-row" style="padding:0;">
+          <span class="k" style="font-size:11px; color:var(--text-dim);">Budget <b id="tr-cost-budget-limit" style="color:var(--text);"></b></span>
+          <span class="v" id="tr-cost-budget-pct"></span>
+        </div>
+        <div class="tr-budget-bar"><div class="tr-budget-fill" id="tr-cost-budget-fill"></div></div>
+      </div>
+    </div>
+    <div class="tr-cost-sec">
+      <h4>By model</h4>
+      <div id="tr-cost-models"><div class="tr-cost-empty">No usage yet.</div></div>
+    </div>
+    <div class="tr-cost-sec" id="tr-cost-source-sec" style="display:none;">
+      <h4>By source</h4>
+      <div id="tr-cost-sources"></div>
+    </div>
+    <div class="tr-cost-sec" id="tr-cost-savings-sec" style="display:none;">
+      <div class="tr-cost-row">
+        <span class="k">Prompt cache savings</span>
+        <span class="v tr-cost-savings" id="tr-cost-savings">$0.00</span>
+      </div>
+    </div>
+    <div class="tr-cost-sec">
+      <h4>By day</h4>
+      <svg class="tr-spark" id="tr-cost-spark" viewBox="0 0 100 32" preserveAspectRatio="none" style="display:none;"></svg>
+      <div class="tr-cost-days" id="tr-cost-days"><div class="tr-cost-empty">No usage yet.</div></div>
+    </div>
+  </div>
+
+  <!-- ========================= ACTIVITY PANEL ========================= -->
+  <aside class="tr-panel" id="tr-panel">
+    <div class="tr-panel-head">
+      <span class="tr-panel-title">Activity</span>
+      <button class="tr-panel-toggle" id="tr-panel-toggle" aria-label="Toggle panel">&#8250;</button>
+    </div>
+    <div class="tr-panel-body">
+      <section class="tr-section">
+        <div class="tr-section-head">Inbox Replies <span class="tr-count">4</span></div>
+        <div class="tr-entry"><div class="tr-entry-title">Re: Q3 forecast</div><div class="tr-entry-sub">Drafted · awaiting review</div></div>
+        <div class="tr-entry"><div class="tr-entry-title">Vendor renewal</div><div class="tr-entry-sub">Reply ready</div></div>
+        <div class="tr-entry"><div class="tr-entry-title">Design sync notes</div><div class="tr-entry-sub">Summarized</div></div>
+        <div class="tr-entry"><div class="tr-entry-title">Intro — A. Reyes</div><div class="tr-entry-sub">Warm reply drafted</div></div>
+      </section>
+      <section class="tr-section">
+        <div class="tr-section-head">Scout Tasks <span class="tr-count">2</span></div>
+        <div class="tr-entry"><div class="tr-entry-title">Competitor pricing</div><div class="tr-entry-sub">Scanning 12 sources</div></div>
+        <div class="tr-entry"><div class="tr-entry-title">Market signal watch</div><div class="tr-entry-sub">Running</div></div>
+      </section>
+      <section class="tr-section">
+        <div class="tr-section-head">Flux Tasks <span class="tr-count">3</span></div>
+        <div class="tr-entry"><div class="tr-entry-title">Pipeline sync</div><div class="tr-entry-sub">In progress</div></div>
+        <div class="tr-entry"><div class="tr-entry-title">Ledger reconcile</div><div class="tr-entry-sub">Queued</div></div>
+        <div class="tr-entry"><div class="tr-entry-title">Report rollup</div><div class="tr-entry-sub">Queued</div></div>
+      </section>
+      <section class="tr-section">
+        <div class="tr-section-head">Relay Drafts <span class="tr-count">1</span></div>
+        <div class="tr-entry"><div class="tr-entry-title">Board update</div><div class="tr-entry-sub">Draft ready to send</div></div>
+      </section>
+    </div>
+  </aside>
+
+  <!-- ========================= FLOATING CARDS ========================= -->
+  <div class="tr-cards">
+    <div class="tr-card-wrap" style="top: 40px; left: 40px; animation-delay: 0.05s;">
+      <div class="tr-card tr-card--revenue" style="animation-delay: 0.2s;">
+        <div class="tr-card-label">Revenue · MTD</div>
+        <div class="tr-card-value">$1.24M</div>
+        <div class="tr-card-meta"><span class="dot"></span><span class="tr-delta-up">▲ 8.2%</span> vs. last month</div>
+      </div>
+    </div>
+    <div class="tr-card-wrap" style="bottom: 48px; left: 64px; animation-delay: 0.18s;">
+      <div class="tr-card" style="animation-delay: 0.6s;">
+        <div class="tr-card-label">Scout</div>
+        <div class="tr-card-body">Found 3 competitor price drops in the enterprise tier overnight.</div>
+        <div class="tr-card-meta"><span class="dot"></span>2 min ago</div>
+      </div>
+    </div>
+    <div class="tr-card-wrap" style="bottom: 130px; left: 340px; animation-delay: 0.32s;">
+      <div class="tr-card" style="animation-delay: 1.1s;">
+        <div class="tr-card-label">Relay</div>
+        <div class="tr-card-body">Board update drafted and ready for your review before send.</div>
+        <div class="tr-card-meta"><span class="dot"></span>Draft</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========================= MIC CONTROL BAR ========================= -->
+  <div class="tr-micbar">
+    <button class="tr-mic" id="tr-mic" aria-label="Toggle microphone" aria-pressed="false">
+      <svg class="icon-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="9" y="2.5" width="6" height="11" rx="3"/>
+        <path d="M5.5 11a6.5 6.5 0 0 0 13 0"/>
+        <line x1="12" y1="17.5" x2="12" y2="21"/>
+        <line x1="8.5" y1="21" x2="15.5" y2="21"/>
+      </svg>
+      <svg class="icon-stop" viewBox="0 0 24 24" fill="currentColor">
+        <rect x="6.5" y="6.5" width="11" height="11" rx="2.5"/>
+      </svg>
+    </button>
+    <div class="tr-mic-hint">Tap or say &ldquo;Hey Trillion&rdquo;</div>
+  </div>
+
+  <!-- Three.js + post-processing via CDN (import map keeps addon imports resolvable) -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <script type="module">
+  import * as THREE from 'three';
+  import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+  import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+  import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+  import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+  // ----- Palette -----
+  const COL_BG     = new THREE.Color('#0E0F13');
+  const COL_ORB    = new THREE.Color('#2DD4A8'); // teal
+  const COL_TEAL   = new THREE.Color('#2DD4A8');
+  const COL_PURPLE = new THREE.Color('#7C4DFF');
+  const COL_BLUE   = new THREE.Color('#3B6FE0');
+
+  // ----- Renderer -----
+  const canvas = document.getElementById('scene');
+
+  // Fail loudly (not a silent black screen) if WebGL is unavailable.
+  let renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  } catch (err) {
+    const msg = document.createElement('div');
+    msg.style.cssText =
+      'position:fixed;inset:0;z-index:2;display:flex;align-items:center;' +
+      'justify-content:center;text-align:center;padding:2rem;color:#2DD4A8;' +
+      'font-family:system-ui,sans-serif;font-size:1rem;line-height:1.6;';
+    msg.innerHTML =
+      'WebGL is not available in this environment.<br>' +
+      'Open this page in a hardware-accelerated browser (e.g. Chromium) to see the orb.';
+    document.body.appendChild(msg);
+    throw err;
+  }
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setClearColor(COL_BG, 1);
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.0;
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+  camera.position.set(0, 0, 6);
+
+  // Shared clock-driven uniforms
+  const uTime = { value: 0 };
+  const uVoiceBright = { value: 0.0 }; // 0..1 — drive from audio amplitude later
+
+  // ============================================================
+  // COSMIC BACKGROUND — nebula (fullscreen shader) behind everything
+  // ============================================================
+  const nebulaMat = new THREE.ShaderMaterial({
+    depthWrite: false,
+    depthTest: false,
+    uniforms: {
+      uTime:   uTime,
+      uAspect: { value: window.innerWidth / window.innerHeight },
+      uTeal:   { value: COL_TEAL },
+      uPurple: { value: COL_PURPLE },
+      uBlue:   { value: COL_BLUE },
+      uBg:     { value: COL_BG },
+    },
+    vertexShader: /* glsl */`
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = vec4(position.xy, 0.0, 1.0); // fullscreen triangle/quad
+      }
+    `,
+    fragmentShader: /* glsl */`
+      precision highp float;
+      varying vec2 vUv;
+      uniform float uTime;
+      uniform float uAspect;
+      uniform vec3  uTeal, uPurple, uBlue, uBg;
+
+      // --- value noise + fbm ---
+      vec2 hash2(vec2 p){
+        p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+        return -1.0 + 2.0 * fract(sin(p) * 43758.5453123);
+      }
+      float noise(vec2 p){
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        vec2 u = f*f*(3.0-2.0*f);
+        return mix(
+          mix(dot(hash2(i+vec2(0.0,0.0)), f-vec2(0.0,0.0)),
+              dot(hash2(i+vec2(1.0,0.0)), f-vec2(1.0,0.0)), u.x),
+          mix(dot(hash2(i+vec2(0.0,1.0)), f-vec2(0.0,1.0)),
+              dot(hash2(i+vec2(1.0,1.0)), f-vec2(1.0,1.0)), u.x),
+          u.y);
+      }
+      float fbm(vec2 p){
+        float v = 0.0, a = 0.5;
+        for(int i=0;i<5;i++){
+          v += a * noise(p);
+          p *= 2.02;
+          a *= 0.5;
+        }
+        return v;
+      }
+
+      void main(){
+        // aspect-corrected, centered coords
+        vec2 uv = vUv - 0.5;
+        uv.x *= uAspect;
+
+        float t = uTime * 0.015;
+
+        // layered drifting noise fields
+        vec2 q = uv * 1.6;
+        float n1 = fbm(q + vec2(t, -t*0.6));
+        float n2 = fbm(q * 1.7 + vec2(-t*0.8, t*0.5) + n1);
+        float n3 = fbm(q * 0.9 + vec2(t*0.4, t*0.7) - n1);
+
+        // shape the wisps
+        float teal   = smoothstep(0.15, 0.9, n1 + 0.35*n2);
+        float purple = smoothstep(0.25, 0.95, n2);
+        float blue   = smoothstep(0.20, 0.9, n3 + 0.25*n1);
+
+        vec3 col = uBg;
+        col += uTeal   * teal   * 0.28;
+        col += uPurple * purple * 0.22;
+        col += uBlue   * blue   * 0.20;
+
+        // gentle vignette so edges fall to background
+        float r = length(uv);
+        col = mix(col, uBg, smoothstep(0.55, 1.15, r));
+
+        gl_FragColor = vec4(col, 1.0);
+      }
+    `,
+  });
+  const nebula = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), nebulaMat);
+  nebula.frustumCulled = false;
+  nebula.renderOrder = -10; // drawn first, behind stars + orb, captured by the bloom pass
+  scene.add(nebula);
+
+  // ============================================================
+  // STARFIELD — twinkling points
+  // ============================================================
+  const STAR_COUNT = 1400;
+  const starGeo = new THREE.BufferGeometry();
+  const starPos = new Float32Array(STAR_COUNT * 3);
+  const starPhase = new Float32Array(STAR_COUNT);
+  const starSize = new Float32Array(STAR_COUNT);
+  for (let i = 0; i < STAR_COUNT; i++) {
+    // spread across a wide box behind the orb
+    starPos[i*3+0] = (Math.random() - 0.5) * 40;
+    starPos[i*3+1] = (Math.random() - 0.5) * 24;
+    starPos[i*3+2] = -6 - Math.random() * 22;
+    starPhase[i]   = Math.random() * Math.PI * 2;
+    starSize[i]    = 0.6 + Math.random() * 1.8;
+  }
+  starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+  starGeo.setAttribute('aPhase', new THREE.BufferAttribute(starPhase, 1));
+  starGeo.setAttribute('aSize',  new THREE.BufferAttribute(starSize, 1));
+
+  const starMat = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    uniforms: { uTime: uTime, uPixelRatio: { value: renderer.getPixelRatio() } },
+    vertexShader: /* glsl */`
+      attribute float aPhase;
+      attribute float aSize;
+      uniform float uTime;
+      uniform float uPixelRatio;
+      varying float vTw;
+      void main(){
+        vTw = 0.5 + 0.5 * sin(uTime * 1.6 + aPhase);
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mv;
+        gl_PointSize = aSize * uPixelRatio * (300.0 / -mv.z) * (0.6 + 0.6 * vTw);
+      }
+    `,
+    fragmentShader: /* glsl */`
+      precision highp float;
+      varying float vTw;
+      void main(){
+        vec2 c = gl_PointCoord - 0.5;
+        float d = length(c);
+        float a = smoothstep(0.5, 0.0, d);
+        a *= (0.25 + 0.75 * vTw);
+        a *= 0.45; // overall star brightness
+        vec3 col = mix(vec3(0.75, 0.9, 1.0), vec3(1.0), vTw);
+        gl_FragColor = vec4(col, a);
+      }
+    `,
+  });
+  const stars = new THREE.Points(starGeo, starMat);
+  scene.add(stars);
+
+  // ============================================================
+  // THE ORB — core sphere + 3 additive glow shells (billboarded)
+  // ============================================================
+  const orbGroup = new THREE.Group();
+  scene.add(orbGroup);
+
+  // (3) bright inner core — a small emissive sphere
+  const coreMat = new THREE.ShaderMaterial({
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    uniforms: {
+      uTime: uTime,
+      uVoiceBright: uVoiceBright,
+      uColor: { value: COL_ORB },
+    },
+    vertexShader: /* glsl */`
+      varying vec3 vNormal;
+      varying vec3 vView;
+      void main(){
+        vNormal = normalize(normalMatrix * normal);
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vView = normalize(-mv.xyz);
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: /* glsl */`
+      precision highp float;
+      varying vec3 vNormal;
+      varying vec3 vView;
+      uniform float uTime;
+      uniform float uVoiceBright;
+      uniform vec3  uColor;
+      void main(){
+        float facing = clamp(dot(normalize(vNormal), normalize(vView)), 0.0, 1.0);
+        // hot center, softer toward the rim
+        float core = pow(facing, 1.5);
+        float pulse = 0.5 + 0.5 * sin(uTime * (6.2831853 / 4.0)); // ~4s breathe
+        float bright = 1.0 + uVoiceBright * 2.2 + pulse * (0.12 + uVoiceBright * 0.25);
+        vec3 col = mix(uColor, vec3(1.0), 0.35 + 0.4 * core) * (0.9 + core) * bright;
+        col *= 0.65; // overall orb brightness
+        gl_FragColor = vec4(col, min(1.0, 0.85 + core));
+      }
+    `,
+  });
+  const core = new THREE.Mesh(new THREE.SphereGeometry(0.85, 64, 64), coreMat);
+  orbGroup.add(core);
+
+  // Reusable billboard glow shader for the halo + atmospheric bloom.
+  function makeGlow(radius, opacity, sharpness, voiceGain) {
+    const mat = new THREE.ShaderMaterial({
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      depthTest: false,
+      uniforms: {
+        uTime: uTime,
+        uVoiceBright: uVoiceBright,
+        uColor: { value: COL_ORB },
+        uOpacity: { value: opacity },
+        uSharp: { value: sharpness },
+        uVoiceGain: { value: voiceGain },
+      },
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main(){
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        precision highp float;
+        varying vec2 vUv;
+        uniform float uTime, uVoiceBright, uOpacity, uSharp, uVoiceGain;
+        uniform vec3 uColor;
+
+        vec2 hash2(vec2 p){
+          p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+          return -1.0 + 2.0 * fract(sin(p) * 43758.5453123);
+        }
+        float noise(vec2 p){
+          vec2 i = floor(p); vec2 f = fract(p);
+          vec2 u = f*f*(3.0-2.0*f);
+          return mix(
+            mix(dot(hash2(i+vec2(0.0,0.0)), f-vec2(0.0,0.0)),
+                dot(hash2(i+vec2(1.0,0.0)), f-vec2(1.0,0.0)), u.x),
+            mix(dot(hash2(i+vec2(0.0,1.0)), f-vec2(0.0,1.0)),
+                dot(hash2(i+vec2(1.0,1.0)), f-vec2(1.0,1.0)), u.x),
+            u.y);
+        }
+        float fbm(vec2 p){
+          float v = 0.0, a = 0.5;
+          for(int i=0;i<4;i++){ v += a * noise(p); p *= 2.0; a *= 0.5; }
+          return v;
+        }
+
+        void main(){
+          vec2 p = (vUv - 0.5) * 2.0; // -1..1
+          float d = length(p);
+
+          // slowly churning, domain-warped noise -> living plasma feel
+          float t = uTime * 0.22;
+          vec2 np = p * 2.3;
+          float warp = fbm(np + vec2(t, -t * 0.7));
+          float n = fbm(np * 1.6 + warp + vec2(-t * 0.6, t * 0.4));
+          n = n * 0.5 + 0.5; // 0..1
+
+          // perturb the radial edge so the glow isn't a clean circle
+          float edge = d + (n - 0.5) * 0.5;
+          float glow = pow(clamp(1.0 - edge, 0.0, 1.0), uSharp);
+
+          // wispy density variation across the body
+          glow *= mix(0.5, 1.3, n);
+
+          float pulse = 0.5 + 0.5 * sin(uTime * (6.2831853 / 4.0));
+          float amp = uOpacity * (1.0 + uVoiceBright * uVoiceGain) * (0.9 + 0.1 * pulse);
+          gl_FragColor = vec4(uColor, clamp(glow, 0.0, 1.0) * amp);
+        }
+      `,
+    });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(radius * 2, radius * 2), mat);
+    return mesh;
+  }
+
+  // (2) medium halo — reacts moderately to voice; kept tight around the core
+  const halo = makeGlow(1.5, 0.4, 3.0, 1.4);
+  orbGroup.add(halo);
+
+  // (1) soft atmospheric bloom — pulled in close with a sharper falloff so the
+  //     orb reads as a compact ball rather than a diffuse cloud
+  const atmos = makeGlow(2.8, 0.18, 4.5, 0.6);
+  orbGroup.add(atmos);
+
+  // ============================================================
+  // POST — bloom so the orb genuinely glows
+  // ============================================================
+  const composer = new EffectComposer(renderer);
+  composer.addPass(new RenderPass(scene, camera));
+  const bloom = new UnrealBloomPass(
+    new THREE.Vector2(window.innerWidth, window.innerHeight),
+    0.6,   // strength
+    0.45,  // radius — tighter so the glow hugs the orb
+    0.15   // threshold
+  );
+  composer.addPass(bloom);
+  composer.addPass(new OutputPass());
+
+  // ============================================================
+  // RESIZE
+  // ============================================================
+  function onResize() {
+    const w = window.innerWidth, h = window.innerHeight;
+    renderer.setSize(w, h);
+    composer.setSize(w, h);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    nebulaMat.uniforms.uAspect.value = w / h;
+    bloom.setSize(w, h);
+    starMat.uniforms.uPixelRatio.value = renderer.getPixelRatio();
+  }
+  window.addEventListener('resize', onResize);
+
+  // ============================================================
+  // OPTIONAL DEMO: hover to preview voice reactivity.
+  // Remove this block when wiring real audio amplitude into uVoiceBright.
+  // ============================================================
+  let voiceTarget = 0;
+  window.addEventListener('pointermove', (e) => {
+    voiceTarget = 1.0 - Math.abs((e.clientY / window.innerHeight) - 0.5) * 2.0;
+    voiceTarget = Math.max(0, Math.min(1, voiceTarget));
+  });
+  window.addEventListener('pointerleave', () => { voiceTarget = 0; });
+
+  // Public hook for later audio wiring:  window.setVoiceBright(0..1)
+  window.setVoiceBright = (v) => { voiceTarget = Math.max(0, Math.min(1, v)); };
+
+  // ============================================================
+  // LOOP
+  // ============================================================
+  const clock = new THREE.Clock();
+  function tick() {
+    const dt = clock.getDelta();
+    uTime.value += dt;
+
+    // smooth the voice value toward its target
+    uVoiceBright.value += (voiceTarget - uVoiceBright.value) * Math.min(1, dt * 8);
+
+    // keep glow planes facing the camera (billboarding)
+    halo.quaternion.copy(camera.quaternion);
+    atmos.quaternion.copy(camera.quaternion);
+
+    // very slow orb drift so it feels alive
+    orbGroup.position.y = Math.sin(uTime.value * 0.3) * 0.05;
+
+    composer.render();
+
+    requestAnimationFrame(tick);
+  }
+  onResize();
+  tick();
+  </script>
+
+  <!-- ============================ UI SHELL LOGIC ============================ -->
+  <script>
+  (function () {
+    // --- Panel collapse toggle ---
+    const panel = document.getElementById('tr-panel');
+    const toggle = document.getElementById('tr-panel-toggle');
+    toggle.addEventListener('click', () => {
+      const collapsed = panel.classList.toggle('collapsed');
+      toggle.setAttribute('aria-expanded', String(!collapsed));
+    });
+
+    // --- Staggered slide-in for panel entries ---
+    function playEntries() {
+      const entries = document.querySelectorAll('.tr-entry');
+      entries.forEach((el, i) => {
+        el.classList.remove('in');
+        setTimeout(() => el.classList.add('in'), 150 + i * 70);
+      });
+    }
+    playEntries();
+
+    // --- Status dot state machine ---
+    // window.setStatus('idle' | 'listening' | 'processing')
+    const statusDot = document.getElementById('tr-status');
+    const STATES = ['idle', 'listening', 'processing'];
+    window.setStatus = function (state) {
+      if (!STATES.includes(state)) return;
+      STATES.forEach((s) => statusDot.classList.remove('tr-status--' + s));
+      statusDot.classList.add('tr-status--' + state);
+      statusDot.title = state.charAt(0).toUpperCase() + state.slice(1);
+      // couple the orb to voice states until real audio is wired in
+      if (window.setVoiceBright) {
+        window.setVoiceBright(state === 'listening' ? 0.85 : state === 'processing' ? 0.4 : 0.0);
+      }
+    };
+
+    // --- Demo cycle: idle → listening → processing (remove when wiring real state) ---
+    let si = 1;
+    window.setStatus(STATES[si]);
+    const demoTimer = setInterval(() => {
+      si = (si + 1) % STATES.length;
+      window.setStatus(STATES[si]);
+    }, 3500);
+
+    // --- Mic button: toggle listening + broadcast a custom event ---
+    const mic = document.getElementById('tr-mic');
+    let listening = false;
+    mic.addEventListener('click', () => {
+      listening = !listening;
+      mic.classList.toggle('listening', listening);
+      mic.setAttribute('aria-pressed', String(listening));
+      document.dispatchEvent(new CustomEvent('trillion:mic-toggle', { detail: { listening } }));
+    });
+
+    // --- App reacts to the mic event (header dot + orb). Hand control from the demo. ---
+    document.addEventListener('trillion:mic-toggle', (e) => {
+      clearInterval(demoTimer); // user is driving now — stop the auto demo
+      window.setStatus(e.detail.listening ? 'listening' : 'idle');
+    });
+  })();
+  </script>
+
+  <!-- ============================ COST INDICATOR ============================ -->
+  <script>
+  (function () {
+    const POLL_MS = 60000; // match the endpoint's ~60s cache TTL
+
+    const btn      = document.getElementById('tr-cost');
+    const panel    = document.getElementById('tr-cost-panel');
+    const elAmount = document.getElementById('tr-cost-amount');
+    const elDelta  = document.getElementById('tr-cost-delta');
+    const elBig    = document.getElementById('tr-cost-big');
+    const elToday  = document.getElementById('tr-cost-today');
+    const elDelta2 = document.getElementById('tr-cost-delta2');
+    const elModels = document.getElementById('tr-cost-models');
+    const elDays   = document.getElementById('tr-cost-days');
+    const elSaveSec = document.getElementById('tr-cost-savings-sec');
+    const elSavings = document.getElementById('tr-cost-savings');
+    const elSourceSec = document.getElementById('tr-cost-source-sec');
+    const elSources   = document.getElementById('tr-cost-sources');
+    const elSpark     = document.getElementById('tr-cost-spark');
+    const elBudget     = document.getElementById('tr-cost-budget');
+    const elBudgetLimit = document.getElementById('tr-cost-budget-limit');
+    const elBudgetPct   = document.getElementById('tr-cost-budget-pct');
+    const elBudgetFill  = document.getElementById('tr-cost-budget-fill');
+
+    const STATE_COLOR = { ok: 'var(--accent)', warn: '#e0a63b', over: '#ff6b6b' };
+
+    // Format USD: keep small token costs legible without noise on big numbers.
+    function money(n) {
+      n = Number(n) || 0;
+      if (n === 0) return '$0.00';
+      if (Math.abs(n) < 0.01) return '$' + n.toFixed(4);
+      if (Math.abs(n) < 1)    return '$' + n.toFixed(3);
+      return '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    // Spend delta: rising is BAD, so up = red, down = green. (Inverted vs revenue.)
+    function applyDelta(el, pct) {
+      if (pct === null || pct === undefined) { el.className = 'tr-cost-delta flat'; el.textContent = ''; return; }
+      const dir = pct > 0 ? 'up' : (pct < 0 ? 'down' : 'flat');
+      const arrow = pct > 0 ? '▲' : (pct < 0 ? '▼' : '·');
+      el.className = 'tr-cost-delta ' + dir;
+      el.textContent = arrow + ' ' + Math.abs(pct).toFixed(1) + '%';
+    }
+
+    function render(d) {
+      elAmount.textContent = money(d.total_cost_usd);
+      elBig.textContent = money(d.total_cost_usd);
+      elToday.textContent = money(d.today_cost_usd);
+      applyDelta(elDelta, d.delta ? d.delta.change_pct : null);
+
+      // Second delta line (with vs last month context).
+      if (d.delta && d.delta.change_pct !== null && d.delta.change_pct !== undefined) {
+        const up = d.delta.change_pct > 0;
+        elDelta2.innerHTML = 'vs last month <b style="color:' + (up ? '#ff6b6b' : 'var(--accent)') + '">'
+          + (up ? '▲' : '▼') + ' ' + Math.abs(d.delta.change_pct).toFixed(1) + '%</b>';
+      } else {
+        elDelta2.textContent = '';
+      }
+
+      // By model.
+      if (d.by_model && d.by_model.length) {
+        elModels.innerHTML = d.by_model.map((m) =>
+          '<div class="tr-cost-row"><span class="k">' + escapeHtml(m.model)
+          + '<span class="sub">' + m.calls + ' call' + (m.calls === 1 ? '' : 's') + '</span></span>'
+          + '<span class="v">' + money(m.cost_usd) + '</span></div>'
+        ).join('');
+      } else {
+        elModels.innerHTML = '<div class="tr-cost-empty">No usage yet.</div>';
+      }
+
+      // By source — only meaningful once more than one source contributes
+      // (e.g. sub-agents / background jobs alongside the main conversation).
+      if (d.by_source && d.by_source.length > 1) {
+        elSourceSec.style.display = '';
+        elSources.innerHTML = d.by_source.map((s) =>
+          '<div class="tr-cost-row"><span class="k">' + escapeHtml(s.source)
+          + '<span class="sub">' + s.calls + ' call' + (s.calls === 1 ? '' : 's') + '</span></span>'
+          + '<span class="v">' + money(s.cost_usd) + '</span></div>'
+        ).join('');
+      } else {
+        elSourceSec.style.display = 'none';
+      }
+
+      // Cache savings — only show when there's something to celebrate.
+      if (d.cache_savings_usd && d.cache_savings_usd > 0) {
+        elSaveSec.style.display = '';
+        elSavings.textContent = money(d.cache_savings_usd) + ' saved';
+      } else {
+        elSaveSec.style.display = 'none';
+      }
+
+      // Budget alert — indicator coloring + panel bar.
+      renderBudget(d.budget);
+
+      // Daily sparkline (chronological, left→right).
+      drawSpark(d.by_day);
+
+      // By day (newest first from the API).
+      if (d.by_day && d.by_day.length) {
+        elDays.innerHTML = d.by_day.map((day) =>
+          '<div class="tr-cost-row"><span class="k">' + escapeHtml(day.day) + '</span>'
+          + '<span class="v">' + money(day.cost_usd) + '</span></div>'
+        ).join('');
+      } else {
+        elDays.innerHTML = '<div class="tr-cost-empty">No usage yet.</div>';
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    function renderBudget(b) {
+      btn.classList.remove('warn', 'over');
+      if (!b || b.state === 'none' || b.limit_usd == null) {
+        elBudget.style.display = 'none';
+        return;
+      }
+      if (b.state === 'warn' || b.state === 'over') btn.classList.add(b.state);
+
+      elBudget.style.display = '';
+      elBudgetLimit.textContent = money(b.limit_usd) + '/mo';
+      const pct = Number(b.used_pct) || 0;
+      elBudgetPct.textContent = pct.toFixed(0) + '% used';
+      elBudgetPct.style.color = STATE_COLOR[b.state] || 'var(--text-dim)';
+      elBudgetFill.style.width = Math.min(100, pct) + '%';
+      elBudgetFill.style.background = STATE_COLOR[b.state] || 'var(--accent)';
+    }
+
+    function drawSpark(byDay) {
+      if (!byDay || byDay.length < 2) { elSpark.style.display = 'none'; return; }
+      const days = byDay.slice().reverse(); // API gives newest-first; want chronological
+      const costs = days.map((d) => Number(d.cost_usd) || 0);
+      const max = Math.max.apply(null, costs) || 1e-9;
+      const n = costs.length;
+      const pts = costs.map((c, i) => {
+        const x = (i / (n - 1)) * 100;
+        const y = 31 - (c / max) * 28; // 1px top/bottom padding within the 0..32 box
+        return x.toFixed(2) + ',' + y.toFixed(2);
+      }).join(' ');
+      const lastY = (31 - (costs[n - 1] / max) * 28).toFixed(2);
+      elSpark.innerHTML =
+        '<polyline fill="none" stroke="var(--accent)" stroke-width="1.5" ' +
+        'stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke" points="' + pts + '"/>' +
+        '<circle cx="100" cy="' + lastY + '" r="1.8" fill="var(--accent)" vector-effect="non-scaling-stroke"/>';
+      elSpark.style.display = 'block';
+    }
+
+    async function fetchUsage() {
+      try {
+        const res = await fetch('/api/usage', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        render(await res.json());
+      } catch (err) {
+        // Endpoint not reachable (e.g. opened as a static file) — degrade gracefully.
+        elAmount.textContent = '$—';
+        elDelta.className = 'tr-cost-delta flat';
+        elDelta.textContent = '';
+      }
+    }
+
+    // Toggle the panel.
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = panel.classList.toggle('open');
+      btn.setAttribute('aria-expanded', String(open));
+      if (open) fetchUsage(); // refresh on open
+    });
+    // Close on outside click / Escape.
+    document.addEventListener('click', (e) => {
+      if (panel.classList.contains('open') && !panel.contains(e.target) && e.target !== btn) {
+        panel.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && panel.classList.contains('open')) {
+        panel.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+    });
+
+    // Poll ~every 60s, but only while the tab is visible.
+    let timer = null;
+    function startPolling() {
+      if (timer) return;
+      timer = setInterval(() => { if (!document.hidden) fetchUsage(); }, POLL_MS);
+    }
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) fetchUsage(); // catch up on return
+    });
+
+    fetchUsage();      // initial load
+    startPolling();
+  })();
+  </script>
+</body>
+</html>

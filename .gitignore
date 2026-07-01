@@ -1,0 +1,46 @@
+# Secrets — never commit these
+.env
+*.env
+secrets.yml
+secrets.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Trillion runtime state (not secrets, but not code)
+# These live in data/ and are persisted locally — commit if you want to back them up
+# data/memory.json
+# data/schedule.json
+# data/log.jsonl
+
+# Cost-tracking database (local usage rows; commit if you want to back it up)
+usage.db
+*.db
+
+# Audio temp files
+*.wav
+*.mp3
+*.ogg
+/tmp/
