@@ -11,6 +11,7 @@ from typing import AsyncIterator
 
 from anthropic import AsyncAnthropic, APIConnectionError, APIStatusError, RateLimitError
 
+from ._caching import apply_prompt_caching
 from .base import BaseProvider, TextChunk, ToolCall, ProviderResponse, TokenUsage
 
 
@@ -44,12 +45,17 @@ class ClaudeProvider(BaseProvider):
         collected_text = ""
         collected_tool_calls: list[ToolCall] = []
 
+        # Prompt caching: cache the stable prefix (tools + system) and the
+        # conversation prefix so long chats don't get slower turn over turn.
+        # Non-mutating — never touches the caller's history.
+        cached_system, cached_messages = apply_prompt_caching(system, messages)
+
         # Tier 2: pass tools into the API call when the registry provides them.
         api_kwargs: dict = dict(
             model=self._model,
             max_tokens=4096,
-            system=system,
-            messages=messages,
+            system=cached_system,
+            messages=cached_messages,
         )
         if tools:
             api_kwargs["tools"] = tools
