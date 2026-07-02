@@ -182,7 +182,15 @@ async def main() -> None:
     except Exception as e:  # noqa: BLE001
         console.print(f"[dim]Cost tracking unavailable ({e}); continuing.[/dim]")
 
-    agent = Agent(provider=provider)
+    # Build the tool registry from settings (tools self-skip when unconfigured).
+    from agent.config import get_settings
+    from agent.tools.registry import build_registry
+
+    registry = build_registry(get_settings())
+    if registry.names():
+        console.print(f"[dim]Registered {len(registry.names())} tools: {', '.join(registry.names())}[/dim]")
+
+    agent = Agent(provider=provider, tool_registry=registry)
     await chat_loop(agent, provider_name=args.provider)
 
 

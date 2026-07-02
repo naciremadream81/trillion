@@ -59,7 +59,10 @@ class Agent:
 
         # Allow the model to call tools in a loop (Tier 2).
         # In Tier 1 there are no tools, so this runs exactly once.
+        MAX_TOOL_ROUNDS = 8  # guard against a runaway tool-calling loop
+        rounds = 0
         while True:
+            rounds += 1
             collected_text = ""
             tool_calls: list[ToolCall] = []
             final_response: ProviderResponse | None = None
@@ -98,28 +101,39 @@ class Agent:
                 )
                 break
 
-            # ── Tier 2: handle tool calls ─────────────────────────────────
-            # Record the assistant's turn (with tool use blocks)
-            self.history.append(
-                {
-                    "role": "assistant",
-                    "content": collected_text,
-                    "_tool_calls": tool_calls,  # stored for audit log later
-                }
-            )
+            # ── Tier 2: handle tool calls (Anthropic tool-use format) ──────
+            # The assistant turn must carry the tool_use blocks, and the tool
+            # results come back as a *user* turn of tool_result blocks — this is
+            # the exact shape the Claude API requires for a tool round-trip.
+            # (OpenAI's tool format differs; wiring that is a separate task —
+            # only Claude drives tools today.)
+            assistant_content: list[dict] = []
+            if collected_text.strip():
+                assistant_content.append({"type": "text", "text": collected_text})
+            for tc in tool_calls:
+                assistant_content.append(
+                    {"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.arguments}
+                )
+            self.history.append({"role": "assistant", "content": assistant_content})
 
-            # Execute each tool and feed results back
+            # Execute each tool; feed all results back as one user turn.
+            tool_results: list[dict] = []
             for tc in tool_calls:
                 result = await self._run_tool(tc)
-                self.history.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "name": tc.name,
-                        "content": result,
-                    }
+                tool_results.append(
+                    {"type": "tool_result", "tool_use_id": tc.id, "content": result}
                 )
-            # Loop: give the model the tool results and continue
+            self.history.append({"role": "user", "content": tool_results})
+
+            # Safety valve: stop looping if the model keeps calling tools.
+            if rounds >= MAX_TOOL_ROUNDS:
+                self.history.append(
+                    {"role": "assistant",
+                     "content": "[Stopped after too many tool calls in one turn.]"}
+                )
+                yield "\n[Stopped after too many tool calls.]"
+                break
+            # Otherwise loop: the model now sees the tool results and continues.
 
     def reset(self) -> None:
         """Clear the in-session history. Memory (Tier 4) is unaffected."""

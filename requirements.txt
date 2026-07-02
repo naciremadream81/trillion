@@ -5,6 +5,9 @@ openai>=1.50.0        # also covers OpenRouter (same API format, different base 
 # HTTP (Ollama streaming, future web tools)
 aiohttp>=3.9.0
 
+# Read-only Supabase/Postgres tools (query_analytics, etc.)
+asyncpg>=0.29.0
+
 # Environment / config
 python-dotenv>=1.0.0
 pyyaml>=6.0.1
