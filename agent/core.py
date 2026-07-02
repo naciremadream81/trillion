@@ -18,6 +18,7 @@ from typing import AsyncIterator
 from .cost.recorder import record_usage
 from .providers.base import BaseProvider, TextChunk, ToolCall, ProviderResponse
 from .system_prompt import build_system_prompt
+from .turn_taking import is_signoff
 
 
 class Agent:
@@ -55,6 +56,13 @@ class Agent:
         a tool, execute it, feed the result back, and keep going until the
         model is done — all transparently.
         """
+        # Tier 5: if the user is just signing off, don't take the last word.
+        # Runs before anything is recorded or sent — a goodbye costs nothing.
+        # Only ends a conversation the assistant has actually been part of.
+        has_assistant_spoken = any(m.get("role") == "assistant" for m in self.history)
+        if is_signoff(user_input, has_assistant_spoken=has_assistant_spoken):
+            return
+
         self.history.append({"role": "user", "content": user_input})
 
         # Allow the model to call tools in a loop (Tier 2).

@@ -127,13 +127,21 @@ async def chat_loop(agent: Agent, provider_name: str) -> None:
                 continue
 
             # ── Agent turn ────────────────────────────────────────────────
-            print("Trillion: ", end="", flush=True)
-
+            # Only print the "Trillion:" prefix once a reply actually starts, so
+            # a sign-off (Tier 5) produces clean silence, not an empty prompt.
+            got_reply = False
             async for chunk in agent.turn(user_input):
+                if not got_reply:
+                    print("Trillion: ", end="", flush=True)
+                    got_reply = True
                 print(chunk, end="", flush=True)
 
-            print()  # newline after streamed reply
-            print()  # breathing room
+            if got_reply:
+                print()  # newline after streamed reply
+                print()  # breathing room
+            else:
+                # A sign-off — Trillion lets the conversation rest.
+                print()
 
         except KeyboardInterrupt:
             console.print("\n\n[dim]Trillion signing off.[/dim]")
