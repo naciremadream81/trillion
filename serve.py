@@ -16,11 +16,13 @@ This is the server the systemd unit runs in place of `python -m http.server`.
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 from aiohttp import web
 from dotenv import load_dotenv
 
+from agent.config import get_settings
 from agent.cost.aggregate import UsageDashboard
 from agent.cost.storage import UsageRepo
 
@@ -106,9 +108,50 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
         await resp.write_eof()
         return resp
 
+    async def transcribe_audio(request: web.Request) -> web.Response:
+        # Voice V1 STT: browser posts one recorded push-to-talk clip, we
+        # forward it to Deepgram and hand back the transcript.
+        from agent.voice.deepgram_stt import TranscriptionError, transcribe
+
+        settings = get_settings()
+        audio = await request.read()
+        content_type = request.headers.get("Content-Type", "audio/webm")
+        try:
+            text = await transcribe(audio, content_type, settings.deepgram_api_key)
+        except TranscriptionError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        return web.json_response({"text": text})
+
+    async def synthesize_speech(request: web.Request) -> web.Response:
+        # Voice V1 TTS: one sentence in, one WAV clip out. Called once per
+        # sentence as the agent's reply streams, so playback can start early.
+        # Piper runs on-device and is CPU-bound/blocking, so it's offloaded
+        # to a thread rather than awaited directly on the event loop.
+        from agent.voice.piper_tts import SynthesisError, synthesize
+
+        settings = get_settings()
+        model_path = settings.piper_voice_path
+        if not os.path.isabs(model_path):
+            model_path = os.path.join(PROJECT_ROOT, model_path)
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        text = (data.get("text") or "").strip()
+        if not text:
+            return web.Response(status=400, text="missing text")
+        loop = asyncio.get_running_loop()
+        try:
+            audio = await loop.run_in_executor(None, synthesize, text, model_path)
+        except SynthesisError as e:
+            return web.Response(status=400, text=str(e))
+        return web.Response(body=audio, content_type="audio/wav")
+
     app = web.Application()
     app.router.add_get("/api/usage", usage)
     app.router.add_post("/api/chat", chat)
+    app.router.add_post("/api/transcribe", transcribe_audio)
+    app.router.add_post("/api/tts", synthesize_speech)
     app.router.add_get("/", index)
     app.router.add_get("/index.html", index)
     return app

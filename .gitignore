@@ -44,3 +44,8 @@ usage.db
 *.mp3
 *.ogg
 /tmp/
+
+# Piper voice models (large binary downloads, not source — see HANDOFF.md
+# for the download command)
+voices/*.onnx
+voices/*.onnx.json
