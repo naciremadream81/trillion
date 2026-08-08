@@ -44,3 +44,6 @@ usage.db
 *.mp3
 *.ogg
 /tmp/
+
+# Software Factory build output — generated projects, not source
+generated-projects/
