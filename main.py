@@ -16,6 +16,16 @@ Special commands (type these during a session):
     /history    — print the current session history
     /model      — show which model is active
     /quit       — exit (or just Ctrl+C)
+
+Agent Factory commands (spawn new specialist sub-agents, gated by approval):
+    /spawn <role description>   — research and draft a new specialist agent
+    /pending                    — list spawn tasks awaiting your approval
+    /approve <id>                — approve a drafted spec, minting the agent
+    /reject <id> <feedback>      — reject with feedback (up to 3 revisions)
+
+Software Factory commands (build whole standalone projects, fully autonomous):
+    /build <description>   — build a whole software project in the background
+    /builds                — list recent builds and their status
 """
 
 import argparse
@@ -45,6 +55,12 @@ SLASH_COMMANDS = {
     "/reset":   "Clear conversation history",
     "/history": "Print session history",
     "/model":   "Show active model",
+    "/spawn":   "Research and draft a new specialist agent: /spawn <role description>",
+    "/pending": "List spawn tasks awaiting approval",
+    "/approve": "Approve a drafted spec: /approve <id>",
+    "/reject":  "Reject with feedback: /reject <id> <feedback>",
+    "/build":   "Build a whole software project: /build <description>",
+    "/builds":  "List recent Software Factory builds and their status",
     "/quit":    "Exit",
     "/help":    "Show this list",
 }
@@ -59,12 +75,25 @@ def print_banner(provider_name: str, model_name: str) -> None:
     )
 
 
-def handle_slash(command: str, agent: Agent, provider_name: str) -> bool:
+def handle_slash(
+    command: str,
+    agent: Agent,
+    provider_name: str,
+    factory: "FactoryContext | None" = None,
+    software_factory: "SoftwareFactoryContext | None" = None,
+) -> bool:
     """
     Handle a slash command. Returns True if we should continue the loop,
     False if we should exit.
+
+    `factory` carries the Agent Factory's dependencies (repo, provider,
+    registry, background_tasks) — None when the factory isn't wired up
+    (e.g. tests exercising the non-factory commands only). `software_factory`
+    is the analogous bundle for the Software Factory's /build and /builds.
     """
-    cmd = command.strip().lower()
+    parts = command.strip().split(maxsplit=1)
+    cmd = parts[0].lower()
+    rest = parts[1] if len(parts) > 1 else ""
 
     if cmd == "/quit":
         console.print("\n[dim]Trillion signing off.[/dim]")
@@ -97,13 +126,175 @@ def handle_slash(command: str, agent: Agent, provider_name: str) -> bool:
             console.print(f"  [bold]{c}[/bold]  {desc}")
         console.print()
 
+    elif cmd in ("/spawn", "/pending", "/approve", "/reject"):
+        if factory is None:
+            console.print("[yellow]Agent Factory isn't available in this session.[/yellow]\n")
+        else:
+            _handle_factory_command(cmd, rest, factory)
+
+    elif cmd in ("/build", "/builds"):
+        if software_factory is None:
+            console.print("[yellow]Software Factory isn't available in this session.[/yellow]\n")
+        else:
+            _handle_software_factory_command(cmd, rest, software_factory)
+
     else:
         console.print(f"[yellow]Unknown command: {command}. Type /help.[/yellow]\n")
 
     return True
 
 
-async def chat_loop(agent: Agent, provider_name: str) -> None:
+class FactoryContext:
+    """Dependencies the Agent Factory slash commands need. Built once in
+    main() and threaded through to handle_slash()."""
+
+    def __init__(self, repo, provider, registry, background_tasks: set, watcher=None) -> None:
+        self.repo = repo
+        self.provider = provider
+        self.registry = registry
+        self.background_tasks = background_tasks
+        self.watcher = watcher
+
+
+def _handle_factory_command(cmd: str, rest: str, factory: "FactoryContext") -> None:
+    from agent.factory.pipeline import SpawnCapExceeded, resume_spawn, start_spawn
+    from agent.factory.storage import AWAITING_APPROVAL
+
+    if cmd == "/spawn":
+        role = rest.strip()
+        if not role:
+            console.print("[yellow]Usage: /spawn <role description>[/yellow]\n")
+            return
+        try:
+            task_id = start_spawn(
+                role,
+                factory.repo,
+                factory.provider,
+                factory.registry,
+                factory.registry.names(),
+                factory.registry.factory_allowed_names(),
+                background_tasks=factory.background_tasks,
+            )
+        except SpawnCapExceeded as e:
+            console.print(f"[yellow]{e}[/yellow]\n")
+        else:
+            console.print(
+                f"[dim]Spawn task #{task_id} started — researching in the background. "
+                f"Check /pending shortly.[/dim]\n"
+            )
+
+    elif cmd == "/pending":
+        tasks = factory.repo.list_pending_approval()
+        if not tasks:
+            console.print("[dim]No spawn tasks awaiting approval.[/dim]\n")
+        else:
+            console.print("\n[dim]── Awaiting approval ──[/dim]")
+            for t in tasks:
+                console.print(
+                    f"  [bold]#{t['id']}[/bold]  slug=[bold]{t['slug']}[/bold]  "
+                    f"tools={t['tool_allowlist']}  revisions={t['revision_count']}"
+                )
+                console.print(f"    role: {t['role_description'][:150]}")
+                console.print(f"    prompt: {t['system_prompt'][:200]}")
+            console.print("[dim]───────────────────────[/dim]\n")
+
+    elif cmd == "/approve":
+        task_id_str = rest.strip()
+        if not task_id_str.isdigit():
+            console.print("[yellow]Usage: /approve <id>[/yellow]\n")
+            return
+        try:
+            agent_id = factory.repo.approve(int(task_id_str))
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]\n")
+        else:
+            if factory.watcher is not None:
+                factory.watcher.sync_once()
+            console.print(f"[green]Approved — spawned agent #{agent_id} is now live.[/green]\n")
+
+    elif cmd == "/reject":
+        reject_parts = rest.split(maxsplit=1)
+        if len(reject_parts) < 2 or not reject_parts[0].isdigit():
+            console.print("[yellow]Usage: /reject <id> <feedback>[/yellow]\n")
+            return
+        task_id = int(reject_parts[0])
+        feedback = reject_parts[1]
+        task = factory.repo.get_spawn_task(task_id)
+        if task is None or task["status"] != AWAITING_APPROVAL:
+            console.print(f"[red]Spawn task {task_id} isn't awaiting approval.[/red]\n")
+            return
+        status = factory.repo.reject(task_id, feedback)
+        if status == "PENDING":
+            resume_spawn(
+                task_id,
+                factory.repo,
+                factory.provider,
+                factory.registry,
+                factory.registry.names(),
+                factory.registry.factory_allowed_names(),
+                background_tasks=factory.background_tasks,
+            )
+            console.print(f"[dim]Rejected — revising spawn task #{task_id} in the background.[/dim]\n")
+        else:  # FAILED — revision cap hit
+            console.print(f"[red]Spawn task #{task_id} failed: max revision rounds exceeded.[/red]\n")
+
+
+class SoftwareFactoryContext:
+    """Dependencies the Software Factory slash commands need. Built once in
+    main() and threaded through to handle_slash()."""
+
+    def __init__(self, repo, provider, settings, background_tasks: set, usage_repo=None) -> None:
+        self.repo = repo
+        self.provider = provider
+        self.settings = settings
+        self.background_tasks = background_tasks
+        self.usage_repo = usage_repo
+
+
+def _handle_software_factory_command(cmd: str, rest: str, sf: "SoftwareFactoryContext") -> None:
+    from agent.factory.software.pipeline import BudgetCapExceeded, BuildCapExceeded, FactoryPaused, start_build
+
+    if cmd == "/build":
+        description = rest.strip()
+        if not description:
+            console.print("[yellow]Usage: /build <description>[/yellow]\n")
+            return
+        try:
+            task_id = start_build(
+                description, sf.repo, sf.provider, sf.settings,
+                background_tasks=sf.background_tasks, usage_repo=sf.usage_repo,
+            )
+        except (FactoryPaused, BuildCapExceeded, BudgetCapExceeded) as e:
+            console.print(f"[yellow]{e}[/yellow]\n")
+        else:
+            console.print(
+                f"[dim]Build task #{task_id} started — building in the background. "
+                f"Check /builds shortly.[/dim]\n"
+            )
+
+    elif cmd == "/builds":
+        tasks = sf.repo.list_recent_builds()
+        if not tasks:
+            console.print("[dim]No builds yet.[/dim]\n")
+        else:
+            console.print("\n[dim]── Recent builds ──[/dim]")
+            for t in tasks:
+                console.print(
+                    f"  [bold]#{t['id']}[/bold]  status=[bold]{t['status']}[/bold]  "
+                    f"slug={t['slug']}  retries={t['retry_count']}"
+                )
+                console.print(f"    brief: {t['description'][:150]}")
+                if t["status"] == "FAILED" and t["failure_reason"]:
+                    console.print(f"    [red]reason: {t['failure_reason'][:200]}[/red]")
+            console.print("[dim]───────────────────[/dim]\n")
+
+
+async def chat_loop(
+    agent: Agent,
+    provider_name: str,
+    factory: "FactoryContext | None" = None,
+    software_factory: "SoftwareFactoryContext | None" = None,
+) -> None:
     """The main REPL. Runs until the user quits."""
     print_banner(provider_name, agent.provider.model_name)
 
@@ -121,7 +312,7 @@ async def chat_loop(agent: Agent, provider_name: str) -> None:
 
             # ── Slash commands ────────────────────────────────────────────
             if user_input.startswith("/"):
-                should_continue = handle_slash(user_input, agent, provider_name)
+                should_continue = handle_slash(user_input, agent, provider_name, factory, software_factory)
                 if not should_continue:
                     break
                 continue
@@ -182,11 +373,13 @@ async def main() -> None:
         sys.exit(1)
 
     # Wire cost tracking (best-effort: never block startup on it).
+    usage_repo = None
     try:
         from agent.cost.recorder import set_usage_repo
         from agent.cost.storage import UsageRepo
 
-        set_usage_repo(UsageRepo())
+        usage_repo = UsageRepo()
+        set_usage_repo(usage_repo)
     except Exception as e:  # noqa: BLE001
         console.print(f"[dim]Cost tracking unavailable ({e}); continuing.[/dim]")
 
@@ -194,12 +387,63 @@ async def main() -> None:
     from agent.config import get_settings
     from agent.tools.registry import build_registry
 
-    registry = build_registry(get_settings())
+    settings = get_settings()
+    registry = build_registry(settings)
     if registry.names():
         console.print(f"[dim]Registered {len(registry.names())} tools: {', '.join(registry.names())}[/dim]")
 
+    # Shared strong-ref set for every background task spawned below — a bare
+    # asyncio.create_task() result is only weakly referenced, so without this
+    # the task can be garbage-collected mid-flight.
+    background_tasks: set = set()
+
+    # Agent Factory: best-effort, like cost tracking — a broken factory.db
+    # shouldn't stop Sean from having a normal conversation.
+    factory = None
+    try:
+        from agent.factory.dispatch import RegistryWatcher
+        from agent.factory.storage import FactoryRepo
+
+        repo = FactoryRepo()
+        watcher = RegistryWatcher(repo, provider, registry)
+        watcher.sync_once()  # agents approved in a prior session are live immediately
+        watcher_task = asyncio.create_task(watcher.run_forever())
+        background_tasks.add(watcher_task)
+        watcher_task.add_done_callback(background_tasks.discard)
+
+        factory = FactoryContext(
+            repo=repo, provider=provider, registry=registry,
+            background_tasks=background_tasks, watcher=watcher,
+        )
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[dim]Agent Factory unavailable ({e}); continuing.[/dim]")
+
+    # Software Factory: same best-effort posture — a broken software_factory.db
+    # shouldn't stop a normal conversation either. The autonomous scheduler
+    # only starts ticking if TRILLION_FACTORY_AUTONOMOUS_THEMES is set.
+    software_factory = None
+    try:
+        from agent.factory.software.scheduler import AutonomousScheduler
+        from agent.factory.software.storage import BuildRepo
+
+        sf_repo = BuildRepo()
+        software_factory = SoftwareFactoryContext(
+            repo=sf_repo, provider=provider, settings=settings,
+            background_tasks=background_tasks, usage_repo=usage_repo,
+        )
+        if settings.factory_autonomous_themes:
+            scheduler = AutonomousScheduler(
+                sf_repo, provider, settings,
+                background_tasks=background_tasks, usage_repo=usage_repo,
+            )
+            scheduler_task = asyncio.create_task(scheduler.run_forever())
+            background_tasks.add(scheduler_task)
+            scheduler_task.add_done_callback(background_tasks.discard)
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[dim]Software Factory unavailable ({e}); continuing.[/dim]")
+
     agent = Agent(provider=provider, tool_registry=registry)
-    await chat_loop(agent, provider_name=args.provider)
+    await chat_loop(agent, provider_name=args.provider, factory=factory, software_factory=software_factory)
 
 
 if __name__ == "__main__":

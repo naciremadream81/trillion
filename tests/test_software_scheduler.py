@@ -1,0 +1,159 @@
+"""
+Tests for the Software Factory's autonomous scheduler
+(agent/factory/software/scheduler.py) — the self-initiated build path.
+
+This is the load-bearing safety surface for the "fully autonomous, no
+per-run approval" design: a tick must never call the provider (i.e. never
+propose a project) once the kill switch, an unset themes list, or the
+daily build cap already rules a build out. Mirrors
+tests/test_factory_dispatch.py's TestRegistryWatcher structure.
+
+Run from the project root:
+    python -m unittest tests.test_software_scheduler
+"""
+
+import asyncio
+import os
+import tempfile
+import unittest
+
+from agent.config import Settings
+from agent.factory.software.scheduler import AutonomousScheduler
+from agent.factory.software.storage import BUILT, BuildRepo
+from agent.providers.base import BaseProvider, ProviderResponse, TextChunk, TokenUsage
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+VALID_PLAN_REPLY = (
+    '{"project_name": "daily-tool", "tech_stack": "python", '
+    '"files": ["main.py"], "entry_point": "main.py", '
+    '"test_command": "", "summary": "A small autonomous project."}'
+)
+
+
+class FakeProvider(BaseProvider):
+    def __init__(self, replies):
+        self._replies = list(replies)
+        self.call_count = 0
+
+    @property
+    def model_name(self):
+        return "fake-model"
+
+    async def stream(self, messages, system, tools=None):
+        self.call_count += 1
+        text = self._replies.pop(0) if self._replies else "CODING_COMPLETE"
+        yield TextChunk(text=text)
+        yield ProviderResponse(text=text, tool_calls=[], usage=TokenUsage(), model=self.model_name)
+
+
+class ExplodingProvider(BaseProvider):
+    """Raises on any call — proves a gated tick never reaches proposal."""
+
+    @property
+    def model_name(self):
+        return "exploding-model"
+
+    async def stream(self, messages, system, tools=None):
+        raise AssertionError("provider should never be called when a tick is gated")
+        yield  # pragma: no cover — makes this an async generator
+
+
+class TestAutonomousScheduler(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmp, "software_factory.db")
+        self.repo = BuildRepo(db_path=self.db_path)
+
+    def tearDown(self):
+        try:
+            os.remove(self.db_path)
+        except FileNotFoundError:
+            pass
+
+    def _settings(self, **overrides):
+        kwargs = dict(
+            software_factory_root=os.path.join(self.tmp, "generated-projects"),
+            factory_daily_build_cap=3,
+            factory_daily_budget_usd=None,
+            factory_paused=False,
+            factory_autonomous_themes=["cli productivity tools"],
+            factory_autonomous_interval_hours=24.0,
+        )
+        kwargs.update(overrides)
+        return Settings(**kwargs)
+
+    def test_tick_skips_when_paused_without_touching_provider(self):
+        settings = self._settings(factory_paused=True)
+        scheduler = AutonomousScheduler(
+            self.repo, ExplodingProvider(), settings, background_tasks=set()
+        )
+        run(scheduler.tick_once())
+        self.assertEqual(self.repo.count_builds_today(), 0)
+
+    def test_tick_skips_when_themes_unset_without_touching_provider(self):
+        settings = self._settings(factory_autonomous_themes=[])
+        scheduler = AutonomousScheduler(
+            self.repo, ExplodingProvider(), settings, background_tasks=set()
+        )
+        run(scheduler.tick_once())
+        self.assertEqual(self.repo.count_builds_today(), 0)
+
+    def test_tick_skips_when_build_cap_already_reached_without_touching_provider(self):
+        settings = self._settings(factory_daily_build_cap=1)
+        self.repo.create_build_task("filler")
+        scheduler = AutonomousScheduler(
+            self.repo, ExplodingProvider(), settings, background_tasks=set()
+        )
+        run(scheduler.tick_once())
+        self.assertEqual(self.repo.count_builds_today(), 1)
+
+    def test_tick_proposes_and_starts_a_build_when_clear(self):
+        settings = self._settings()
+        provider = FakeProvider(["Build a CLI todo list manager.", VALID_PLAN_REPLY, "CODING_COMPLETE"])
+        bg = set()
+        scheduler = AutonomousScheduler(self.repo, provider, settings, background_tasks=bg)
+
+        async def scenario():
+            await scheduler.tick_once()
+            self.assertEqual(len(bg), 1)
+            await asyncio.gather(*bg)
+
+        run(scenario())
+        self.assertEqual(self.repo.count_builds_today(), 1)
+        task = self.repo.get_build_task(1)
+        self.assertEqual(task["status"], BUILT)
+        self.assertEqual(task["created_by"], "factory-auto")
+
+    def test_tick_skips_when_proposal_is_empty(self):
+        settings = self._settings()
+        provider = FakeProvider(["   "])
+        scheduler = AutonomousScheduler(self.repo, provider, settings, background_tasks=set())
+        run(scheduler.tick_once())
+        self.assertEqual(self.repo.count_builds_today(), 0)
+
+    def test_tick_swallows_a_cap_race_between_check_and_start(self):
+        # Simulate a concurrent /build exhausting the cap between tick_once's
+        # own pre-check and its call to start_build() — should log and
+        # return, not raise.
+        settings = self._settings(factory_daily_build_cap=1)
+        provider = FakeProvider(["Build a CLI todo list manager."])
+        scheduler = AutonomousScheduler(self.repo, provider, settings, background_tasks=set())
+
+        real_propose = scheduler.propose_brief
+
+        async def propose_then_fill_cap():
+            brief = await real_propose()
+            self.repo.create_build_task("a concurrent /build got here first")
+            return brief
+
+        scheduler.propose_brief = propose_then_fill_cap
+        run(scheduler.tick_once())  # must not raise
+        self.assertEqual(self.repo.count_builds_today(), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -45,6 +45,9 @@ usage.db
 *.ogg
 /tmp/
 
+# Software Factory build output — generated projects, not source
+generated-projects/
+
 # Piper voice models (large binary downloads, not source — see HANDOFF.md
 # for the download command)
 voices/*.onnx
