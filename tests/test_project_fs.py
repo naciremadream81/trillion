@@ -104,18 +104,18 @@ class TestRunProjectTests(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_successful_command_reports_exit_code_zero(self):
-        result = run(self.tool.run(command="echo hello"))
+        result = run(self.tool.run(command="python3 -c \"print('hello')\""))
         self.assertIn("exit_code=0", result)
         self.assertIn("hello", result)
 
     def test_failing_command_reports_nonzero_exit_code(self):
-        result = run(self.tool.run(command="exit 1"))
+        result = run(self.tool.run(command="python3 -c \"import sys; sys.exit(1)\""))
         self.assertIn("exit_code=1", result)
 
     def test_runs_from_project_directory(self):
         with open(os.path.join(self.tmp, "marker.txt"), "w") as f:
             f.write("here")
-        result = run(self.tool.run(command="cat marker.txt"))
+        result = run(self.tool.run(command="python3 -c \"print(open('marker.txt').read())\""))
         self.assertIn("here", result)
 
     def test_timeout_is_enforced(self):
@@ -124,7 +124,7 @@ class TestRunProjectTests(unittest.TestCase):
         original = project_fs.TEST_TIMEOUT_SECONDS
         project_fs.TEST_TIMEOUT_SECONDS = 0.2
         try:
-            result = run(self.tool.run(command="sleep 5"))
+            result = run(self.tool.run(command="python3 -c \"import time; time.sleep(5)\""))
             self.assertIn("timed out", result)
         finally:
             project_fs.TEST_TIMEOUT_SECONDS = original
@@ -132,6 +132,29 @@ class TestRunProjectTests(unittest.TestCase):
     def test_empty_command_rejected(self):
         result = run(self.tool.run(command="   "))
         self.assertIn("rejected", result)
+
+    def test_disallowed_executable_is_rejected_without_running(self):
+        result = run(self.tool.run(command="rm -rf /"))
+        self.assertIn("rejected", result)
+        self.assertIn("not an allowed test runner", result)
+
+    def test_shell_metacharacters_are_not_interpreted(self):
+        # No shell is involved, so "&&", "|", etc. are just inert argv to
+        # python3's -c script, never a second command.
+        result = run(self.tool.run(command="python3 -c \"print(1)\" && rm -rf /"))
+        self.assertIn("exit_code=0", result)
+        self.assertTrue(os.path.exists(self.tmp))  # "rm -rf /" never ran
+
+    def test_env_is_scrubbed_of_secrets(self):
+        os.environ["_TEST_PROJECT_FS_SECRET"] = "super-secret-value"
+        try:
+            result = run(self.tool.run(
+                command="python3 -c \"import os; print(os.environ.get('_TEST_PROJECT_FS_SECRET', 'MISSING'))\""
+            ))
+        finally:
+            del os.environ["_TEST_PROJECT_FS_SECRET"]
+        self.assertIn("MISSING", result)
+        self.assertNotIn("super-secret-value", result)
 
 
 if __name__ == "__main__":

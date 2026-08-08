@@ -18,11 +18,36 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 
 from .base import BaseTool
 
 MAX_READ_CHARS = 20_000
 TEST_TIMEOUT_SECONDS = 60
+
+# Test commands run with no shell (no &&, |, `` ` ``, redirection, or env-var
+# expansion — argv only) and only these executables, so a planned
+# test_command that goes off the rails can't turn "run the tests" into
+# arbitrary shell access. Broad enough to cover the common single-language
+# toolchains a planned tech_stack is likely to name.
+ALLOWED_TEST_EXECUTABLES = {
+    "pytest", "python", "python3",
+    "npm", "npx", "yarn", "pnpm", "node",
+    "go", "cargo", "make",
+    "mvn", "gradle", "rspec", "ruby",
+}
+
+# Only what a normal build toolchain needs to find its interpreter and write
+# its cache/config files — deliberately excludes everything else the parent
+# process has (API keys, tokens, etc.) so a test command can't read or leak
+# secrets it was never given.
+_ENV_PASSTHROUGH = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM")
+
+
+def _scrubbed_env() -> dict:
+    env = {k: os.environ[k] for k in _ENV_PASSTHROUGH if k in os.environ}
+    env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    return env
 
 
 class PathEscape(ValueError):
@@ -122,7 +147,14 @@ class RunProjectTestsTool(BaseTool):
     input_schema = {
         "type": "object",
         "properties": {
-            "command": {"type": "string", "description": "The shell command to run, e.g. 'pytest'."},
+            "command": {
+                "type": "string",
+                "description": (
+                    "The test runner command to run, e.g. 'pytest'. Runs as "
+                    "argv (no shell) and must start with one of: "
+                    + ", ".join(sorted(ALLOWED_TEST_EXECUTABLES))
+                ),
+            },
         },
         "required": ["command"],
     }
@@ -134,9 +166,22 @@ class RunProjectTestsTool(BaseTool):
     async def run(self, command: str = "", **_) -> str:
         if not command.strip():
             return "[run_project_tests rejected: empty command]"
-        proc = await asyncio.create_subprocess_shell(
-            command,
+        try:
+            argv = shlex.split(command)
+        except ValueError as e:
+            return f"[run_project_tests rejected: could not parse command: {e}]"
+        if not argv:
+            return "[run_project_tests rejected: empty command]"
+        executable = os.path.basename(argv[0])
+        if executable not in ALLOWED_TEST_EXECUTABLES:
+            return (
+                f"[run_project_tests rejected: {executable!r} is not an allowed "
+                f"test runner — allowed: {', '.join(sorted(ALLOWED_TEST_EXECUTABLES))}]"
+            )
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
             cwd=self.project_dir,
+            env=_scrubbed_env(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )

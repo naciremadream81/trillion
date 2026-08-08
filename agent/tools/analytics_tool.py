@@ -32,7 +32,7 @@ MAX_ROWS = 200
 # reaches the database (the role can't write anyway — this is the second layer).
 _ALLOWED_PREFIXES = ("select", "with")
 _FORBIDDEN = re.compile(
-    r"\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|copy|call|do|vacuum|merge)\b",
+    r"\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|copy|call|do|vacuum|merge|into)\b",
     re.IGNORECASE,
 )
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")

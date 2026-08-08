@@ -49,6 +49,11 @@ class TestValidator(unittest.TestCase):
         # 'created_at' contains 'create' but must not trip the write-keyword guard.
         self.assertTrue(validate_sql("SELECT created_at FROM contacts"))
 
+    def test_rejects_select_into(self):
+        # SELECT ... INTO creates a table — a write, even though it starts with SELECT.
+        with self.assertRaises(ValueError):
+            validate_sql("SELECT * INTO new_table FROM contacts")
+
 
 class FakeTool(QueryAnalyticsTool):
     """Overrides _fetch so run() can be tested without a database."""
