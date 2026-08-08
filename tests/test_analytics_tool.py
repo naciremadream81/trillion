@@ -54,6 +54,18 @@ class TestValidator(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_sql("SELECT * INTO new_table FROM contacts")
 
+    def test_into_inside_string_literal_is_not_a_false_positive(self):
+        sql = "SELECT 'into' AS direction"
+        self.assertEqual(validate_sql(sql), sql)
+
+    def test_into_inside_quoted_identifier_is_not_a_false_positive(self):
+        sql = 'SELECT "into" FROM t'
+        self.assertEqual(validate_sql(sql), sql)
+
+    def test_into_inside_comment_is_not_a_false_positive(self):
+        sql = "SELECT 1 /* into */"
+        self.assertEqual(validate_sql(sql), sql)
+
 
 class FakeTool(QueryAnalyticsTool):
     """Overrides _fetch so run() can be tested without a database."""

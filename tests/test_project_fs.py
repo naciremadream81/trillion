@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import unittest
 
+import agent.tools.project_fs as project_fs
 from agent.tools.project_fs import (
     PathEscape,
     ReadProjectFileTool,
@@ -19,6 +20,8 @@ from agent.tools.project_fs import (
     WriteProjectFileTool,
     resolve_in_sandbox,
 )
+
+_HAS_BWRAP = bool(project_fs._BWRAP)
 
 
 def run(coro):
@@ -95,6 +98,7 @@ class TestWriteAndReadProjectFile(unittest.TestCase):
         self.assertLess(len(content), MAX_READ_CHARS + 500)
 
 
+@unittest.skipUnless(_HAS_BWRAP, "bubblewrap (bwrap) not installed — sandboxed execution unavailable")
 class TestRunProjectTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -119,8 +123,6 @@ class TestRunProjectTests(unittest.TestCase):
         self.assertIn("here", result)
 
     def test_timeout_is_enforced(self):
-        import agent.tools.project_fs as project_fs
-
         original = project_fs.TEST_TIMEOUT_SECONDS
         project_fs.TEST_TIMEOUT_SECONDS = 0.2
         try:
@@ -155,6 +157,48 @@ class TestRunProjectTests(unittest.TestCase):
             del os.environ["_TEST_PROJECT_FS_SECRET"]
         self.assertIn("MISSING", result)
         self.assertNotIn("super-secret-value", result)
+
+    def test_sandbox_blocks_reading_files_outside_project_dir(self):
+        # A general-purpose interpreter can always try a relative-path escape
+        # — an allowlisted executable name alone can't stop that. Only the
+        # bwrap jail (no bind for anything above project_dir) does.
+        parent = os.path.dirname(self.tmp)
+        secret_path = os.path.join(parent, "outside-secret.txt")
+        with open(secret_path, "w") as f:
+            f.write("super-secret-value")
+        try:
+            result = run(self.tool.run(
+                command="python3 -c \"print(open('../outside-secret.txt').read())\""
+            ))
+        finally:
+            os.remove(secret_path)
+        self.assertNotIn("super-secret-value", result)
+        self.assertNotEqual("exit_code=0", result.splitlines()[0])
+
+    def test_missing_runner_is_reported_as_ordinary_failure_not_raised(self):
+        # rspec is allowlisted but not installed in this environment — this
+        # must come back as a normal nonzero-exit result, not an uncaught
+        # exception that the build pipeline would treat as a hard FAILED.
+        result = run(self.tool.run(command="rspec spec/"))
+        self.assertNotIn("rejected", result)
+        self.assertNotIn("exit_code=0", result)
+
+
+class TestRunProjectTestsWithoutSandbox(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.tool = RunProjectTestsTool(self.tmp)
+        self._original_bwrap = project_fs._BWRAP
+        project_fs._BWRAP = None
+
+    def tearDown(self):
+        project_fs._BWRAP = self._original_bwrap
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_refuses_to_run_unsandboxed(self):
+        result = run(self.tool.run(command="python3 -c \"print('hello')\""))
+        self.assertIn("rejected", result)
+        self.assertIn("no sandbox available", result)
 
 
 if __name__ == "__main__":

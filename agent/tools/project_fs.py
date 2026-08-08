@@ -7,11 +7,17 @@ intersection; in practice they're also constructed fresh per build and
 injected only into the CODING/TESTING step's own private ToolRegistry, never
 the shared one build_registry() returns.
 
-The path-jail guard here (resolve_in_sandbox) is the one piece of security
-logic this feature needs that nothing else in the codebase provides: every
-relative_path is resolved against the build's own project directory, and
-anything that would land outside it — via an absolute path, `..` traversal,
-or a symlink — is refused rather than silently clamped.
+Two independent guards do the actual sandboxing:
+- resolve_in_sandbox() for the file tools: every relative_path is resolved
+  against the build's own project directory, and anything that would land
+  outside it — via an absolute path, `..` traversal, or a symlink — is
+  refused rather than silently clamped.
+- a bubblewrap (bwrap) jail for run_project_tests: an allowlisted executable
+  name alone doesn't stop a general-purpose interpreter from reading/writing
+  anywhere the host process can, so the test command actually runs inside an
+  unprivileged OS-level sandbox with no network, a cleared environment, and a
+  filesystem view where only the project's own directory is writable/visible
+  as anything other than the toolchain's own read-only binaries/libs.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
+import shutil
 
 from .base import BaseTool
 
@@ -40,7 +47,9 @@ ALLOWED_TEST_EXECUTABLES = {
 # Only what a normal build toolchain needs to find its interpreter and write
 # its cache/config files — deliberately excludes everything else the parent
 # process has (API keys, tokens, etc.) so a test command can't read or leak
-# secrets it was never given.
+# secrets it was never given. This is belt-and-suspenders: the bubblewrap
+# jail below (--clearenv) is what actually enforces the empty environment
+# inside the sandbox; this just keeps bwrap's own process minimal too.
 _ENV_PASSTHROUGH = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TERM")
 
 
@@ -48,6 +57,48 @@ def _scrubbed_env() -> dict:
     env = {k: os.environ[k] for k in _ENV_PASSTHROUGH if k in os.environ}
     env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
     return env
+
+
+# An allowlisted executable name is not a sandbox — python3/node/etc. are
+# general-purpose interpreters that, given cwd + a relative path, can read or
+# write anywhere the host process can (e.g. `python3 -c "open('../../.env')"`
+# from inside generated-projects/<slug>). Only an OS-level jail actually
+# bounds that. bubblewrap (unprivileged, no root needed) gives us: no
+# network, no environment except what we explicitly set, and a filesystem
+# view where the only writable, escapable-from location is the project's own
+# directory — everything else the interpreter needs (its own binary, libs)
+# is mounted read-only at its real path so toolchains "just work" without
+# being able to touch anything outside the project.
+_BWRAP = shutil.which("bwrap")
+
+# Host directories a language toolchain typically needs read access to in
+# order to run at all (its own interpreter/binaries and shared libraries).
+# Bound read-only; anything not listed here (most importantly the repo root
+# and its .env) is simply invisible inside the sandbox, not just off-limits.
+_SANDBOX_RO_BIND_CANDIDATES = ("/usr", "/bin", "/lib", "/lib64", "/lib32", "/libx32", "/sbin", "/etc/alternatives")
+
+
+def _sandbox_argv(argv: list, project_dir: str) -> list:
+    project_dir = os.path.realpath(project_dir)
+    cmd = [
+        _BWRAP,
+        "--unshare-all",
+        "--die-with-parent",
+        "--clearenv",
+        "--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin",
+        "--setenv", "HOME", "/home/sandbox",
+        "--setenv", "LANG", "C.UTF-8",
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--tmpfs", "/tmp",
+        "--dir", "/home/sandbox",
+    ]
+    for host_dir in _SANDBOX_RO_BIND_CANDIDATES:
+        if os.path.exists(host_dir):
+            cmd += ["--ro-bind", host_dir, host_dir]
+    cmd += ["--bind", project_dir, project_dir, "--chdir", project_dir]
+    cmd += ["--"] + argv
+    return cmd
 
 
 class PathEscape(ValueError):
@@ -178,13 +229,24 @@ class RunProjectTestsTool(BaseTool):
                 f"[run_project_tests rejected: {executable!r} is not an allowed "
                 f"test runner — allowed: {', '.join(sorted(ALLOWED_TEST_EXECUTABLES))}]"
             )
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=self.project_dir,
-            env=_scrubbed_env(),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
+        if not _BWRAP:
+            return (
+                "[run_project_tests rejected: no sandbox available (bubblewrap/bwrap "
+                "not installed) — refusing to run untrusted test commands unsandboxed]"
+            )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *_sandbox_argv(argv, self.project_dir),
+                env=_scrubbed_env(),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except FileNotFoundError as e:
+            # The runner itself missing inside the sandbox surfaces as a
+            # nonzero bwrap exit (a normal test failure, see below) — this
+            # only catches bwrap itself vanishing, so it's still a reported
+            # failure rather than an uncaught exception that fails the build.
+            return f"[run_project_tests failed to start: {e}]"
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=TEST_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:

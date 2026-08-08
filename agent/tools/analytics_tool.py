@@ -37,6 +37,22 @@ _FORBIDDEN = re.compile(
 )
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# Matched and blanked out before the forbidden-keyword scan, so a word like
+# "into" only trips the guard when it's actually part of the SQL — not when
+# it's sitting inside a string literal, a quoted identifier, or a comment
+# (e.g. SELECT 'into' AS direction, SELECT "into" FROM t, SELECT 1 /* into */).
+_SQL_LITERAL_OR_COMMENT = re.compile(
+    r"'(?:[^']|'')*'"      # single-quoted string literal ('' is an escaped quote)
+    r'|"(?:[^"]|"")*"'     # double-quoted identifier
+    r"|--[^\n]*"           # line comment
+    r"|/\*.*?\*/",         # block comment
+    re.DOTALL,
+)
+
+
+def _strip_literals_and_comments(sql: str) -> str:
+    return _SQL_LITERAL_OR_COMMENT.sub(" ", sql)
+
 
 def validate_sql(sql: str) -> str:
     """Return a cleaned, validated single SELECT/WITH statement, or raise ValueError."""
@@ -47,7 +63,7 @@ def validate_sql(sql: str) -> str:
         raise ValueError("Multiple statements are not allowed.")
     if not s.lower().startswith(_ALLOWED_PREFIXES):
         raise ValueError("Only SELECT / WITH queries are allowed.")
-    if _FORBIDDEN.search(s):
+    if _FORBIDDEN.search(_strip_literals_and_comments(s)):
         raise ValueError("Only read-only queries are allowed (write keyword detected).")
     return s
 
