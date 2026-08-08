@@ -984,19 +984,24 @@
       window.setStatus(STATES[si]);
     }, 3500);
 
-    // ================= Browser voice (V0: Web Speech API) =================
-    // Tap the mic → transcribe (SpeechRecognition) → stream the reply from
-    // /api/chat → speak it (speechSynthesis) → the orb reacts. No keys, no cost.
+    // ================= Browser voice (V1: Deepgram STT + Piper TTS) =================
+    // Tap the mic → record (MediaRecorder) → transcribe (/api/transcribe,
+    // Deepgram, cloud) → stream the reply from /api/chat → speak it
+    // (/api/tts, Piper — runs locally on the Pi, no API key, no cost) → the
+    // orb reacts. Push-to-talk: tap to start, tap again to stop-and-send (no
+    // built-in pause detection like V0 had, so both ends are an explicit
+    // tap now).
     clearInterval(demoTimer); // real interaction takes over from the status demo
 
     const mic  = document.getElementById('tr-mic');
     const hint = document.querySelector('.tr-mic-hint');
-    const SR    = window.SpeechRecognition || window.webkitSpeechRecognition;
-    const ttsOK = 'speechSynthesis' in window;
+    const canRecord = !!(navigator.mediaDevices && window.MediaRecorder);
     const IDLE_HINT = 'Tap to speak';
 
     let listening = false;
-    let recognition = null;
+    let mediaStream = null;
+    let mediaRecorder = null;
+    let chunks = [];
 
     function setHint(t) { if (hint) hint.textContent = t; }
     function setMic(on) {
@@ -1007,39 +1012,62 @@
       document.dispatchEvent(new CustomEvent('trillion:mic-toggle', { detail: { listening: on } }));
     }
 
-    if (!SR) setHint('Voice input unsupported here — use the terminal');
+    if (!canRecord) setHint('Voice input unsupported here — use the terminal');
     else setHint(IDLE_HINT);
 
-    function startListening() {
-      if (!SR) return;
-      if (ttsOK) window.speechSynthesis.cancel(); // barge-in: stop any speech
+    async function startListening() {
+      if (!canRecord) return;
+      cancelSpeech(); // barge-in: stop any speech playing
       try {
-        recognition = new SR();
-        recognition.lang = 'en-US';
-        recognition.interimResults = false;
-        recognition.maxAlternatives = 1;
-        recognition.onresult = (e) => {
-          const text = (e.results[0][0].transcript || '').trim();
-          if (text) { setHint('“' + text + '”'); sendToAgent(text); }
-        };
-        recognition.onerror = () => { setMic(false); setHint('Didn’t catch that — tap to retry'); };
-        recognition.onend   = () => { if (listening) setMic(false); };
-        recognition.start();
-        setMic(true);
-        setHint('Listening…');
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       } catch (err) {
-        setMic(false);
+        setHint('Mic permission denied — check browser settings');
+        return;
       }
+      chunks = [];
+      const preferred = 'audio/webm;codecs=opus';
+      const mimeType = MediaRecorder.isTypeSupported(preferred) ? preferred
+        : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '');
+      mediaRecorder = mimeType ? new MediaRecorder(mediaStream, { mimeType }) : new MediaRecorder(mediaStream);
+      mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+      mediaRecorder.onstop = onRecordingStopped;
+      mediaRecorder.start();
+      setMic(true);
+      setHint('Listening… tap to stop');
     }
+
     function stopListening() {
-      if (recognition) { try { recognition.stop(); } catch (e) {} }
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
       setMic(false);
+    }
+
+    async function onRecordingStopped() {
+      if (mediaStream) { mediaStream.getTracks().forEach((t) => t.stop()); mediaStream = null; }
+      const blob = new Blob(chunks, { type: (mediaRecorder && mediaRecorder.mimeType) || 'audio/webm' });
+      chunks = [];
+      if (blob.size < 500) { setHint(IDLE_HINT); return; } // tap-tap with no speech = cancel
+      window.setStatus('processing');
+      setHint('Transcribing…');
+      try {
+        const res = await fetch('/api/transcribe', {
+          method: 'POST',
+          headers: { 'Content-Type': blob.type },
+          body: blob,
+        });
+        const data = await res.json();
+        if (!res.ok) { setHint(data.error || 'Transcription error — tap to retry'); window.setStatus('idle'); return; }
+        const text = (data.text || '').trim();
+        if (text) { setHint('“' + text + '”'); sendToAgent(text); }
+        else { window.setStatus('idle'); setHint('Didn’t catch that — tap to retry'); }
+      } catch (err) {
+        window.setStatus('idle');
+        setHint('Connection error — is the server running?');
+      }
     }
 
     mic.addEventListener('click', () => { listening ? stopListening() : startListening(); });
 
     async function sendToAgent(text) {
-      setMic(false);                 // done listening
       window.setStatus('processing');
       setHint('Thinking…');
       let spoke = false;
@@ -1057,7 +1085,7 @@
           if (done) break;
           buf += dec.decode(value, { stream: true });
           let m;
-          // Speak complete sentences as they stream in (Tier 4 spirit).
+          // Speak complete sentences as they stream in.
           while ((m = buf.match(/[^.!?]+[.!?]+(\s|$)/))) {
             const sentence = m[0].trim();
             buf = buf.slice(m[0].length);
@@ -1071,22 +1099,57 @@
       }
       if (!spoke) {                  // sign-off / empty reply → stay silent
         window.setStatus('idle');
-        setHint(SR ? IDLE_HINT : 'Voice input unsupported here — use the terminal');
+        setHint(canRecord ? IDLE_HINT : 'Voice input unsupported here — use the terminal');
       }
     }
 
+    // Sentences are spoken through a queue so playback stays in order even
+    // if /api/tts responses for different sentences resolve out of order.
+    let speechQueue = Promise.resolve();
+    let pendingSpeech = 0;
+    let currentAudio = null;
+
     function speak(sentence) {
-      if (!ttsOK) return;
-      const u = new SpeechSynthesisUtterance(sentence);
-      u.onstart = () => { window.setVoiceBright && window.setVoiceBright(0.9); window.setStatus('processing'); };
-      u.onend = () => {
-        if (!window.speechSynthesis.speaking) {
+      pendingSpeech++;
+      speechQueue = speechQueue.then(() => synthesizeAndPlay(sentence)).catch((err) => {
+        console.log('[trillion voice] tts error:', err);
+      }).finally(() => {
+        pendingSpeech--;
+        if (pendingSpeech === 0) {
           window.setVoiceBright && window.setVoiceBright(0.0);
           window.setStatus('idle');
           setHint(IDLE_HINT);
         }
-      };
-      window.speechSynthesis.speak(u);
+      });
+    }
+
+    async function synthesizeAndPlay(sentence) {
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: sentence }),
+      });
+      if (!res.ok) { console.log('[trillion voice] tts http', res.status); return; }
+      const buf = await res.arrayBuffer();
+      const contentType = res.headers.get('Content-Type') || 'audio/wav';
+      const url = URL.createObjectURL(new Blob([buf], { type: contentType }));
+      const audio = new Audio(url);
+      currentAudio = audio;
+      window.setVoiceBright && window.setVoiceBright(0.9);
+      window.setStatus('processing');
+      await new Promise((resolve) => {
+        audio.onended = resolve;
+        audio.onerror = resolve;
+        audio.play().catch(resolve);
+      });
+      URL.revokeObjectURL(url);
+      if (currentAudio === audio) currentAudio = null;
+    }
+
+    function cancelSpeech() {
+      if (currentAudio) { try { currentAudio.pause(); } catch (e) {} currentAudio = null; }
+      speechQueue = Promise.resolve();
+      pendingSpeech = 0;
     }
   })();
   </script>

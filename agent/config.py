@@ -64,6 +64,15 @@ class Settings:
     factory_autonomous_themes: list[str] = field(default_factory=list)
     factory_autonomous_interval_hours: float = 24.0
 
+    # Voice V1: Deepgram STT (cloud) + Piper TTS (local, offline, free).
+    # ElevenLabs' free tier blocks all API voice access — premade voices AND
+    # custom/cloned ones both require a paid plan — so TTS runs on-device
+    # instead. Empty deepgram key = STT not configured; missing Piper model
+    # file = TTS not configured. Both endpoints then 400 with a clear
+    # message instead of crashing.
+    deepgram_api_key: str = ""
+    piper_voice_path: str = "voices/en_US-amy-medium.onnx"
+
 
 def get_settings() -> Settings:
     return Settings(
@@ -74,4 +83,6 @@ def get_settings() -> Settings:
         factory_paused=_env_bool("TRILLION_FACTORY_PAUSED", False),
         factory_autonomous_themes=_env_list("TRILLION_FACTORY_AUTONOMOUS_THEMES"),
         factory_autonomous_interval_hours=_env_float("TRILLION_FACTORY_AUTONOMOUS_INTERVAL_HOURS", 24.0),
+        deepgram_api_key=os.getenv("DEEPGRAM_API_KEY", ""),
+        piper_voice_path=os.getenv("PIPER_VOICE_PATH", "voices/en_US-amy-medium.onnx"),
     )

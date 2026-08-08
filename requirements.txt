@@ -15,7 +15,6 @@ pyyaml>=6.0.1
 # Terminal UX
 rich>=13.7.0
 
-# Tier 3 additions (install when you reach voice)
-# deepgram-sdk>=3.7.0
-# elevenlabs>=1.5.0
-# pyaudio>=0.2.14       # or sounddevice>=0.4.7 on some systems
+# Voice V1: Deepgram STT is called directly over aiohttp (no SDK needed).
+# Piper TTS runs the model locally — no API key, no per-character cost.
+piper-tts>=1.4.0
