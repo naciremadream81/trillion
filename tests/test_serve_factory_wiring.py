@@ -45,7 +45,7 @@ class TestFactoryWiring(AioHTTPTestCase):
         # build_app() doesn't need real API keys or a configured tool set.
         serve_module._provider = FakeProvider()
         serve_module._registry = ToolRegistry()
-        serve_module._agent = None
+        serve_module._agent_sessions.clear()
 
         # Approve an agent directly via FactoryRepo, pointed at the same DB
         # serve.py's RegistryWatcher reads on startup — mirrors an agent
@@ -63,7 +63,7 @@ class TestFactoryWiring(AioHTTPTestCase):
         super().tearDown()
         serve_module._provider = None
         serve_module._registry = None
-        serve_module._agent = None
+        serve_module._agent_sessions.clear()
         if self._prev_db is None:
             os.environ.pop("TRILLION_FACTORY_DB", None)
         else:
