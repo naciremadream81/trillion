@@ -66,6 +66,7 @@ Copy [`.env.example`](.env.example) → `.env` and fill in secrets. The CLI and 
 | Variable | Purpose |
 |----------|---------|
 | `SUPABASE_ANALYTICS_URL` | asyncpg DSN; if set, registers the read-only analytics tool (`agent/config.py`) |
+| `BRAVE_SEARCH_API_KEY` | If set, registers the `web_search` tool (main chat) and enables the Software Factory's opportunity scout (autonomous scheduler) |
 | `TRILLION_SOFTWARE_FACTORY_ROOT` | Build output root (default `generated-projects/`; path-jailed) |
 | `TRILLION_FACTORY_DAILY_BUILD_CAP` | Hard daily build cap (default `3`) |
 | `TRILLION_FACTORY_DAILY_BUDGET_USD` | Optional hard daily $ cap for builds |
