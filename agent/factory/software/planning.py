@@ -1,7 +1,8 @@
 """
 Software Factory planning subagent: turns a (sanitized) project description
 into a structured build plan — project name, tech stack, file list, entry
-point, test command, and a one-paragraph summary.
+point, test command, a one-paragraph summary, and a tasks list (each task
+with title, description, and acceptance_criteria; max 20 tasks).
 
 Same two-shot-with-retry shape as agent/factory/research.py's
 run_research(): ask for bare JSON, validate, one corrective retry before
