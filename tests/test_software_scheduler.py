@@ -30,8 +30,14 @@ def run(coro):
 VALID_PLAN_REPLY = (
     '{"project_name": "daily-tool", "tech_stack": "python", '
     '"files": ["main.py"], "entry_point": "main.py", '
-    '"test_command": "", "summary": "A small autonomous project."}'
+    '"test_command": "", "summary": "A small autonomous project.", '
+    '"tasks": [{"title": "Implement CLI", "description": "Write main.py.", '
+    '"acceptance_criteria": "python main.py works"}]}'
 )
+
+ARCHITECTURE_REPLY = "# Architecture\n\nOne module, main.py."
+QA_PASS_REPLY = '{"result": "PASS", "feedback": "meets acceptance criteria"}'
+INTEGRATION_READY_REPLY = '{"verdict": "READY", "notes": "all good"}'
 
 
 class FakeProvider(BaseProvider):
@@ -113,7 +119,10 @@ class TestAutonomousScheduler(unittest.TestCase):
 
     def test_tick_proposes_and_starts_a_build_when_clear(self):
         settings = self._settings()
-        provider = FakeProvider(["Build a CLI todo list manager.", VALID_PLAN_REPLY, "CODING_COMPLETE"])
+        provider = FakeProvider([
+            "Build a CLI todo list manager.", VALID_PLAN_REPLY, ARCHITECTURE_REPLY,
+            "CODING_COMPLETE", QA_PASS_REPLY, INTEGRATION_READY_REPLY,
+        ])
         bg = set()
         scheduler = AutonomousScheduler(self.repo, provider, settings, background_tasks=bg)
 
