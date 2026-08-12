@@ -4,18 +4,20 @@ Tests for the Software Factory's autonomous scheduler
 
 This is the load-bearing safety surface for the "fully autonomous, no
 per-run approval" design: a tick must never call the provider (i.e. never
-propose a project) once the kill switch, an unset themes list, or the
-daily build cap already rules a build out. Mirrors
-tests/test_factory_dispatch.py's TestRegistryWatcher structure.
+run the opportunity scout) once the kill switch, an unset themes list, a
+missing search API key, or the daily build cap already rules a build out.
+Mirrors tests/test_factory_dispatch.py's TestRegistryWatcher structure.
 
 Run from the project root:
     python -m unittest tests.test_software_scheduler
 """
 
 import asyncio
+import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from agent.config import Settings
 from agent.factory.software.scheduler import AutonomousScheduler
@@ -39,6 +41,19 @@ ARCHITECTURE_REPLY = "# Architecture\n\nOne module, main.py."
 QA_PASS_REPLY = '{"result": "PASS", "feedback": "meets acceptance criteria"}'
 INTEGRATION_READY_REPLY = '{"verdict": "READY", "notes": "all good"}'
 
+SCOUT_REPORT_REPLY = json.dumps({
+    "candidates": [
+        {
+            "problem": f"Problem {i}",
+            "evidence": f"Evidence {i}",
+            "source_url": f"https://example.com/{i}",
+        }
+        for i in range(5)
+    ],
+    "selected_index": 2,
+    "selection_reasoning": "Clear evidence and a small, buildable scope.",
+})
+
 
 class FakeProvider(BaseProvider):
     def __init__(self, replies):
@@ -57,7 +72,7 @@ class FakeProvider(BaseProvider):
 
 
 class ExplodingProvider(BaseProvider):
-    """Raises on any call — proves a gated tick never reaches proposal."""
+    """Raises on any call — proves a gated tick never reaches the scout."""
 
     @property
     def model_name(self):
@@ -88,6 +103,7 @@ class TestAutonomousScheduler(unittest.TestCase):
             factory_paused=False,
             factory_autonomous_themes=["cli productivity tools"],
             factory_autonomous_interval_hours=24.0,
+            brave_search_api_key="fake-brave-key",
         )
         kwargs.update(overrides)
         return Settings(**kwargs)
@@ -108,6 +124,14 @@ class TestAutonomousScheduler(unittest.TestCase):
         run(scheduler.tick_once())
         self.assertEqual(self.repo.count_builds_today(), 0)
 
+    def test_tick_skips_when_search_key_not_configured_without_touching_provider(self):
+        settings = self._settings(brave_search_api_key="")
+        scheduler = AutonomousScheduler(
+            self.repo, ExplodingProvider(), settings, background_tasks=set()
+        )
+        run(scheduler.tick_once())
+        self.assertEqual(self.repo.count_builds_today(), 0)
+
     def test_tick_skips_when_build_cap_already_reached_without_touching_provider(self):
         settings = self._settings(factory_daily_build_cap=1)
         self.repo.create_build_task("filler")
@@ -117,10 +141,10 @@ class TestAutonomousScheduler(unittest.TestCase):
         run(scheduler.tick_once())
         self.assertEqual(self.repo.count_builds_today(), 1)
 
-    def test_tick_proposes_and_starts_a_build_when_clear(self):
+    def test_tick_researches_and_starts_a_build_when_clear(self):
         settings = self._settings()
         provider = FakeProvider([
-            "Build a CLI todo list manager.", VALID_PLAN_REPLY, ARCHITECTURE_REPLY,
+            SCOUT_REPORT_REPLY, VALID_PLAN_REPLY, ARCHITECTURE_REPLY,
             "CODING_COMPLETE", QA_PASS_REPLY, INTEGRATION_READY_REPLY,
         ])
         bg = set()
@@ -136,10 +160,12 @@ class TestAutonomousScheduler(unittest.TestCase):
         task = self.repo.get_build_task(1)
         self.assertEqual(task["status"], BUILT)
         self.assertEqual(task["created_by"], "factory-auto")
+        self.assertIn("Problem 2", task["description"])
+        self.assertIn("Clear evidence", task["description"])
 
-    def test_tick_skips_when_proposal_is_empty(self):
+    def test_tick_skips_when_opportunity_scout_fails(self):
         settings = self._settings()
-        provider = FakeProvider(["   "])
+        provider = FakeProvider(["not json", "still not json"])
         scheduler = AutonomousScheduler(self.repo, provider, settings, background_tasks=set())
         run(scheduler.tick_once())
         self.assertEqual(self.repo.count_builds_today(), 0)
@@ -149,18 +175,25 @@ class TestAutonomousScheduler(unittest.TestCase):
         # own pre-check and its call to start_build() — should log and
         # return, not raise.
         settings = self._settings(factory_daily_build_cap=1)
-        provider = FakeProvider(["Build a CLI todo list manager."])
-        scheduler = AutonomousScheduler(self.repo, provider, settings, background_tasks=set())
+        provider = FakeProvider([])  # never actually consulted — the scout call is patched below
 
-        real_propose = scheduler.propose_brief
-
-        async def propose_then_fill_cap():
-            brief = await real_propose()
+        async def fake_scout_then_fill_cap(themes, provider, api_key):
             self.repo.create_build_task("a concurrent /build got here first")
-            return brief
+            return {
+                "candidates": [
+                    {"problem": "p", "evidence": "e", "source_url": "https://example.com"}
+                    for _ in range(5)
+                ],
+                "selected_index": 0,
+                "selection_reasoning": "reasoning",
+            }
 
-        scheduler.propose_brief = propose_then_fill_cap
-        run(scheduler.tick_once())  # must not raise
+        scheduler = AutonomousScheduler(self.repo, provider, settings, background_tasks=set())
+        with patch(
+            "agent.factory.software.scheduler.run_opportunity_scout",
+            new=fake_scout_then_fill_cap,
+        ):
+            run(scheduler.tick_once())  # must not raise
         self.assertEqual(self.repo.count_builds_today(), 1)
 
 

@@ -1,8 +1,9 @@
 """
-Autonomous scheduler: on an interval, proposes a project brief constrained to
-Sean's own configured themes (TRILLION_FACTORY_AUTONOMOUS_THEMES) and starts a
-build via the exact same start_build() the /build command uses — no separate
-code path for self-initiated vs. requested builds past the one proposal step.
+Autonomous scheduler: on an interval, researches real problems within Sean's
+own configured themes (TRILLION_FACTORY_AUTONOMOUS_THEMES) via the
+opportunity scout, then starts a build via the exact same start_build() the
+/build command uses — no separate code path for self-initiated vs. requested
+builds past the one research-and-select step.
 
 Same run_forever()/poll-and-reconcile idiom as
 agent/factory/dispatch.py's RegistryWatcher: main.py and serve.py are
@@ -15,29 +16,33 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from ...core import Agent
+from .opportunity_scout import OpportunityScoutError, run_opportunity_scout
 from .pipeline import BudgetCapExceeded, BuildCapExceeded, FactoryPaused, start_build
 
 logger = logging.getLogger(__name__)
 
 
-def _proposal_system_prompt(themes: list[str]) -> str:
+def _render_brief(report: dict) -> str:
+    """Turn a validated opportunity-scout report into the build's
+    description text — folds the chosen candidate and why it was picked
+    into the one field /builds and each project's README already surface,
+    rather than adding new storage for it."""
+    candidate = report["candidates"][report["selected_index"]]
     return (
-        "You are the Trillion Software Factory's autonomous project scout. "
-        "Sean has authorized self-initiated builds within these themes only: "
-        f"{', '.join(themes)}. Propose exactly one small, concretely scoped "
-        "software project that fits within one of these themes. Reply with "
-        "ONLY a one-to-three sentence project brief, no preamble, no options "
-        "list — a single project."
+        f"{candidate['problem']}\n\n"
+        f"Why this one: {report['selection_reasoning']}\n\n"
+        f"(Source: {candidate['source_url']})"
     )
 
 
 class AutonomousScheduler:
     """
-    Ticks on settings.factory_autonomous_interval_hours. Each tick: checks the
-    kill switch and both hard caps first (no LLM call if either is already
-    blocking), proposes one project brief via a single LLM call constrained
-    to factory_autonomous_themes, then calls start_build() with it.
+    Ticks on settings.factory_autonomous_interval_hours. Each tick: checks
+    the kill switch, the themes, the search-tool config, and the daily
+    build cap first (no LLM/search calls if any of those is already
+    blocking), runs the opportunity scout to research and select one
+    project idea constrained to factory_autonomous_themes, then calls
+    start_build() with it.
     """
 
     def __init__(self, repo, provider, settings, *, background_tasks: set, usage_repo=None) -> None:
@@ -47,26 +52,27 @@ class AutonomousScheduler:
         self.background_tasks = background_tasks
         self.usage_repo = usage_repo
 
-    async def propose_brief(self) -> str | None:
-        agent = Agent(provider=self.provider, tool_registry=None)
-        agent.system = _proposal_system_prompt(self.settings.factory_autonomous_themes)
-        reply = ""
-        async for chunk in agent.turn("Propose today's project."):
-            reply += chunk
-        reply = reply.strip()
-        return reply or None
-
     async def tick_once(self) -> None:
         if self.settings.factory_paused:
             return
         if not self.settings.factory_autonomous_themes:
             return  # autonomous triggering is off; on-demand /build is unaffected
+        if not self.settings.brave_search_api_key:
+            # No fallback to a non-researched guess — skip rather than degrade.
+            logger.info("autonomous scheduler skipped a tick: BRAVE_SEARCH_API_KEY not configured")
+            return
         if self.repo.count_builds_today() >= self.settings.factory_daily_build_cap:
             return
 
-        brief = await self.propose_brief()
-        if not brief:
+        try:
+            report = await run_opportunity_scout(
+                self.settings.factory_autonomous_themes, self.provider, self.settings.brave_search_api_key
+            )
+        except OpportunityScoutError as e:
+            logger.info("autonomous scheduler skipped a tick: opportunity scout failed: %s", e)
             return
+
+        brief = _render_brief(report)
 
         try:
             start_build(
