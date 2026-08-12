@@ -8,7 +8,9 @@ Run from the project root:
 import asyncio
 import unittest
 
-from agent.tools.web_search import MAX_RESULT_CHARS, WebSearchTool
+import aiohttp
+
+from agent.tools.web_search import MAX_RESULT_CHARS, REQUEST_TIMEOUT, WebSearchTool
 
 
 def run(coro):
@@ -71,6 +73,11 @@ class TestWebSearchTool(unittest.TestCase):
         result = run(tool.run(query="example"))
         self.assertIn("truncated", result)
         self.assertLess(len(result), MAX_RESULT_CHARS + 500)
+
+    def test_timeout_is_configured(self):
+        self.assertIsInstance(REQUEST_TIMEOUT, aiohttp.ClientTimeout)
+        self.assertEqual(REQUEST_TIMEOUT.total, 15)
+        self.assertEqual(REQUEST_TIMEOUT.connect, 5)
 
 
 if __name__ == "__main__":

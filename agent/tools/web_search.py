@@ -21,6 +21,7 @@ from .base import BaseTool
 BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 DEFAULT_RESULT_COUNT = 8
 MAX_RESULT_CHARS = 20_000
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=15, connect=5)
 
 
 class WebSearchTool(BaseTool):
@@ -43,7 +44,7 @@ class WebSearchTool(BaseTool):
     async def _search(self, query: str, count: int = DEFAULT_RESULT_COUNT) -> dict:
         headers = {"X-Subscription-Token": self._api_key, "Accept": "application/json"}
         params = {"q": query, "count": count}
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
             async with session.get(BRAVE_SEARCH_URL, params=params, headers=headers) as resp:
                 if resp.status != 200:
                     body = await resp.text()
