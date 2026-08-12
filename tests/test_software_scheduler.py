@@ -17,12 +17,13 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from agent.config import Settings
 from agent.factory.software.scheduler import AutonomousScheduler
 from agent.factory.software.storage import BUILT, BuildRepo
 from agent.providers.base import BaseProvider, ProviderResponse, TextChunk, ToolCall, TokenUsage
+from agent.tools.web_search import WebSearchTool
 
 
 def run(coro):
@@ -167,7 +168,10 @@ class TestAutonomousScheduler(unittest.TestCase):
             self.assertEqual(len(bg), 1)
             await asyncio.gather(*bg)
 
-        run(scenario())
+        with patch.object(
+            WebSearchTool, "_search", new=AsyncMock(return_value={"web": {"results": []}})
+        ):
+            run(scenario())
         self.assertEqual(self.repo.count_builds_today(), 1)
         task = self.repo.get_build_task(1)
         self.assertEqual(task["status"], BUILT)
