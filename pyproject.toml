@@ -1,0 +1,22 @@
+[project]
+name = "trillion"
+version = "0.1.0"
+description = "Trillion — Sean Swonger's personal AI co-founder"
+requires-python = ">=3.11"
+dynamic = ["dependencies"]
+
+[project.scripts]
+trillion = "cli:main"
+
+[tool.setuptools]
+py-modules = ["main", "serve", "cli"]
+
+[tool.setuptools.packages.find]
+include = ["agent*"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

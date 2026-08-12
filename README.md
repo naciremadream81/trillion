@@ -15,23 +15,25 @@ Trillion is a **single-user** Python agent: chat in the terminal or browser, swa
 ```bash
 cd trillion
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .        # installs deps from requirements.txt + registers the `trillion` command
 cp .env.example .env   # add keys — never commit .env
-python main.py
+trillion
 ```
+
+`pip install -e .` also still leaves `python main.py` / `python serve.py` working exactly as before — `trillion` is an additive shortcut, not a replacement (`pip install -r requirements.txt` on its own, without the editable install, skips registering the command).
 
 Optional provider override on the CLI:
 
 ```bash
-python main.py --provider openai   # or ollama
+trillion --provider openai   # or ollama
 ```
 
 Web UI + cost dashboard (default port `8123`):
 
 ```bash
-python serve.py
+trillion serve
 # or
-TRILLION_WEB_PORT=8123 python serve.py
+TRILLION_WEB_PORT=8123 trillion serve
 ```
 
 Then open `http://localhost:8123/` — serves `index.html`, `POST /api/chat`, and `GET /api/usage`.
@@ -128,6 +130,8 @@ Agent Factory drafts need your `/approve` before they go live. Software Factory 
 trillion/
 ├── main.py                 # CLI REPL
 ├── serve.py                # Web UI + /api/chat + /api/usage
+├── cli.py                  # `trillion` / `trillion serve` dispatcher (pip install -e .)
+├── pyproject.toml          # Packaging — registers the trillion command
 ├── index.html              # Browser UI
 ├── requirements.txt
 ├── .env.example
