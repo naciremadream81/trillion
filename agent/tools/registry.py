@@ -71,4 +71,9 @@ def build_registry(settings) -> ToolRegistry:
 
         registry.register(QueryAnalyticsTool(settings.supabase_analytics_url))
 
+    if settings.brave_search_api_key:
+        from .web_search import WebSearchTool
+
+        registry.register(WebSearchTool(settings.brave_search_api_key))
+
     return registry
