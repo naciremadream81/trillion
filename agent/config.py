@@ -73,6 +73,13 @@ class Settings:
     deepgram_api_key: str = ""
     piper_voice_path: str = "voices/en_US-amy-medium.onnx"
 
+    # Provider-agnostic web search (Brave Search API) — the model calls it,
+    # Trillion makes the HTTP request, so it works the same regardless of
+    # which LLM provider is configured. Used by the main chat registry (when
+    # set) and the Software Factory's autonomous scheduler's opportunity
+    # scout. Empty = the web_search tool isn't offered anywhere.
+    brave_search_api_key: str = ""
+
 
 def get_settings() -> Settings:
     return Settings(
@@ -85,4 +92,5 @@ def get_settings() -> Settings:
         factory_autonomous_interval_hours=_env_float("TRILLION_FACTORY_AUTONOMOUS_INTERVAL_HOURS", 24.0),
         deepgram_api_key=os.getenv("DEEPGRAM_API_KEY", ""),
         piper_voice_path=os.getenv("PIPER_VOICE_PATH", "voices/en_US-amy-medium.onnx"),
+        brave_search_api_key=os.getenv("BRAVE_SEARCH_API_KEY", ""),
     )
