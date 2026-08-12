@@ -284,6 +284,11 @@ def _handle_software_factory_command(cmd: str, rest: str, sf: "SoftwareFactoryCo
                     f"slug={t['slug']}  retries={t['retry_count']}"
                 )
                 console.print(f"    brief: {t['description'][:150]}")
+                task_results = (t.get("plan") or {}).get("task_results")
+                if task_results:
+                    passed = sum(1 for r in task_results if r["status"] == "PASSED")
+                    blocked = sum(1 for r in task_results if r["status"] == "BLOCKED")
+                    console.print(f"    tasks: {passed}/{len(task_results)} passed, {blocked} blocked")
                 if t["status"] == "FAILED" and t["failure_reason"]:
                     console.print(f"    [red]reason: {t['failure_reason'][:200]}[/red]")
             console.print("[dim]───────────────────[/dim]\n")
