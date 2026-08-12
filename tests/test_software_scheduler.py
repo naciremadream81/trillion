@@ -22,7 +22,7 @@ from unittest.mock import patch
 from agent.config import Settings
 from agent.factory.software.scheduler import AutonomousScheduler
 from agent.factory.software.storage import BUILT, BuildRepo
-from agent.providers.base import BaseProvider, ProviderResponse, TextChunk, TokenUsage
+from agent.providers.base import BaseProvider, ProviderResponse, TextChunk, ToolCall, TokenUsage
 
 
 def run(coro):
@@ -56,6 +56,13 @@ SCOUT_REPORT_REPLY = json.dumps({
 
 
 class FakeProvider(BaseProvider):
+    """The very first stream() call of a scenario simulates a genuine
+    web_search tool round-trip (as the opportunity scout now requires
+    evidence of one — see agent/factory/software/opportunity_scout.py's
+    _has_search_evidence) before falling back to popping replies off the
+    queue as before for every subsequent call (planning, architecture,
+    coding, QA, integration, and any scout retries)."""
+
     def __init__(self, replies):
         self._replies = list(replies)
         self.call_count = 0
@@ -66,6 +73,11 @@ class FakeProvider(BaseProvider):
 
     async def stream(self, messages, system, tools=None):
         self.call_count += 1
+        if self.call_count == 1:
+            tc = ToolCall(id="tc_1", name="web_search", arguments={"query": "example problem"})
+            yield tc
+            yield ProviderResponse(text="", tool_calls=[tc], usage=TokenUsage(), model=self.model_name)
+            return
         text = self._replies.pop(0) if self._replies else "CODING_COMPLETE"
         yield TextChunk(text=text)
         yield ProviderResponse(text=text, tool_calls=[], usage=TokenUsage(), model=self.model_name)

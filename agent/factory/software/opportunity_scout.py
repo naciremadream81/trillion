@@ -84,7 +84,11 @@ def _validate_report(data: dict) -> dict:
         validated_candidates.append({f: str(c[f]) for f in REQUIRED_CANDIDATE_FIELDS})
 
     selected_index = data.get("selected_index")
-    if not isinstance(selected_index, int) or not (0 <= selected_index < CANDIDATE_COUNT):
+    if (
+        not isinstance(selected_index, int)
+        or isinstance(selected_index, bool)
+        or not (0 <= selected_index < CANDIDATE_COUNT)
+    ):
         raise OpportunityScoutError(
             f"'selected_index' must be an integer between 0 and {CANDIDATE_COUNT - 1}"
         )
@@ -98,6 +102,24 @@ def _validate_report(data: dict) -> dict:
         "selected_index": selected_index,
         "selection_reasoning": reasoning,
     }
+
+
+def _has_search_evidence(history: list[dict]) -> bool:
+    """True if any assistant turn in the conversation actually made a
+    web_search tool call. Only Claude's provider drives tool calls today
+    (see agent/providers/ — only the Claude provider yields ToolCall), so on
+    other providers this guards against the model fabricating a plausible
+    but entirely unresearched report."""
+    for message in history:
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "web_search":
+                return True
+    return False
 
 
 async def run_opportunity_scout(themes: list[str], provider, api_key: str) -> dict:
@@ -126,9 +148,15 @@ async def run_opportunity_scout(themes: list[str], provider, api_key: str) -> di
             reply += chunk
         try:
             data = _extract_json(reply)
-            return _validate_report(data)
+            report = _validate_report(data)
         except OpportunityScoutError as e:
             last_error = e
             continue
+        if not _has_search_evidence(agent.history):
+            last_error = OpportunityScoutError(
+                "no evidence web_search was ever called — refusing an unresearched report"
+            )
+            continue
+        return report
 
     raise OpportunityScoutError(f"failed after retry: {last_error}")
