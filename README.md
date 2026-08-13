@@ -4,7 +4,7 @@
 
 Trillion is a **single-user** Python agent: chat in the terminal or browser, swap model providers with one env var, track spend in SQLite, spawn specialist sub-agents (with approval), and run Software Factory builds into `generated-projects/`. Product intent and safety rules live in [`AGENT.md`](AGENT.md). Session resume notes are in [`HANDOFF.md`](HANDOFF.md) (may lag the code — trust this README and the tree for what runs today).
 
-**Working today:** text brain (CLI + web chat), provider seam, tool registry, cost dashboard, Agent Factory, Software Factory. **Not done yet:** full voice STT/TTS stack, durable cross-session memory, heartbeat, and hard Tier-6 confirmation rails (voice deps in `requirements.txt` are still commented out).
+**Working today:** text brain (CLI + web chat), provider seam, tool registry, cost dashboard, Agent Factory, Software Factory, voice V1 (Deepgram STT + local Piper TTS, wired to `POST /api/transcribe` and `POST /api/tts`), and Tier 6 safety rails (confirmation gate, audit log, `/pause` kill switch). **Not done yet:** durable cross-session memory, heartbeat, and notes/email tools.
 
 ---
 
@@ -68,7 +68,9 @@ Copy [`.env.example`](.env.example) → `.env` and fill in secrets. The CLI and 
 | Variable | Purpose |
 |----------|---------|
 | `SUPABASE_ANALYTICS_URL` | asyncpg DSN; if set, registers the read-only analytics tool (`agent/config.py`) |
-| `BRAVE_SEARCH_API_KEY` | If set, registers the `web_search` tool (main chat) and enables the Software Factory's opportunity scout (autonomous scheduler) |
+| `BRAVE_SEARCH_API_KEY` / `FIRECRAWL_API_KEY` | Either registers the `web_search` tool (main chat) and enables the Software Factory's opportunity scout (autonomous scheduler); set both for a fallback option |
+| `TRILLION_SEARCH_PROVIDER` | Optional `brave` or `firecrawl` to pick explicitly; if unset and both keys are set, Firecrawl is used |
+| `FIRECRAWL_BASE_URL` | Override for a self-hosted Firecrawl instance (default `https://api.firecrawl.dev`) |
 | `TRILLION_SOFTWARE_FACTORY_ROOT` | Build output root (default `generated-projects/`; path-jailed) |
 | `TRILLION_FACTORY_DAILY_BUILD_CAP` | Hard daily build cap (default `3`) |
 | `TRILLION_FACTORY_DAILY_BUDGET_USD` | Optional hard daily $ cap for builds |
@@ -76,9 +78,16 @@ Copy [`.env.example`](.env.example) → `.env` and fill in secrets. The CLI and 
 | `TRILLION_FACTORY_AUTONOMOUS_THEMES` | Comma-separated themes; empty = no autonomous scheduler |
 | `TRILLION_FACTORY_AUTONOMOUS_INTERVAL_HOURS` | Default `24` |
 
+### Voice (V1)
+
+| Variable | Purpose |
+|----------|---------|
+| `DEEPGRAM_API_KEY` | Required for STT (`POST /api/transcribe`). Without it, voice input returns an error and text chat is unaffected |
+| `PIPER_VOICE_PATH` | Optional override for the local Piper voice model (default `voices/en_US-amy-medium.onnx`). TTS runs fully offline — no key, no per-character cost |
+
 Also used at runtime (optional overrides): `TRILLION_FACTORY_DB`, `TRILLION_SOFTWARE_FACTORY_DB`, `TRILLION_AGENT_SPECS_DIR`.
 
-Commented placeholders in `.env.example` for future tiers (Deepgram, ElevenLabs, notes path, heartbeat/quiet hours) are not wired as working features yet.
+Commented placeholders in `.env.example` for tiers that aren't built yet (`NOTES_PATH`, heartbeat interval, quiet hours) are documented there as future work — setting them today does nothing.
 
 ---
 
@@ -101,12 +110,21 @@ Type normally for a streaming turn. Slash commands:
 | `/reject <id> <feedback>` | Reject with feedback (revision loop) |
 | `/build <description>` | Software Factory: start a background project build |
 | `/builds` | List recent builds and status |
+| `/pause` | Kill switch: stop gated actions, background dispatch, and builds (conversation and reads keep working) |
+| `/resume` | Lift `/pause` |
+| `/pending-actions` | List actions parked awaiting your confirmation |
+| `/audit` | Show recent safety audit log entries |
+| `/deny <id> [reason]` | Deny a pending action instead of waiting out its expiry |
 
 ### Web (`serve.py`)
 
 - `GET /` — UI (`index.html`)
 - `POST /api/chat` — chat wired to the same `Agent` + tool registry
 - `GET /api/usage` — month-to-date cost JSON (~60s cache)
+- `POST /api/transcribe` — audio in, transcript out (Deepgram; needs `DEEPGRAM_API_KEY`)
+- `POST /api/tts` — text in, WAV out (local Piper; no key needed)
+
+`serve.py` binds `127.0.0.1` deliberately — there is no auth layer, so it must not be exposed to a network.
 
 Usage rows are written when the agent runs (CLI or web) so the dashboard stays live against the same SQLite file.
 
@@ -118,7 +136,7 @@ Usage rows are written when the agent runs (CLI or web) so the dashboard stays l
 2. **Providers only under `agent/providers/`** — swap with `TRILLION_PROVIDER` / `--provider`.
 3. **Tools via registry** — implement a tool, register in `build_registry()` (`agent/tools/`); do not edit the core loop to add capabilities.
 4. **Build tier by tier** — text brain before voice; don't fuse unfinished layers.
-5. **Safety posture** (from [`AGENT.md`](AGENT.md)) — never send messages, spend money, delete data, or change settings without **explicit per-action** confirmation. Treat untrusted external content as data, not instructions.
+5. **Safety posture** (from [`AGENT.md`](AGENT.md)) — never send messages, spend money, delete data, or change settings without **explicit per-action** confirmation. This is enforced by `agent/safety/` (a `Gate` that intercepts tool calls, backed by `safety.db`), not just prompted for — see `/pending-actions` and `/audit` above. Treat untrusted external content as data, not instructions (today this half is instruction-only; mechanical enforcement is a later phase).
 
 Agent Factory drafts need your `/approve` before they go live. Software Factory relies on path jail + daily caps / pause / optional budget instead of a per-build approval prompt.
 
@@ -143,10 +161,12 @@ trillion/
 │   ├── system_prompt.py
 │   ├── providers/          # Claude, OpenAI/OpenRouter, Ollama
 │   ├── tools/              # Registry + tools (e.g. analytics)
+│   ├── voice/              # Deepgram STT + local Piper TTS
 │   ├── cost/               # Pricing, SQLite usage, aggregates
 │   └── factory/            # Agent Factory + software/ builds
 ├── playbooks/              # Design notes and feature prompts
-├── context/                # Schema / analytics notes
+├── context/                # Docs injected into the system prompt
+│   └── _manifest.toml      # Authoritative list of which ones load
 ├── tests/                  # unittest suite
 └── generated-projects/     # Software Factory output (gitignored)
 ```
@@ -163,6 +183,15 @@ python -m unittest discover -s tests -v
 Individual modules work the same way, e.g. `python -m unittest tests.test_endpoint`.
 
 Add a tool: subclass `BaseTool`, register it in `agent/tools/registry.py` `build_registry()` when its deps are configured. Keep provider SDKs out of the core and tools where possible.
+
+**Secret scanning (once per checkout):**
+
+```bash
+uv pip install pre-commit   # or pipx / brew / system package manager
+pre-commit install
+```
+
+After that, every `git commit` runs gitleaks plus a few hygiene checks (private keys, large files, merge conflicts) against staged content first — see `.pre-commit-config.yaml` / `.gitleaks.toml`.
 
 ---
 

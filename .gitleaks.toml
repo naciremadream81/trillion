@@ -1,0 +1,28 @@
+title = "gitleaks config — trillion"
+
+# agent-security.md §2.3. Extends gitleaks' default ruleset (GitHub PATs,
+# Slack tokens, JWTs, generic high-entropy assignments, etc.) rather than
+# replacing it — the project's real secrets (DEEPGRAM_API_KEY,
+# BRAVE_SEARCH_API_KEY, FIRECRAWL_API_KEY, GITHUB_TOKEN, ANTHROPIC_API_KEY,
+# TRILLION_WEB_AUTH_TOKEN — see agent/config.py and
+# agent/providers/claude.py:21) are read from os.environ and never meant to
+# appear as literals anywhere in the tree.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "trillion-env-secret-literal"
+description = "A Trillion secret-shaped env var assigned a literal value instead of read from os.environ"
+regex = '''(?i)(DEEPGRAM_API_KEY|BRAVE_SEARCH_API_KEY|FIRECRAWL_API_KEY|GITHUB_TOKEN|ANTHROPIC_API_KEY|TRILLION_WEB_AUTH_TOKEN)\s*[:=]\s*["']?[A-Za-z0-9_\-]{16,}["']?'''
+tags = ["trillion", "secret"]
+
+# Tight allowlist: only the two files that legitimately contain
+# secret-shaped strings, and only because they describe those shapes
+# (log_redact.py's regex patterns) or exercise them as fake fixtures
+# (test_log_redact.py). Everything else in the tree is scanned normally.
+[allowlist]
+description = "Files that intentionally contain secret-shaped strings for redaction logic/tests, not real secrets"
+paths = [
+  '''agent/security/log_redact\.py''',
+  '''tests/test_log_redact\.py''',
+]

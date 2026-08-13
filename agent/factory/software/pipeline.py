@@ -39,7 +39,7 @@ from ...core import Agent
 from ...tools.project_fs import ReadProjectFileTool, RunProjectTestsTool, WriteProjectFileTool
 from ...tools.registry import ToolRegistry
 from ..draft import slugify, unique_slug
-from ..sanitize import clean_for_prompt
+from ...safety.untrusted import clean_for_prompt
 from .architecture import run_architecture
 from .planning import PlanningError, run_planning
 from .readme_md import write_readme
@@ -443,8 +443,10 @@ def start_build(
     Checks the kill switch, the daily build cap, and the daily budget cap
     before creating anything — mirrors start_spawn()'s fail-fast ordering.
     """
-    if settings.factory_paused:
-        raise FactoryPaused("the Software Factory is paused (TRILLION_FACTORY_PAUSED)")
+    if settings.builds_paused():
+        raise FactoryPaused(
+            "builds are paused (TRILLION_FACTORY_PAUSED or TRILLION_PAUSED)"
+        )
     if repo.count_builds_today() >= settings.factory_daily_build_cap:
         raise BuildCapExceeded(f"daily build cap of {settings.factory_daily_build_cap} reached")
     _check_budget(settings, usage_repo)

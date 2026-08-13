@@ -11,6 +11,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from agent.tools.project_fs import (
     PathEscape,
@@ -132,6 +133,11 @@ class TestRunProjectTests(unittest.TestCase):
     def test_empty_command_rejected(self):
         result = run(self.tool.run(command="   "))
         self.assertIn("rejected", result)
+
+    def test_secrets_are_not_visible_to_the_spawned_shell(self):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-should-not-leak"}):
+            result = run(self.tool.run(command="echo key=$ANTHROPIC_API_KEY"))
+        self.assertNotIn("sk-ant-should-not-leak", result)
 
 
 if __name__ == "__main__":

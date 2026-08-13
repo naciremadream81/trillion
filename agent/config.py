@@ -30,6 +30,16 @@ def _env_float(name: str, default: float | None) -> float | None:
         return default
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 def _env_list(name: str) -> list[str]:
     raw = os.getenv(name, "")
     return [item.strip() for item in raw.split(",") if item.strip()]
@@ -73,12 +83,100 @@ class Settings:
     deepgram_api_key: str = ""
     piper_voice_path: str = "voices/en_US-amy-medium.onnx"
 
-    # Provider-agnostic web search (Brave Search API) — the model calls it,
-    # Trillion makes the HTTP request, so it works the same regardless of
-    # which LLM provider is configured. Used by the main chat registry (when
-    # set) and the Software Factory's autonomous scheduler's opportunity
-    # scout. Empty = the web_search tool isn't offered anywhere.
+    # Provider-agnostic web search — the model calls it, Trillion makes the
+    # HTTP request, so it works the same regardless of which LLM provider is
+    # configured. Used by the main chat registry (when set) and the Software
+    # Factory's autonomous scheduler's opportunity scout. Two backends are
+    # supported (Brave Search, Firecrawl); empty = the web_search tool isn't
+    # offered anywhere. search_provider picks explicitly ("brave" |
+    # "firecrawl"); empty = auto-pick from whichever key is present,
+    # preferring Firecrawl if both are set (see resolve_search_provider()).
     brave_search_api_key: str = ""
+    firecrawl_api_key: str = ""
+    search_provider: str = ""
+    # Override for a self-hosted Firecrawl instance (e.g.
+    # http://localhost:3002) instead of the managed api.firecrawl.dev.
+    # Same pattern as OLLAMA_BASE_URL for a local Ollama server.
+    firecrawl_base_url: str = "https://api.firecrawl.dev"
+
+    # ── Tier 4: memory ───────────────────────────────────────────────────
+    # Markdown facts store — plain and human-readable so Sean can read or
+    # hand-edit it directly. Relative paths resolve against the process's
+    # working directory (matches software_factory_root's convention above).
+    memory_path: str = "memory/facts.md"
+
+    # ── Tier 2: notes search ────────────────────────────────────────────
+    # The Aires Ai Brain vault (mounted via rclone — see CLAUDE.md) and the
+    # local SQLite FTS5 index built from it. search_notes only ever reads
+    # notes_index_path; notes_vault_path is where startup wiring (best-effort,
+    # like Tier 4's memory block) rebuilds that index from, so queries never
+    # depend on the mount being alive. See agent/notes/index.py.
+    notes_vault_path: str = field(default_factory=lambda: os.path.expanduser("~/AiresAiBrain"))
+    notes_index_path: str = "memory/notes_index.db"
+
+    # ── Tier 6: safety rails ───────────────────────────────────────────────
+    # How aggressively the confirmation gate fires: "off" | "smart" | "manual".
+    # Even "off" cannot clear the hardline list (agent/safety/risk.py).
+    confirmation_mode: str = "smart"
+
+    # How long a parked action stays approvable. This is what makes the gate
+    # safe with nobody present: an action the heartbeat parks at 3am is not
+    # still sitting there approvable at noon.
+    confirmation_ttl_seconds: int = 900
+
+    # The main kill switch. Stops Trillion from *acting* — gated actions,
+    # background dispatch, builds — while leaving conversation and read-only
+    # tools alone. A kill switch that also mutes the conversation is one Sean
+    # won't reach for, which makes it worse than no kill switch at all.
+    trillion_paused: bool = False
+
+    # ── Tier 5: heartbeat ────────────────────────────────────────────────
+    # Base tick-loop interval. Each registered check has its own cadence
+    # (fast/slow below); this is just how often the loop wakes up to check
+    # whether anything is due. Reuses the pre-existing HEARTBEAT_INTERVAL_
+    # SECONDS env var name (was a "not built yet" placeholder), lowered from
+    # its old 300s default to support the faster per-check cadences.
+    heartbeat_tick_interval_seconds: float = 30.0
+    # Cadence for CI-style checks that should surface within about a minute.
+    heartbeat_fast_cadence_seconds: float = 60.0
+    # Cadence for everything else (stale PRs, dormant repos, dependency
+    # alerts) — no need to poll GitHub every 60s for things that change
+    # over days.
+    heartbeat_slow_cadence_seconds: float = 1800.0
+    # Quiet hours (both UTC, single-user Pi deployment — see
+    # agent/heartbeat/storage.py::is_quiet_hours for the wrap-past-midnight
+    # and disabled-when-equal semantics). Reuses the pre-existing QUIET_
+    # HOURS_START/END env var names.
+    heartbeat_quiet_hours_start: int = 22
+    heartbeat_quiet_hours_end: int = 8
+
+    # The Code Sentinel (agent/heartbeat/checks/code_sentinel.py) polls
+    # these repos via the GitHub REST API. Empty token or repo list = the
+    # Code Sentinel checks self-skip (mirrors resolve_search_provider()'s
+    # None-means-skip convention) rather than registering and failing.
+    github_token: str = ""
+    github_username: str = ""
+    github_watched_repos: list[str] = field(default_factory=list)
+
+    # ── Web server bind (§1.5 startup guard) ────────────────────────────────
+    # serve.py's bind host. Defaults to loopback-only; agent/security/
+    # startup_guard.py refuses to start on anything else unless
+    # web_auth_token is set. There is no bearer-auth middleware built yet
+    # (see §1.4/§2.1's veto in the playbooks plan) — this token only proves
+    # to the guard that Sean has deliberately opted into a non-loopback bind.
+    web_host: str = "127.0.0.1"
+    web_auth_token: str = ""
+
+    def builds_paused(self) -> bool:
+        """
+        Whether the Software Factory should refuse to start work.
+
+        factory_paused is a *child scope* of trillion_paused, not a sibling:
+        pausing Trillion pauses builds too. The narrower flag stays because
+        pausing builds while leaving the rest of Trillion acting is a real
+        thing to want.
+        """
+        return self.trillion_paused or self.factory_paused
 
 
 def get_settings() -> Settings:
@@ -93,4 +191,23 @@ def get_settings() -> Settings:
         deepgram_api_key=os.getenv("DEEPGRAM_API_KEY", ""),
         piper_voice_path=os.getenv("PIPER_VOICE_PATH", "voices/en_US-amy-medium.onnx"),
         brave_search_api_key=os.getenv("BRAVE_SEARCH_API_KEY", ""),
+        firecrawl_api_key=os.getenv("FIRECRAWL_API_KEY", ""),
+        search_provider=os.getenv("TRILLION_SEARCH_PROVIDER", ""),
+        firecrawl_base_url=os.getenv("FIRECRAWL_BASE_URL", "https://api.firecrawl.dev"),
+        memory_path=os.getenv("TRILLION_MEMORY_PATH", "memory/facts.md"),
+        notes_vault_path=os.getenv("TRILLION_NOTES_VAULT_PATH", os.path.expanduser("~/AiresAiBrain")),
+        notes_index_path=os.getenv("TRILLION_NOTES_INDEX_PATH", "memory/notes_index.db"),
+        confirmation_mode=os.getenv("TRILLION_CONFIRMATION_MODE", "smart"),
+        confirmation_ttl_seconds=_env_int("TRILLION_CONFIRMATION_TTL_SECONDS", 900),
+        trillion_paused=_env_bool("TRILLION_PAUSED", False),
+        heartbeat_tick_interval_seconds=_env_float("HEARTBEAT_INTERVAL_SECONDS", 30.0),
+        heartbeat_fast_cadence_seconds=_env_float("HEARTBEAT_FAST_CADENCE_SECONDS", 60.0),
+        heartbeat_slow_cadence_seconds=_env_float("HEARTBEAT_SLOW_CADENCE_SECONDS", 1800.0),
+        heartbeat_quiet_hours_start=_env_int("QUIET_HOURS_START", 22),
+        heartbeat_quiet_hours_end=_env_int("QUIET_HOURS_END", 8),
+        github_token=os.getenv("GITHUB_TOKEN", ""),
+        github_username=os.getenv("GITHUB_USERNAME", ""),
+        github_watched_repos=_env_list("TRILLION_GITHUB_WATCHED_REPOS"),
+        web_host=os.getenv("TRILLION_WEB_HOST", "127.0.0.1"),
+        web_auth_token=os.getenv("TRILLION_WEB_AUTH_TOKEN", ""),
     )

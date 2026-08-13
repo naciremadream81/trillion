@@ -193,7 +193,9 @@ class TestAutonomousScheduler(unittest.TestCase):
         settings = self._settings(factory_daily_build_cap=1)
         provider = FakeProvider([])  # never actually consulted — the scout call is patched below
 
-        async def fake_scout_then_fill_cap(themes, provider, api_key):
+        async def fake_scout_then_fill_cap(
+            themes, provider, api_key, search_provider="brave", firecrawl_base_url=""
+        ):
             self.repo.create_build_task("a concurrent /build got here first")
             return {
                 "candidates": [

@@ -24,6 +24,7 @@ import uuid
 
 import asyncpg
 
+from ..safety.risk import READ_ONLY
 from .base import BaseTool
 
 MAX_ROWS = 200
@@ -94,6 +95,9 @@ class QueryAnalyticsTool(BaseTool):
         },
         "required": ["action"],
     }
+    # Tier 6: SELECT-only, enforced twice — by the keyword scan in run() and by
+    # the trillion_analytics role's own grants on the database side.
+    risk = READ_ONLY
 
     def __init__(self, dsn: str) -> None:
         self._dsn = dsn

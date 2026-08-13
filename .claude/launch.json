@@ -6,6 +6,12 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["serve.py"],
       "port": 8123
+    },
+    {
+      "name": "orb-preview",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "TRILLION_WEB_PORT=8124 .venv/bin/python serve.py"],
+      "port": 8124
     }
   ]
 }

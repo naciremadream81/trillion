@@ -1,0 +1,22 @@
+# Pre-commit secret scanning — agent-security.md §2.3.
+#
+# Install once per checkout:
+#     uv pip install pre-commit   # or pipx / brew / system package manager
+#     pre-commit install
+#
+# After that, every `git commit` scans staged content first. A leaked
+# secret (or a fake one shaped like a real API key) blocks the commit.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: detect-private-key
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace

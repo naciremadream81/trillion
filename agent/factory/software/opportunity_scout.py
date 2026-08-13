@@ -20,7 +20,7 @@ import re
 
 from ...core import Agent
 from ...tools.registry import ToolRegistry
-from ...tools.web_search import WebSearchTool
+from ...tools.web_search import FIRECRAWL_DEFAULT_BASE_URL, WebSearchTool
 
 REQUIRED_CANDIDATE_FIELDS = ("problem", "evidence", "source_url")
 CANDIDATE_COUNT = 5
@@ -122,7 +122,13 @@ def _has_search_evidence(history: list[dict]) -> bool:
     return False
 
 
-async def run_opportunity_scout(themes: list[str], provider, api_key: str) -> dict:
+async def run_opportunity_scout(
+    themes: list[str],
+    provider,
+    api_key: str,
+    search_provider: str = "brave",
+    firecrawl_base_url: str = FIRECRAWL_DEFAULT_BASE_URL,
+) -> dict:
     """
     Run the opportunity scout and return a validated report:
     {"candidates": [...5 items...], "selected_index": int, "selection_reasoning": str}.
@@ -130,7 +136,7 @@ async def run_opportunity_scout(themes: list[str], provider, api_key: str) -> di
     after one corrective retry.
     """
     registry = ToolRegistry()
-    registry.register(WebSearchTool(api_key))
+    registry.register(WebSearchTool(search_provider, api_key, firecrawl_base_url=firecrawl_base_url))
 
     agent = Agent(provider=provider, tool_registry=registry)
     agent.system = _scout_system_prompt(themes)
