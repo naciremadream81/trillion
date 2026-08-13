@@ -10,10 +10,12 @@ import tempfile
 import unittest
 
 from agent.factory.software.storage import (
+    ARCHITECTURE,
     BUILT,
     CODING,
     DOCS,
     FAILED,
+    INTEGRATION,
     PENDING,
     PLANNING,
     SCAFFOLDING,
@@ -48,13 +50,13 @@ class TestSoftwareStorage(unittest.TestCase):
         self.repo.update_status(task_id, PLANNING)
         self.assertEqual(self.repo.get_build_task(task_id)["status"], PLANNING)
 
-    def test_set_plan_moves_to_scaffolding(self):
+    def test_set_plan_moves_to_architecture(self):
         task_id = self.repo.create_build_task("project")
         self.repo.update_status(task_id, PLANNING)
         plan = {"tech_stack": "python", "files": ["main.py"], "test_command": "pytest"}
         self.repo.set_plan(task_id, slug="md-to-csv", plan=plan)
         task = self.repo.get_build_task(task_id)
-        self.assertEqual(task["status"], SCAFFOLDING)
+        self.assertEqual(task["status"], ARCHITECTURE)
         self.assertEqual(task["slug"], "md-to-csv")
         self.assertEqual(task["plan"], plan)
 
@@ -62,8 +64,10 @@ class TestSoftwareStorage(unittest.TestCase):
         task_id = self.repo.create_build_task("project")
         self.repo.update_status(task_id, PLANNING)
         self.repo.set_plan(task_id, slug="s", plan={"files": []})
+        self.repo.update_status(task_id, SCAFFOLDING)
         self.repo.update_status(task_id, CODING)
         self.repo.update_status(task_id, TESTING)
+        self.repo.update_status(task_id, INTEGRATION)
         self.repo.update_status(task_id, DOCS)
         self.repo.update_status(task_id, BUILT)
         self.assertEqual(self.repo.get_build_task(task_id)["status"], BUILT)
@@ -72,6 +76,7 @@ class TestSoftwareStorage(unittest.TestCase):
         task_id = self.repo.create_build_task("project")
         self.repo.update_status(task_id, PLANNING)
         self.repo.set_plan(task_id, slug="s", plan={"files": []})
+        self.repo.update_status(task_id, SCAFFOLDING)
         self.repo.update_status(task_id, CODING)
         self.repo.update_status(task_id, TESTING)
         new_count = self.repo.retry_coding(task_id)
@@ -119,6 +124,33 @@ class TestSoftwareStorage(unittest.TestCase):
         recent = self.repo.list_recent_builds()
         self.assertEqual([t["id"] for t in recent], [t2, t1])
         self.assertEqual(recent[0]["status"], FAILED)
+
+    def test_set_task_results_stores_results_without_changing_status(self):
+        task_id = self.repo.create_build_task("project")
+        self.repo.update_status(task_id, PLANNING)
+        self.repo.set_plan(task_id, slug="s", plan={"files": [], "tasks": []})
+        self.repo.update_status(task_id, SCAFFOLDING)
+        self.repo.update_status(task_id, CODING)
+        results = [{"task_id": 1, "title": "Do the thing", "status": "PASSED", "attempts": 1, "last_feedback": ""}]
+        self.repo.set_task_results(task_id, results)
+        task = self.repo.get_build_task(task_id)
+        self.assertEqual(task["status"], CODING)
+        self.assertEqual(task["plan"]["task_results"], results)
+        self.assertEqual(task["plan"]["files"], [])
+
+    def test_set_task_results_on_missing_task_raises(self):
+        with self.assertRaises(InvalidTransition):
+            self.repo.set_task_results(999, [])
+
+    def test_integration_to_docs_is_a_legal_transition(self):
+        task_id = self.repo.create_build_task("project")
+        self.repo.update_status(task_id, PLANNING)
+        self.repo.set_plan(task_id, slug="s", plan={"files": []})
+        self.repo.update_status(task_id, SCAFFOLDING)
+        self.repo.update_status(task_id, CODING)
+        self.repo.update_status(task_id, TESTING)
+        self.repo.update_status(task_id, INTEGRATION)
+        self.assertEqual(self.repo.get_build_task(task_id)["status"], INTEGRATION)
 
 
 if __name__ == "__main__":

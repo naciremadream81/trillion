@@ -27,6 +27,7 @@ import os
 import shlex
 import shutil
 
+from ..safety.risk import CONSEQUENTIAL, HARDLINE, READ_ONLY
 from .base import BaseTool
 
 MAX_READ_CHARS = 20_000
@@ -136,6 +137,9 @@ class WriteProjectFileTool(BaseTool):
         "required": ["relative_path", "content"],
     }
     factory_allowed = False
+    # Tier 6: writes to disk, and overwrites without asking. Path-jailed to the
+    # build's own directory, which bounds the damage without removing it.
+    risk = CONSEQUENTIAL
 
     def __init__(self, project_dir: str) -> None:
         self.project_dir = project_dir
@@ -168,6 +172,7 @@ class ReadProjectFileTool(BaseTool):
         "required": ["relative_path"],
     }
     factory_allowed = False
+    risk = READ_ONLY
 
     def __init__(self, project_dir: str) -> None:
         self.project_dir = project_dir
@@ -210,6 +215,10 @@ class RunProjectTestsTool(BaseTool):
         "required": ["command"],
     }
     factory_allowed = False
+    # Tier 6: runs a shell command that Trillion itself wrote, on Sean's
+    # machine. Bubblewrap and the timeout narrow it; nothing makes it routine.
+    # Also named in risk.py's HARDLINE_TOOLS, so no mode can clear it.
+    risk = HARDLINE
 
     def __init__(self, project_dir: str) -> None:
         self.project_dir = project_dir

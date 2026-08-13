@@ -27,11 +27,29 @@ class TestUsageEndpoint(AioHTTPTestCase):
             output_tokens=500,
             cost_usd=0.0105,
         )
+
+        # build_app() registers the notes-index on_startup hook, which
+        # AioHTTPTestCase fires for real. Point it at this test's temp dir
+        # so it doesn't walk the real (broken) vault mount or write to the
+        # project's real memory/notes_index.db.
+        self._prev_vault = os.environ.get("TRILLION_NOTES_VAULT_PATH")
+        self._prev_index = os.environ.get("TRILLION_NOTES_INDEX_PATH")
+        os.environ["TRILLION_NOTES_VAULT_PATH"] = os.path.join(self.tmp, "vault")
+        os.environ["TRILLION_NOTES_INDEX_PATH"] = os.path.join(self.tmp, "notes_index.db")
+
         return build_app(dashboard=UsageDashboard(repo))
 
     def tearDown(self):
         super().tearDown()
         shutil.rmtree(self.tmp, ignore_errors=True)
+        for key, prev in (
+            ("TRILLION_NOTES_VAULT_PATH", self._prev_vault),
+            ("TRILLION_NOTES_INDEX_PATH", self._prev_index),
+        ):
+            if prev is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = prev
 
     async def test_usage_endpoint_returns_payload(self):
         resp = await self.client.request("GET", "/api/usage")

@@ -41,6 +41,15 @@ class TestFactoryWiring(AioHTTPTestCase):
         self._prev_db = os.environ.get("TRILLION_FACTORY_DB")
         os.environ["TRILLION_FACTORY_DB"] = self.db_path
 
+        # build_app() also registers the notes-index on_startup hook, which
+        # AioHTTPTestCase fires for real. Point it at this test's temp dir
+        # so it doesn't walk the real (broken) vault mount or write to the
+        # project's real memory/notes_index.db.
+        self._prev_vault = os.environ.get("TRILLION_NOTES_VAULT_PATH")
+        self._prev_index = os.environ.get("TRILLION_NOTES_INDEX_PATH")
+        os.environ["TRILLION_NOTES_VAULT_PATH"] = os.path.join(self.tmp, "vault")
+        os.environ["TRILLION_NOTES_INDEX_PATH"] = os.path.join(self.tmp, "notes_index.db")
+
         # Reset serve.py's lazy singletons and inject test doubles so
         # build_app() doesn't need real API keys or a configured tool set.
         serve_module._provider = FakeProvider()
@@ -68,6 +77,14 @@ class TestFactoryWiring(AioHTTPTestCase):
             os.environ.pop("TRILLION_FACTORY_DB", None)
         else:
             os.environ["TRILLION_FACTORY_DB"] = self._prev_db
+        for key, prev in (
+            ("TRILLION_NOTES_VAULT_PATH", self._prev_vault),
+            ("TRILLION_NOTES_INDEX_PATH", self._prev_index),
+        ):
+            if prev is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = prev
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     async def test_agent_approved_before_startup_is_live_in_registry(self):

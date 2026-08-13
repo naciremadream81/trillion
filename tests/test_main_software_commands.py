@@ -23,8 +23,14 @@ from agent.providers.base import BaseProvider, ProviderResponse, TextChunk, Toke
 VALID_PLAN_REPLY = (
     '{"project_name": "md-to-csv", "tech_stack": "python", '
     '"files": ["main.py"], "entry_point": "main.py", '
-    '"test_command": "", "summary": "Converts markdown tables to CSV."}'
+    '"test_command": "", "summary": "Converts markdown tables to CSV.", '
+    '"tasks": [{"title": "Implement CLI", "description": "Write main.py.", '
+    '"acceptance_criteria": "python main.py works"}]}'
 )
+
+ARCHITECTURE_REPLY = "# Architecture\n\nOne module, main.py."
+QA_PASS_REPLY = '{"result": "PASS", "feedback": "meets acceptance criteria"}'
+INTEGRATION_READY_REPLY = '{"verdict": "READY", "notes": "all good"}'
 
 
 class FakeProvider(BaseProvider):
@@ -61,7 +67,9 @@ class TestSoftwareFactoryCliCommands(unittest.TestCase):
 
     def test_build_then_builds_lists_it(self):
         async def scenario():
-            provider = FakeProvider([VALID_PLAN_REPLY, CODING_DONE_SENTINEL])
+            provider = FakeProvider([
+                VALID_PLAN_REPLY, ARCHITECTURE_REPLY, CODING_DONE_SENTINEL, QA_PASS_REPLY, INTEGRATION_READY_REPLY,
+            ])
             sf = main_module.SoftwareFactoryContext(
                 repo=self.repo, provider=provider, settings=self.settings, background_tasks=set()
             )
@@ -75,6 +83,25 @@ class TestSoftwareFactoryCliCommands(unittest.TestCase):
             self.assertEqual(task["status"], BUILT)
 
             main_module.handle_slash("/builds", None, "claude", None, sf)  # should not crash
+
+        asyncio.run(scenario())
+
+    def test_builds_shows_task_summary_line(self):
+        async def scenario():
+            provider = FakeProvider([
+                VALID_PLAN_REPLY, ARCHITECTURE_REPLY, CODING_DONE_SENTINEL, QA_PASS_REPLY, INTEGRATION_READY_REPLY,
+            ])
+            sf = main_module.SoftwareFactoryContext(
+                repo=self.repo, provider=provider, settings=self.settings, background_tasks=set()
+            )
+            main_module.handle_slash(
+                "/build a CLI that converts markdown tables to CSV", None, "claude", None, sf
+            )
+            await asyncio.gather(*sf.background_tasks)
+
+            with main_module.console.capture() as capture:
+                main_module.handle_slash("/builds", None, "claude", None, sf)
+            self.assertIn("tasks: 1/1 passed, 0 blocked", capture.get())
 
         asyncio.run(scenario())
 

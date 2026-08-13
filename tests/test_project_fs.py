@@ -9,6 +9,7 @@ Run from the project root:
 import asyncio
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -21,7 +22,28 @@ from agent.tools.project_fs import (
     resolve_in_sandbox,
 )
 
-_HAS_BWRAP = bool(project_fs._BWRAP)
+def _has_working_bwrap() -> bool:
+    if not project_fs._BWRAP:
+        return False
+    tmp = tempfile.mkdtemp()
+    try:
+        result = subprocess.run(
+            project_fs._sandbox_argv(["python3", "-c", "print('ok')"], tmp),
+            env=project_fs._scrubbed_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=5,
+            check=False,
+            text=True,
+        )
+        return result.returncode == 0 and "ok" in result.stdout
+    except Exception:
+        return False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+_HAS_WORKING_BWRAP = _has_working_bwrap()
 
 
 def run(coro):
@@ -98,7 +120,10 @@ class TestWriteAndReadProjectFile(unittest.TestCase):
         self.assertLess(len(content), MAX_READ_CHARS + 500)
 
 
-@unittest.skipUnless(_HAS_BWRAP, "bubblewrap (bwrap) not installed — sandboxed execution unavailable")
+@unittest.skipUnless(
+    _HAS_WORKING_BWRAP,
+    "bubblewrap (bwrap) is unavailable or blocked — sandboxed execution unavailable",
+)
 class TestRunProjectTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()

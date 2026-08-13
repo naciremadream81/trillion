@@ -4,12 +4,27 @@ Trillion web server — serves the UI and the cost dashboard endpoint.
 Built on aiohttp (already a project dependency). Reads the same usage.db the
 agent writes to, so cost data shows up live.
 
-    GET /api/usage   → month-to-date cost payload (JSON, ~60s cached)
-    GET /            → the UI (index.html)
+    GET /api/usage              → month-to-date cost payload (JSON, ~60s cached)
+    GET /api/heartbeat/notices  → active (undismissed) heartbeat notices (JSON)
+    POST /api/heartbeat/dismiss → dismiss a notice by id
+    POST /api/security/csp-report → browser CSP-violation reports (report-only mode)
+    GET /api/security/cve-status → latest pip-audit scan result (JSON)
+    POST /api/security/cve-scan  → run a fresh pip-audit scan and persist it
+    GET /api/security/status    → self-audit security shield score (§3.5, JSON)
+    GET /                       → the UI (index.html)
+
+Every response carries the security_headers_middleware (agent/security/
+headers.py, §2.2): X-Content-Type-Options, Referrer-Policy, X-Frame-Options,
+Permissions-Policy, and a report-only Content-Security-Policy.
 
 Run:
     python serve.py
     TRILLION_WEB_PORT=8123 python serve.py
+
+Binds to TRILLION_WEB_HOST (default 127.0.0.1). Binding anything else
+requires TRILLION_WEB_AUTH_TOKEN to be set — see agent/security/
+startup_guard.py — since there is no auth middleware to protect a public
+listener yet.
 
 This is the server the systemd unit runs in place of `python -m http.server`.
 """
@@ -21,6 +36,7 @@ import contextlib
 import os
 import uuid
 from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
 
 from aiohttp import web
 from dotenv import load_dotenv
@@ -28,6 +44,7 @@ from dotenv import load_dotenv
 from agent.config import get_settings
 from agent.cost.aggregate import UsageDashboard
 from agent.cost.storage import UsageRepo
+from agent.security.headers import security_headers_middleware
 
 # Load .env so the web server honors the same config as the CLI agent
 # (TRILLION_MONTHLY_BUDGET_USD, TRILLION_USAGE_DB, TRILLION_WEB_PORT).
@@ -54,6 +71,9 @@ _registry = None
 _cost_recorder_ready = False
 _usage_repo = None
 _agent_sessions: "OrderedDict[str, object]" = OrderedDict()
+# Compatibility for older tests/helpers that reset serve._agent. Browser chat
+# now uses _agent_sessions instead.
+_agent = None
 
 
 def _ensure_cost_tracking():
@@ -102,11 +122,87 @@ def _get_registry():
     return _registry
 
 
+class _SessionToolRegistry:
+    """
+    Per-chat-session overlay for tools that close over one Agent's history,
+    delegating everything else to the shared server registry. That keeps
+    confirm_action / memory tools session-local while Factory-dispatch tools
+    registered by RegistryWatcher remain visible to existing browser sessions.
+    """
+
+    def __init__(self, shared_registry) -> None:
+        from agent.tools.registry import ToolRegistry
+
+        self._shared = shared_registry
+        self._local = ToolRegistry()
+
+    def set_audit_sink(self, sink) -> None:
+        self._shared.set_audit_sink(sink)
+        self._local.set_audit_sink(sink)
+
+    def register(self, tool) -> None:
+        self._local.register(tool)
+
+    def unregister(self, name: str) -> None:
+        self._local.unregister(name)
+
+    def names(self) -> list[str]:
+        return self._local.names() + [
+            name for name in self._shared.names() if name not in self._local.names()
+        ]
+
+    def get(self, name: str):
+        return self._local.get(name) or self._shared.get(name)
+
+    def schemas(self) -> list[dict]:
+        local_names = set(self._local.names())
+        return self._local.schemas() + [
+            schema
+            for schema in self._shared.schemas()
+            if schema.get("name") not in local_names
+        ]
+
+    def factory_allowed_names(self) -> set[str]:
+        return self._shared.factory_allowed_names()
+
+    async def run(self, tool_call) -> str:
+        if self._local.get(tool_call.name) is not None:
+            return await self._local.run(tool_call)
+        return await self._shared.run(tool_call)
+
+
+def _make_gate(registry):
+    """
+    Tier 6 safety rails, best-effort like everything else here — a broken
+    safety.db must not stop the browser voice UI, only leave it ungated
+    (Agent and handle_slash-equivalent callers already treat gate=None as
+    "unavailable").
+    """
+    try:
+        from agent.safety.approval import Gate
+        from agent.safety.storage import SafetyRepo
+
+        settings = get_settings()
+        safety_repo = SafetyRepo()
+        gate = Gate(
+            safety_repo, registry,
+            mode=settings.confirmation_mode,
+            ttl_seconds=settings.confirmation_ttl_seconds,
+            paused=settings.trillion_paused,
+        )
+        registry.set_audit_sink(safety_repo.log)
+        return gate
+    except Exception as e:  # noqa: BLE001
+        print(f"Safety rails unavailable ({e}); continuing ungated.")
+        return None
+
+
 def _get_agent(session_id: str):
     """
     Look up (or create) the Agent for one browser session. Each session gets
-    its own Agent, and so its own conversation history — provider/registry
-    stay shared since they hold no per-conversation state.
+    its own Agent, and so its own conversation history. The shared registry
+    remains the live home for server-wide tools; per-agent tools use a small
+    session overlay so their callbacks don't bleed across tabs.
     """
     agent = _agent_sessions.get(session_id)
     if agent is not None:
@@ -116,8 +212,22 @@ def _get_agent(session_id: str):
     _ensure_cost_tracking()
 
     from agent.core import Agent
+    from agent.memory import load_facts
 
-    agent = Agent(provider=_get_provider(), tool_registry=_get_registry())
+    settings = get_settings()
+    memory_facts: list[str] = []
+    try:
+        memory_facts = load_facts(settings.memory_path)
+    except Exception as e:  # noqa: BLE001
+        print(f"Memory unavailable ({e}); continuing with no facts.")
+    registry = _SessionToolRegistry(_get_registry())
+    agent = Agent(
+        provider=_get_provider(),
+        tool_registry=registry,
+        gate=_make_gate(registry),
+        memory_facts=memory_facts,
+        memory_path=settings.memory_path,
+    )
     _agent_sessions[session_id] = agent
     if len(_agent_sessions) > _MAX_CHAT_SESSIONS:
         _agent_sessions.popitem(last=False)
@@ -144,6 +254,26 @@ async def _start_factory_watcher(app: web.Application) -> None:
         app["factory_watcher_task"] = asyncio.create_task(watcher.run_forever())
     except Exception as e:  # noqa: BLE001
         print(f"Agent Factory unavailable ({e}); continuing.")
+
+
+async def _build_notes_index(_app: web.Application) -> None:
+    """
+    Best-effort Tier 2 notes index build, same posture as the sections above.
+    Bounded with a timeout because the vault is an rclone FUSE mount that has
+    been observed to hang/error on read while still reporting mounted (see
+    agent/notes/index.py) — a broken mount must not stall server startup.
+    """
+    try:
+        from agent.notes.index import build_index
+
+        settings = get_settings()
+        indexed = await asyncio.wait_for(
+            asyncio.to_thread(build_index, settings.notes_vault_path, settings.notes_index_path),
+            timeout=10.0,
+        )
+        print(f"Notes index: {indexed} file(s).")
+    except Exception as e:  # noqa: BLE001
+        print(f"Notes index unavailable ({e}); continuing with stale/no index.")
 
 
 async def _stop_factory_watcher(app: web.Application) -> None:
@@ -185,7 +315,75 @@ async def _start_software_factory(app: web.Application) -> None:
 
 
 async def _stop_software_factory(app: web.Application) -> None:
-    task = app.get("sf_scheduler_task")
+    await _stop_task(app, "sf_scheduler_task")
+    await _stop_software_factory_background_tasks(app)
+
+
+async def _start_heartbeat_scheduler(app: web.Application) -> None:
+    """
+    Best-effort Tier 5 heartbeat wiring, mirroring _start_factory_watcher —
+    a broken heartbeat.db shouldn't stop the browser voice UI. Code Sentinel
+    checks self-skip (empty list) when GitHub isn't configured, so this
+    always constructs the scheduler even with zero checks registered.
+    """
+    app["heartbeat_task"] = None
+    app["heartbeat_background_tasks"] = set()
+    try:
+        from agent.heartbeat.checks.code_sentinel import build_code_sentinel_checks
+        from agent.heartbeat.checks.cve_scan import CveScanCheck
+        from agent.heartbeat.scheduler import HeartbeatScheduler
+        from agent.heartbeat.storage import HeartbeatRepo
+
+        settings = get_settings()
+        repo = HeartbeatRepo()
+        cve_check = CveScanCheck()
+        if repo.get_next_due_at(cve_check.name) is None:
+            repo.set_next_due_at(
+                cve_check.name,
+                datetime.now(timezone.utc) + timedelta(seconds=cve_check.cadence_seconds),
+            )
+        checks = build_code_sentinel_checks(settings) + [cve_check]
+        scheduler = HeartbeatScheduler(
+            checks, repo, settings, background_tasks=app["heartbeat_background_tasks"]
+        )
+        app["heartbeat_task"] = asyncio.create_task(scheduler.run_forever())
+    except Exception as e:  # noqa: BLE001
+        print(f"Heartbeat unavailable ({e}); continuing.")
+
+
+async def _stop_heartbeat_scheduler(app: web.Application) -> None:
+    await _stop_task(app, "heartbeat_task")
+    await _stop_heartbeat_background_tasks(app)
+
+
+def _cancel_task_set(tasks: set) -> None:
+    for task in list(tasks):
+        task.cancel()
+
+
+async def _wait_for_task_set(tasks: set) -> None:
+    for task in list(tasks):
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    tasks.clear()
+
+
+async def _stop_software_factory_background_tasks(app: web.Application) -> None:
+    tasks = app.get("sf_background_tasks")
+    if tasks:
+        _cancel_task_set(tasks)
+        await _wait_for_task_set(tasks)
+
+
+async def _stop_heartbeat_background_tasks(app: web.Application) -> None:
+    tasks = app.get("heartbeat_background_tasks")
+    if tasks:
+        _cancel_task_set(tasks)
+        await _wait_for_task_set(tasks)
+
+
+async def _stop_task(app: web.Application, key: str) -> None:
+    task = app.get(key)
     if task is not None:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -292,24 +490,106 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
             return web.Response(status=400, text=str(e))
         return web.Response(body=audio, content_type="audio/wav")
 
-    app = web.Application()
+    async def heartbeat_notices(_request: web.Request) -> web.Response:
+        # Polled by the browser (see index.html's fetchHeartbeatNotices),
+        # mirroring /api/usage's read-only, best-effort-cached shape.
+        from agent.heartbeat.storage import HeartbeatRepo
+
+        notices = HeartbeatRepo().list_active_notices()
+        return web.json_response({"notices": notices})
+
+    async def dismiss_notice(request: web.Request) -> web.Response:
+        from agent.heartbeat.storage import HeartbeatRepo
+
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        notice_id = data.get("id")
+        if not isinstance(notice_id, int):
+            return web.json_response({"error": "missing or invalid 'id'"}, status=400)
+        ok = HeartbeatRepo().dismiss(notice_id)
+        return web.json_response({"dismissed": ok})
+
+    async def cve_status(_request: web.Request) -> web.Response:
+        # GET-only read of the last scan — never triggers pip-audit itself,
+        # mirroring /api/usage's read-a-cached-answer shape.
+        from agent.security.cve_scan import CveScanRepo
+
+        latest = CveScanRepo().latest()
+        if latest is None:
+            return web.json_response(
+                {
+                    "cve_count": 0,
+                    "findings": [],
+                    "scanner_version": None,
+                    "error_message": "no scan has run yet",
+                    "generated_at": None,
+                }
+            )
+        return web.json_response(latest)
+
+    async def cve_scan(_request: web.Request) -> web.Response:
+        from agent.security.cve_scan import scan_and_persist
+
+        result = await scan_and_persist()
+        return web.json_response(result)
+
+    async def security_status(_request: web.Request) -> web.Response:
+        # GET-only aggregate of every safety-rail signal (§3.5) — read-only,
+        # no persistence, same shape as cve_status's read-a-cached-answer.
+        from agent.security.audit import audit
+
+        return web.json_response(audit(get_settings(), _get_registry()))
+
+    async def csp_report(request: web.Request) -> web.Response:
+        # Browser-sent CSP-violation reports while the policy runs in
+        # report-only mode (agent-security.md §2.2). Best-effort logging,
+        # same posture as every other print() in this file — a malformed
+        # report body must not 500. 204 No Content is what the Reporting
+        # API expects back.
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        print(f"[csp-violation] {data}")
+        return web.Response(status=204)
+
+    app = web.Application(middlewares=[security_headers_middleware])
     app.router.add_get("/api/usage", usage)
     app.router.add_post("/api/chat", chat)
     app.router.add_post("/api/transcribe", transcribe_audio)
     app.router.add_post("/api/tts", synthesize_speech)
+    app.router.add_get("/api/heartbeat/notices", heartbeat_notices)
+    app.router.add_post("/api/heartbeat/dismiss", dismiss_notice)
+    app.router.add_post("/api/security/csp-report", csp_report)
+    app.router.add_get("/api/security/cve-status", cve_status)
+    app.router.add_post("/api/security/cve-scan", cve_scan)
+    app.router.add_get("/api/security/status", security_status)
     app.router.add_get("/", index)
     app.router.add_get("/index.html", index)
+    # Vendored Three.js (see vendor/three/) — served locally instead of the
+    # unpkg CDN so the UI works offline and P7's CSP doesn't need a
+    # third-party script-src origin.
+    app.router.add_static("/vendor/", os.path.join(PROJECT_ROOT, "vendor"))
     app.on_startup.append(_start_cost_tracking)
     app.on_startup.append(_start_factory_watcher)
-    app.on_cleanup.append(_stop_factory_watcher)
+    app.on_startup.append(_build_notes_index)
     app.on_startup.append(_start_software_factory)
+    app.on_startup.append(_start_heartbeat_scheduler)
+    app.on_cleanup.append(_stop_factory_watcher)
     app.on_cleanup.append(_stop_software_factory)
+    app.on_cleanup.append(_stop_heartbeat_scheduler)
     return app
 
 
 def main() -> None:
+    from agent.security.startup_guard import check_bind_safety
+
     port = int(os.getenv("TRILLION_WEB_PORT", "8123"))
-    web.run_app(build_app(), host="127.0.0.1", port=port)
+    settings = get_settings()
+    check_bind_safety(settings.web_host, auth_configured=bool(settings.web_auth_token))
+    web.run_app(build_app(), host=settings.web_host, port=port)
 
 
 if __name__ == "__main__":

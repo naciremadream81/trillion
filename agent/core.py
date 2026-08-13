@@ -36,11 +36,41 @@ class Agent:
         provider: BaseProvider,
         memory_facts: list[str] | None = None,
         tool_registry=None,  # ToolRegistry, added in Tier 2
+        gate=None,  # agent.safety.approval.Gate, added in Tier 6
+        memory_path: str | None = None,  # Tier 4 store path
     ) -> None:
         self.provider = provider
         self.tool_registry = tool_registry
+        self.gate = gate
         self.history: list[dict] = []
         self.system = build_system_prompt(memory_facts=memory_facts)
+
+        # Give the model the one tool it needs to act on Sean's yes. Registered
+        # here rather than in build_registry() because it has to be bound to
+        # *this* agent's history — that binding is the self-approval defense.
+        if gate is not None and tool_registry is not None:
+            from .tools.confirm import ConfirmActionTool
+
+            tool_registry.register(
+                ConfirmActionTool(gate, lambda: self.history)
+            )
+
+        # Tier 4: remember_fact / forget_fact. Registered here (not
+        # build_registry()) for the same reason as ConfirmActionTool above —
+        # they need to reach back into *this* agent's running system prompt
+        # via update_memory(). Gated on `gate is not None` for the same
+        # reason as ConfirmActionTool too: forget_fact is HARDLINE, and
+        # without a gate present nothing would intercept it — it would just
+        # run. A spawned Factory specialist (agent/factory/dispatch.py)
+        # never passes a gate, so this also keeps memory tools out of its
+        # restricted registry unless its allowlist explicitly grants them.
+        if gate is not None and tool_registry is not None:
+            from .memory import DEFAULT_MEMORY_PATH
+            from .tools.memory import ForgetFactTool, RememberFactTool
+
+            path = memory_path or DEFAULT_MEMORY_PATH
+            tool_registry.register(RememberFactTool(path, self.update_memory))
+            tool_registry.register(ForgetFactTool(path, self.update_memory))
 
     # ── Public interface ──────────────────────────────────────────────────────
 
@@ -160,11 +190,27 @@ class Agent:
         """
         Execute a tool call. Returns the result as a string for the model.
 
-        Tier 2 builds this out. For now it's a safe stub.
-        Tier 6 wraps this with the confirmation gate for consequential tools.
+        Tier 6: every call is screened by the confirmation gate first. When the
+        gate returns a string, that string goes back to the model *instead of*
+        the tool running — either a refusal or a request to ask Sean. The model
+        is never told an action succeeded when it didn't.
         """
         if self.tool_registry is None:
             return f"[No tool registry available. Tool '{tc.name}' could not run.]"
+        if self.gate is not None:
+            # The history index is captured inside evaluate() before the
+            # tool_result for this call is appended, which is what makes
+            # "a human turn after this point" meaningful.
+            try:
+                verdict = self.gate.evaluate(tc, self.history)
+            except Exception as e:  # noqa: BLE001
+                # Fail closed. A broken gate must not become an open gate.
+                return (
+                    f"[Tool '{tc.name}' was not run: the confirmation gate "
+                    f"failed ({e}). Tell Sean — this needs looking at.]"
+                )
+            if verdict is not None:
+                return verdict
         try:
             return await self.tool_registry.run(tc)
         except Exception as e:  # noqa: BLE001

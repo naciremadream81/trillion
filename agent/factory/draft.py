@@ -21,7 +21,7 @@ import json
 import re
 
 from ..core import Agent
-from .sanitize import clean_for_prompt, flag_injection_attempt
+from ..safety.untrusted import clean_for_prompt, flag_injection_attempt
 
 MIN_QUOTE_LENGTH = 20  # role descriptions shorter than this aren't worth checking
 

@@ -22,6 +22,7 @@ import asyncio
 import logging
 
 from ..core import Agent
+from ..safety.risk import LOW
 from .storage import FactoryRepo
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,13 @@ class ConfigDrivenAgent:
         restricted_registry = (
             base_registry.subset(row["tool_allowlist"]) if base_registry else None
         )
+        # No gate on a spawned specialist, by construction rather than by
+        # oversight: its allowlist is intersected with factory_allowed at mint
+        # time, and every tool that isn't read-only is factory_allowed = False.
+        # A specialist therefore cannot reach a gated tool to begin with — and
+        # it must not be able to approve one either, since its history isn't
+        # Sean's conversation. Tier 6's untrusted-content pass belongs at the
+        # registry for exactly this reason: that one *does* need to reach here.
         self._agent = Agent(provider=provider, tool_registry=restricted_registry)
         self._agent.system = row["system_prompt"]
 
@@ -61,6 +69,15 @@ class DispatchTool:
     """
 
     factory_allowed = False  # a spawned agent must never dispatch to another
+
+    # Tier 6: LOW, not CONSEQUENTIAL — deliberately. This agent's approval gate
+    # is at mint time: Sean already said yes to /approve before the specialist
+    # existed, and its own tool_allowlist is an intersection of what he allowed.
+    # Re-confirming every message to an agent he approved would be noise, and
+    # noisy gates get switched off. What the specialist *does* is still gated,
+    # because its tools carry their own tiers.
+    risk = LOW
+    requires_confirmation = None
 
     def __init__(self, row: dict, provider, base_registry) -> None:
         self.name = dispatch_tool_name(row["slug"])

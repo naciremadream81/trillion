@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 
-from .sanitize import clean_for_prompt
+from ..safety.untrusted import clean_for_prompt
 
 DEFAULT_SPECS_DIR = "agent-specs"
 

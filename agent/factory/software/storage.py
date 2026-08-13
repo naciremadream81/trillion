@@ -21,9 +21,11 @@ from datetime import datetime, timezone
 # Terminal/non-terminal states for the build_tasks state machine.
 PENDING = "PENDING"
 PLANNING = "PLANNING"
+ARCHITECTURE = "ARCHITECTURE"
 SCAFFOLDING = "SCAFFOLDING"
 CODING = "CODING"
 TESTING = "TESTING"
+INTEGRATION = "INTEGRATION"
 DOCS = "DOCS"
 BUILT = "BUILT"
 FAILED = "FAILED"
@@ -33,14 +35,17 @@ TERMINAL_STATUSES = {BUILT, FAILED}
 # Legal status transitions, keyed by current status. Any write not listed
 # here is refused loudly (InvalidTransition) — see agent/factory/storage.py
 # for the rationale. TESTING -> CODING is the one corrective-retry edge: a
-# failed test run gets one bounded pass back through CODING before the
-# pipeline proceeds to DOCS (or fails) regardless.
+# failed whole-project test run gets one bounded pass back through CODING
+# (a single whole-project _run_coding() pass, not another per-task loop)
+# before the pipeline proceeds to INTEGRATION (or fails) regardless.
 _VALID_TRANSITIONS: dict[str, set[str]] = {
     PENDING: {PLANNING, FAILED},
-    PLANNING: {SCAFFOLDING, FAILED},
+    PLANNING: {ARCHITECTURE, FAILED},
+    ARCHITECTURE: {SCAFFOLDING, FAILED},
     SCAFFOLDING: {CODING, FAILED},
     CODING: {TESTING, FAILED},
-    TESTING: {CODING, DOCS, FAILED},
+    TESTING: {CODING, INTEGRATION, FAILED},
+    INTEGRATION: {DOCS, FAILED},
     DOCS: {BUILT, FAILED},
 }
 
@@ -129,16 +134,16 @@ class BuildRepo:
             )
 
     def set_plan(self, task_id: int, *, slug: str, plan: dict) -> None:
-        """Save the drafted slug/build plan, moving the task to SCAFFOLDING."""
+        """Save the drafted slug/build plan, moving the task to ARCHITECTURE."""
         with self._connect() as conn:
-            self._check_transition(conn, task_id, SCAFFOLDING)
+            self._check_transition(conn, task_id, ARCHITECTURE)
             conn.execute(
                 """
                 UPDATE build_tasks
                 SET slug = ?, plan = ?, status = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (slug, json.dumps(plan), SCAFFOLDING, _now(), task_id),
+                (slug, json.dumps(plan), ARCHITECTURE, _now(), task_id),
             )
 
     def retry_coding(self, task_id: int) -> int:
@@ -155,6 +160,24 @@ class BuildRepo:
             )
             row = conn.execute("SELECT retry_count FROM build_tasks WHERE id = ?", (task_id,)).fetchone()
         return int(row["retry_count"])
+
+    def set_task_results(self, task_id: int, results: list[dict]) -> None:
+        """
+        Record the per-task Dev<->QA loop's outcomes into the plan JSON's
+        task_results key, once the loop has finished. Doesn't change status
+        — CODING is already the status for the loop's whole duration, so
+        this is a plain data write, not a state-machine transition.
+        """
+        with self._connect() as conn:
+            row = conn.execute("SELECT plan FROM build_tasks WHERE id = ?", (task_id,)).fetchone()
+            if row is None:
+                raise InvalidTransition(f"build task {task_id} not found")
+            plan = json.loads(row["plan"]) if row["plan"] else {}
+            plan["task_results"] = results
+            conn.execute(
+                "UPDATE build_tasks SET plan = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(plan), _now(), task_id),
+            )
 
     def set_error(self, task_id: int, reason: str) -> None:
         """Convenience wrapper: transition straight to FAILED with a reason."""

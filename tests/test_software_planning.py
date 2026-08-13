@@ -6,6 +6,7 @@ Run from the project root:
 """
 
 import asyncio
+import json
 import unittest
 
 from agent.factory.software.planning import PlanningError, run_planning
@@ -19,7 +20,10 @@ def run(coro):
 VALID_PLAN_REPLY = (
     '{"project_name": "md-to-csv", "tech_stack": "python", '
     '"files": ["main.py", "tests/test_main.py"], "entry_point": "main.py", '
-    '"test_command": "pytest", "summary": "Converts markdown tables to CSV."}'
+    '"test_command": "pytest", "summary": "Converts markdown tables to CSV.", '
+    '"tasks": [{"title": "Implement CLI", "description": "Write main.py that '
+    'reads a markdown table and writes CSV.", "acceptance_criteria": '
+    '"Running python main.py sample.md prints valid CSV to stdout."}]}'
 )
 
 
@@ -44,6 +48,10 @@ class TestRunPlanning(unittest.TestCase):
         self.assertEqual(plan["project_name"], "md-to-csv")
         self.assertEqual(plan["files"], ["main.py", "tests/test_main.py"])
         self.assertEqual(plan["test_command"], "pytest")
+        self.assertEqual(len(plan["tasks"]), 1)
+        self.assertEqual(plan["tasks"][0]["id"], 1)
+        self.assertEqual(plan["tasks"][0]["title"], "Implement CLI")
+        self.assertIn("acceptance_criteria", plan["tasks"][0])
 
     def test_invalid_json_then_valid_recovers_on_retry(self):
         provider = FakeProvider(["not json at all", VALID_PLAN_REPLY])
@@ -68,6 +76,39 @@ class TestRunPlanning(unittest.TestCase):
         provider = FakeProvider([VALID_PLAN_REPLY])
         with self.assertRaises(PlanningError):
             run(run_planning("   ", provider))
+
+    def test_missing_tasks_field_raises_after_retry(self):
+        no_tasks_reply = (
+            '{"project_name": "x", "tech_stack": "python", "files": ["a.py"], '
+            '"entry_point": "a.py", "test_command": "", "summary": "s"}'
+        )
+        provider = FakeProvider([no_tasks_reply, no_tasks_reply])
+        with self.assertRaises(PlanningError):
+            run(run_planning("project", provider))
+
+    def test_empty_tasks_list_raises_after_retry(self):
+        bad_reply = (
+            '{"project_name": "x", "tech_stack": "python", "files": ["a.py"], '
+            '"entry_point": "a.py", "test_command": "", "summary": "s", "tasks": []}'
+        )
+        provider = FakeProvider([bad_reply, bad_reply])
+        with self.assertRaises(PlanningError):
+            run(run_planning("project", provider))
+
+    def test_too_many_tasks_raises_after_retry(self):
+        from agent.factory.software.planning import MAX_TASKS
+
+        too_many = [
+            {"title": f"t{i}", "description": "d", "acceptance_criteria": "c"}
+            for i in range(MAX_TASKS + 1)
+        ]
+        bad_reply = json.dumps({
+            "project_name": "x", "tech_stack": "python", "files": ["a.py"],
+            "entry_point": "a.py", "test_command": "", "summary": "s", "tasks": too_many,
+        })
+        provider = FakeProvider([bad_reply, bad_reply])
+        with self.assertRaises(PlanningError):
+            run(run_planning("project", provider))
 
 
 if __name__ == "__main__":

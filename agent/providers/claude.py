@@ -13,6 +13,7 @@ from anthropic import AsyncAnthropic, APIConnectionError, APIStatusError, RateLi
 
 from ._caching import apply_prompt_caching
 from .base import BaseProvider, TextChunk, ToolCall, ProviderResponse, TokenUsage
+from ..personality import TONAL_CHECKPOINT, append_voice_cue
 
 
 class ClaudeProvider(BaseProvider):
@@ -47,8 +48,15 @@ class ClaudeProvider(BaseProvider):
 
         # Prompt caching: cache the stable prefix (tools + system) and the
         # conversation prefix so long chats don't get slower turn over turn.
-        # Non-mutating — never touches the caller's history.
+        # Non-mutating — never touches the caller's history. Must run BEFORE
+        # the personality layer below: it marks cache_control on the last
+        # message's existing content, and TONAL_CHECKPOINT/append_voice_cue
+        # only append new, uncached blocks after that — see
+        # agent/personality.py's module docstring for why the order matters.
         cached_system, cached_messages = apply_prompt_caching(system, messages)
+
+        cached_system = cached_system + [{"type": "text", "text": TONAL_CHECKPOINT}]
+        cached_messages = append_voice_cue(cached_messages)
 
         # Tier 2: pass tools into the API call when the registry provides them.
         api_kwargs: dict = dict(

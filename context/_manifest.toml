@@ -1,0 +1,19 @@
+# Which context docs get injected into every system prompt.
+#
+# When this file exists it is AUTHORITATIVE: a doc under context/ that isn't
+# listed here is not loaded, no matter what. Delete the file and the loader
+# falls back to globbing every top-level context/*.md (the old behavior).
+#
+# That distinction matters because these docs ride along on every single
+# turn — they are the most expensive text in the repo per token spent. The
+# glob was fine while context/ held one schema doc; it stops being fine the
+# moment generated docs land in here (see context/self/).
+#
+# Paths are relative to context/ and may name subdirectories. Absolute
+# paths and '..' traversal are refused. A listed file that doesn't exist is
+# skipped quietly — so a doc can be listed before the generator that writes
+# it exists.
+
+docs = [
+  "analytics-supabase-schema.md",
+]
