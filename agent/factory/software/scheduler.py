@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from ...tools.web_search import resolve_search_provider
 from .opportunity_scout import OpportunityScoutError, run_opportunity_scout
 from .pipeline import BudgetCapExceeded, BuildCapExceeded, FactoryPaused, start_build
 
@@ -53,20 +54,28 @@ class AutonomousScheduler:
         self.usage_repo = usage_repo
 
     async def tick_once(self) -> None:
-        if self.settings.factory_paused:
+        # builds_paused(), not factory_paused: pausing Trillion as a whole
+        # pauses builds too (agent/config.py).
+        if self.settings.builds_paused():
             return
         if not self.settings.factory_autonomous_themes:
             return  # autonomous triggering is off; on-demand /build is unaffected
-        if not self.settings.brave_search_api_key:
+        resolved = resolve_search_provider(self.settings)
+        if resolved is None:
             # No fallback to a non-researched guess — skip rather than degrade.
-            logger.info("autonomous scheduler skipped a tick: BRAVE_SEARCH_API_KEY not configured")
+            logger.info("autonomous scheduler skipped a tick: no search provider configured")
             return
         if self.repo.count_builds_today() >= self.settings.factory_daily_build_cap:
             return
 
+        search_provider, search_api_key = resolved
         try:
             report = await run_opportunity_scout(
-                self.settings.factory_autonomous_themes, self.provider, self.settings.brave_search_api_key
+                self.settings.factory_autonomous_themes,
+                self.provider,
+                search_api_key,
+                search_provider=search_provider,
+                firecrawl_base_url=self.settings.firecrawl_base_url,
             )
         except OpportunityScoutError as e:
             logger.info("autonomous scheduler skipped a tick: opportunity scout failed: %s", e)

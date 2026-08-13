@@ -17,7 +17,7 @@ import json
 import re
 
 from ...core import Agent
-from ..sanitize import clean_for_prompt, flag_injection_attempt
+from ...safety.untrusted import clean_for_prompt, flag_injection_attempt
 
 REQUIRED_FIELDS = ("project_name", "tech_stack", "files", "entry_point", "test_command", "summary", "tasks")
 TASK_REQUIRED_FIELDS = ("title", "description", "acceptance_criteria")

@@ -26,6 +26,13 @@ Agent Factory commands (spawn new specialist sub-agents, gated by approval):
 Software Factory commands (build whole standalone projects, fully autonomous):
     /build <description>   — build a whole software project in the background
     /builds                — list recent builds and their status
+
+Safety rails (Tier 6 — the confirmation gate):
+    /pause                 — stop Trillion from acting (conversation and reads still work)
+    /resume                — lift the pause
+    /pending-actions       — list actions parked awaiting your yes
+    /audit                 — show the recent audit log
+    /deny <id> [reason]    — refuse a parked action instead of waiting out its expiry
 """
 
 import argparse
@@ -61,6 +68,11 @@ SLASH_COMMANDS = {
     "/reject":  "Reject with feedback: /reject <id> <feedback>",
     "/build":   "Build a whole software project: /build <description>",
     "/builds":  "List recent Software Factory builds and their status",
+    "/pause":   "Stop Trillion from acting (conversation and reads still work)",
+    "/resume":  "Lift the pause",
+    "/pending-actions": "List actions parked awaiting your yes",
+    "/audit":   "Show the recent audit log",
+    "/deny":    "Refuse a parked action: /deny <id> [reason]",
     "/quit":    "Exit",
     "/help":    "Show this list",
 }
@@ -81,6 +93,7 @@ def handle_slash(
     provider_name: str,
     factory: "FactoryContext | None" = None,
     software_factory: "SoftwareFactoryContext | None" = None,
+    gate=None,  # agent.safety.approval.Gate, added in Tier 6
 ) -> bool:
     """
     Handle a slash command. Returns True if we should continue the loop,
@@ -90,6 +103,8 @@ def handle_slash(
     registry, background_tasks) — None when the factory isn't wired up
     (e.g. tests exercising the non-factory commands only). `software_factory`
     is the analogous bundle for the Software Factory's /build and /builds.
+    `gate` is None when Tier 6 isn't wired up (same posture as the others —
+    a broken safety.db shouldn't stop a normal conversation).
     """
     parts = command.strip().split(maxsplit=1)
     cmd = parts[0].lower()
@@ -137,6 +152,12 @@ def handle_slash(
             console.print("[yellow]Software Factory isn't available in this session.[/yellow]\n")
         else:
             _handle_software_factory_command(cmd, rest, software_factory)
+
+    elif cmd in ("/pause", "/resume", "/pending-actions", "/audit", "/deny"):
+        if gate is None:
+            console.print("[yellow]Safety rails aren't available in this session.[/yellow]\n")
+        else:
+            _handle_safety_command(cmd, rest, gate)
 
     else:
         console.print(f"[yellow]Unknown command: {command}. Type /help.[/yellow]\n")
@@ -294,11 +315,57 @@ def _handle_software_factory_command(cmd: str, rest: str, sf: "SoftwareFactoryCo
             console.print("[dim]───────────────────[/dim]\n")
 
 
+def _handle_safety_command(cmd: str, rest: str, gate) -> None:
+    if cmd == "/pause":
+        gate.pause()
+        console.print("[yellow]Paused.[/yellow] Conversation and reads still work; gated actions and builds do not.\n")
+
+    elif cmd == "/resume":
+        gate.resume()
+        console.print("[green]Resumed.[/green] Trillion can act again.\n")
+
+    elif cmd == "/pending-actions":
+        gate.repo.expire_stale()
+        actions = gate.repo.list_pending()
+        if not actions:
+            console.print("[dim]No actions awaiting confirmation.[/dim]\n")
+        else:
+            console.print("\n[dim]── Awaiting confirmation ──[/dim]")
+            for a in actions:
+                console.print(f"  [bold]#{a['id']}[/bold]  risk=[bold]{a['risk']}[/bold]")
+                console.print(f"    {a['summary']}")
+            console.print("[dim]───────────────────────────[/dim]\n")
+
+    elif cmd == "/audit":
+        entries = gate.repo.recent_audit()
+        if not entries:
+            console.print("[dim]No audit entries yet.[/dim]\n")
+        else:
+            console.print("\n[dim]── Recent audit log ──[/dim]")
+            for e in entries:
+                tool = f"  tool={e['tool_name']}" if e.get("tool_name") else ""
+                action = f"  action=#{e['action_id']}" if e.get("action_id") else ""
+                console.print(f"  [bold]{e['created_at']}[/bold]  {e['event']}{tool}{action}")
+                if e.get("detail"):
+                    console.print(f"    {e['detail']}")
+            console.print("[dim]──────────────────────[/dim]\n")
+
+    elif cmd == "/deny":
+        deny_parts = rest.split(maxsplit=1)
+        if not deny_parts or not deny_parts[0].isdigit():
+            console.print("[yellow]Usage: /deny <id> [reason][/yellow]\n")
+            return
+        action_id = int(deny_parts[0])
+        reason = deny_parts[1] if len(deny_parts) > 1 else ""
+        console.print(f"[dim]{gate.deny(action_id, reason)}[/dim]\n")
+
+
 async def chat_loop(
     agent: Agent,
     provider_name: str,
     factory: "FactoryContext | None" = None,
     software_factory: "SoftwareFactoryContext | None" = None,
+    gate=None,
 ) -> None:
     """The main REPL. Runs until the user quits."""
     print_banner(provider_name, agent.provider.model_name)
@@ -317,7 +384,9 @@ async def chat_loop(
 
             # ── Slash commands ────────────────────────────────────────────
             if user_input.startswith("/"):
-                should_continue = handle_slash(user_input, agent, provider_name, factory, software_factory)
+                should_continue = handle_slash(
+                    user_input, agent, provider_name, factory, software_factory, gate
+                )
                 if not should_continue:
                     break
                 continue
@@ -447,8 +516,82 @@ async def main() -> None:
     except Exception as e:  # noqa: BLE001
         console.print(f"[dim]Software Factory unavailable ({e}); continuing.[/dim]")
 
-    agent = Agent(provider=provider, tool_registry=registry)
-    await chat_loop(agent, provider_name=args.provider, factory=factory, software_factory=software_factory)
+    # Tier 6 safety rails: best-effort like the factories above — a broken
+    # safety.db must not stop a normal conversation, only leave it ungated
+    # (handle_slash and Agent both already treat gate=None as "unavailable").
+    gate = None
+    try:
+        from agent.safety.approval import Gate
+        from agent.safety.storage import SafetyRepo
+
+        safety_repo = SafetyRepo()
+        gate = Gate(
+            safety_repo, registry,
+            mode=settings.confirmation_mode,
+            ttl_seconds=settings.confirmation_ttl_seconds,
+            paused=settings.trillion_paused,
+        )
+        registry.set_audit_sink(safety_repo.log)
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[dim]Safety rails unavailable ({e}); continuing ungated.[/dim]")
+
+    # Tier 4 memory: best-effort, same posture as the sections above — a
+    # missing/unreadable facts file just means Trillion starts with no facts,
+    # not a crash.
+    memory_facts: list[str] = []
+    try:
+        from agent.memory import load_facts
+
+        memory_facts = load_facts(settings.memory_path)
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[dim]Memory unavailable ({e}); continuing with no facts.[/dim]")
+
+    # Tier 2 notes index: best-effort, same posture as the sections above.
+    # Bounded with a timeout because the vault is an rclone FUSE mount that
+    # has been observed to hang/error on read while still reporting mounted
+    # (see agent/notes/index.py) — a broken mount must not stall startup.
+    # This gives a workable baseline; P6's ticks will keep it fresh once that
+    # tier lands.
+    try:
+        from agent.notes.index import build_index
+
+        indexed = await asyncio.wait_for(
+            asyncio.to_thread(build_index, settings.notes_vault_path, settings.notes_index_path),
+            timeout=10.0,
+        )
+        console.print(f"[dim]Notes index: {indexed} file(s).[/dim]")
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[dim]Notes index unavailable ({e}); continuing with stale/no index.[/dim]")
+
+    # Tier 5 heartbeat + Code Sentinel: best-effort like the sections above —
+    # a broken heartbeat.db must not stop a normal conversation. Code
+    # Sentinel checks self-skip (empty list) when GitHub isn't configured, so
+    # this always constructs the scheduler even with zero checks registered.
+    try:
+        from agent.heartbeat.checks.code_sentinel import build_code_sentinel_checks
+        from agent.heartbeat.checks.cve_scan import CveScanCheck
+        from agent.heartbeat.scheduler import HeartbeatScheduler
+        from agent.heartbeat.storage import HeartbeatRepo
+
+        heartbeat_repo = HeartbeatRepo()
+        heartbeat_checks = build_code_sentinel_checks(settings) + [CveScanCheck()]
+        heartbeat_scheduler = HeartbeatScheduler(
+            heartbeat_checks, heartbeat_repo, settings, background_tasks=background_tasks,
+        )
+        heartbeat_task = asyncio.create_task(heartbeat_scheduler.run_forever())
+        background_tasks.add(heartbeat_task)
+        heartbeat_task.add_done_callback(background_tasks.discard)
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[dim]Heartbeat unavailable ({e}); continuing.[/dim]")
+
+    agent = Agent(
+        provider=provider, tool_registry=registry, gate=gate,
+        memory_facts=memory_facts, memory_path=settings.memory_path,
+    )
+    await chat_loop(
+        agent, provider_name=args.provider,
+        factory=factory, software_factory=software_factory, gate=gate,
+    )
 
 
 if __name__ == "__main__":

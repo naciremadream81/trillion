@@ -383,6 +383,66 @@
 
   /* Daily sparkline. */
   .tr-spark { display: block; width: 100%; height: 34px; margin-bottom: 10px; overflow: visible; }
+
+  /* ========================= SECURITY SHIELD ========================= */
+  /* Mirrors .tr-cost exactly (same pill shape, same panel), but green is a
+     distinct third state here (score >= 85) rather than the implicit default. */
+  .tr-shield { display: inline-flex; align-items: center; gap: 7px; }
+  .tr-shield-icon { width: 15px; height: 15px; color: var(--accent); }
+  .tr-shield-score { font-size: 13px; font-weight: 600; letter-spacing: -0.2px; font-variant-numeric: tabular-nums; }
+  .tr-shield.amber { border-color: #e0a63b; }
+  .tr-shield.amber .tr-shield-icon,
+  .tr-shield.amber .tr-shield-score { color: #e0a63b; }
+  .tr-shield.red { border-color: #ff6b6b; box-shadow: 0 0 16px rgba(255, 107, 107, 0.35); }
+  .tr-shield.red .tr-shield-icon,
+  .tr-shield.red .tr-shield-score { color: #ff6b6b; }
+
+  .tr-signal-row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .tr-signal-row:last-child { border-bottom: none; }
+  .tr-signal-sev { flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; }
+  .tr-signal-sev.critical { background: #ff6b6b; }
+  .tr-signal-sev.warning  { background: #e0a63b; }
+  .tr-signal-sev.info     { background: var(--text-dim); }
+  .tr-signal-sev.ok       { background: var(--accent); }
+  .tr-signal-body { flex: 1; min-width: 0; }
+  .tr-signal-label { font-size: 12px; color: var(--text); }
+  .tr-signal-value { font-size: 10.5px; color: var(--text-dim); margin-top: 1px; }
+  .tr-shield-audit-btn {
+    display: block; width: 100%; margin-top: 4px;
+    padding: 8px 10px; border-radius: 8px;
+    border: 1px solid var(--border-strong); background: rgba(255, 255, 255, 0.03);
+    color: var(--text); font-family: inherit; font-size: 12px; font-weight: 600;
+    cursor: pointer; transition: background 0.2s var(--ease);
+  }
+  .tr-shield-audit-btn:hover { background: rgba(255, 255, 255, 0.08); }
+  .tr-shield-audit-btn:disabled { opacity: 0.5; cursor: default; }
+
+  /* ========================= HEARTBEAT NOTICES ========================= */
+  .tr-notice-row {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 8px 0; border-bottom: 1px solid var(--border);
+  }
+  .tr-notice-row:last-child { border-bottom: none; }
+  .tr-notice-sev {
+    flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%;
+    margin-top: 5px;
+  }
+  .tr-notice-sev.critical { background: #ff6b6b; }
+  .tr-notice-sev.warning  { background: #e0a63b; }
+  .tr-notice-sev.info     { background: var(--text-dim); }
+  .tr-notice-body { flex: 1; min-width: 0; }
+  .tr-notice-msg { font-size: 12px; color: var(--text); line-height: 1.4; }
+  .tr-notice-time { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
+  .tr-notice-dismiss {
+    flex: 0 0 auto;
+    width: 20px; height: 20px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: none; border-radius: 5px;
+    background: transparent; color: var(--text-dim);
+    cursor: pointer; font-size: 13px; line-height: 1;
+    transition: background 0.2s var(--ease), color 0.2s var(--ease);
+  }
+  .tr-notice-dismiss:hover { background: rgba(255, 255, 255, 0.06); color: #ff6b6b; }
 </style>
 </head>
 <body>
@@ -400,6 +460,12 @@
         <span class="tr-cost-tag">API</span>
         <span class="tr-cost-delta flat" id="tr-cost-delta"></span>
       </button>
+      <button class="tr-cost tr-shield" id="tr-shield" aria-label="Security shield score" aria-expanded="false" aria-haspopup="dialog">
+        <svg class="tr-shield-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2l8 3.5v6c0 5-3.5 8.5-8 10.5-4.5-2-8-5.5-8-10.5v-6L12 2z"/>
+        </svg>
+        <span class="tr-shield-score" id="tr-shield-score">--</span>
+      </button>
       <button class="tr-icon-btn" title="Neural map" aria-label="Neural map">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="6" cy="7" r="2.2"/><circle cx="18" cy="6" r="2.2"/>
@@ -408,12 +474,12 @@
           <path d="M8 7.6l2 3M16.2 7.2l-2.4 3M13.6 13l2.6 2.6M10.2 13.2L8.7 15.3"/>
         </svg>
       </button>
-      <button class="tr-icon-btn" title="Alerts" aria-label="Alerts">
+      <button class="tr-icon-btn" id="tr-alerts" title="Alerts" aria-label="Alerts" aria-expanded="false" aria-haspopup="dialog">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
           <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/>
           <path d="M13.7 21a2 2 0 0 1-3.4 0"/>
         </svg>
-        <span class="tr-badge">3</span>
+        <span class="tr-badge" id="tr-alerts-badge" style="display:none;"></span>
       </button>
       <button class="tr-icon-btn" title="Settings" aria-label="Settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -460,6 +526,30 @@
       <h4>By day</h4>
       <svg class="tr-spark" id="tr-cost-spark" viewBox="0 0 100 32" preserveAspectRatio="none" style="display:none;"></svg>
       <div class="tr-cost-days" id="tr-cost-days"><div class="tr-cost-empty">No usage yet.</div></div>
+    </div>
+  </div>
+
+  <!-- ==================== SECURITY SHIELD EXPAND PANEL ==================== -->
+  <div class="tr-cost-panel" id="tr-shield-panel" role="dialog" aria-label="Security shield status">
+    <div class="tr-cost-phead">
+      <div class="tr-cost-plabel">Security Shield · Self-audit</div>
+      <div class="tr-cost-big" id="tr-shield-big">--</div>
+    </div>
+    <div class="tr-cost-sec">
+      <div id="tr-shield-signals"><div class="tr-cost-empty">Loading…</div></div>
+    </div>
+    <div class="tr-cost-sec">
+      <button class="tr-shield-audit-btn" id="tr-shield-run">Run audit now</button>
+    </div>
+  </div>
+
+  <!-- ==================== HEARTBEAT NOTICES EXPAND PANEL ==================== -->
+  <div class="tr-cost-panel" id="tr-notices-panel" role="dialog" aria-label="Heartbeat notices">
+    <div class="tr-cost-phead">
+      <div class="tr-cost-plabel">Alerts</div>
+    </div>
+    <div class="tr-cost-sec">
+      <div id="tr-notices-list"><div class="tr-cost-empty">No active notices.</div></div>
     </div>
   </div>
 
@@ -536,12 +626,15 @@
     <div class="tr-mic-hint">Tap or say &ldquo;Hey Trillion&rdquo;</div>
   </div>
 
-  <!-- Three.js + post-processing via CDN (import map keeps addon imports resolvable) -->
+  <!-- Three.js + post-processing, vendored locally (see vendor/three/) so the
+       UI works offline and CSP doesn't need to allow a third-party script
+       origin (agent-security.md §2.2/P7). Pinned at 0.160.0 — re-vendor
+       manually to upgrade, there's no build step watching this. -->
   <script type="importmap">
   {
     "imports": {
-      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      "three": "/vendor/three/build/three.module.js",
+      "three/addons/": "/vendor/three/examples/jsm/"
     }
   }
   </script>
@@ -1348,6 +1441,227 @@
     });
 
     fetchUsage();      // initial load
+    startPolling();
+  })();
+  </script>
+
+  <!-- ============================ HEARTBEAT NOTICES ============================ -->
+  <script>
+  (function () {
+    const POLL_MS = 30000; // match the heartbeat tick's default interval
+
+    const btn   = document.getElementById('tr-alerts');
+    const badge = document.getElementById('tr-alerts-badge');
+    const panel = document.getElementById('tr-notices-panel');
+    const list  = document.getElementById('tr-notices-list');
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    function timeAgo(iso) {
+      const then = new Date(iso).getTime();
+      if (isNaN(then)) return '';
+      const mins = Math.max(0, Math.round((Date.now() - then) / 60000));
+      if (mins < 1) return 'just now';
+      if (mins < 60) return mins + 'm ago';
+      const hours = Math.round(mins / 60);
+      if (hours < 24) return hours + 'h ago';
+      return Math.round(hours / 24) + 'd ago';
+    }
+
+    function render(notices) {
+      if (badge) {
+        if (notices.length) {
+          badge.textContent = notices.length > 9 ? '9+' : String(notices.length);
+          badge.style.display = '';
+        } else {
+          badge.style.display = 'none';
+        }
+      }
+
+      if (!notices.length) {
+        list.innerHTML = '<div class="tr-cost-empty">No active notices.</div>';
+        return;
+      }
+
+      list.innerHTML = notices.map((n) =>
+        '<div class="tr-notice-row" data-id="' + n.id + '">'
+        + '<span class="tr-notice-sev ' + escapeHtml(n.severity) + '"></span>'
+        + '<span class="tr-notice-body">'
+        + '<span class="tr-notice-msg">' + escapeHtml(n.message) + '</span>'
+        + '<span class="tr-notice-time">' + timeAgo(n.created_at) + '</span>'
+        + '</span>'
+        + '<button class="tr-notice-dismiss" data-id="' + n.id + '" aria-label="Dismiss">&times;</button>'
+        + '</div>'
+      ).join('');
+    }
+
+    async function fetchHeartbeatNotices() {
+      try {
+        const res = await fetch('/api/heartbeat/notices', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        render(data.notices || []);
+      } catch (err) {
+        // Endpoint not reachable (e.g. opened as a static file) — degrade quietly.
+      }
+    }
+
+    async function dismissNotice(id) {
+      try {
+        const res = await fetch('/api/heartbeat/dismiss', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: id }),
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        await res.json();
+      } catch (err) {
+        // Best-effort — refresh below will reconcile either way.
+      }
+      fetchHeartbeatNotices();
+    }
+
+    list.addEventListener('click', (e) => {
+      const el = e.target.closest('.tr-notice-dismiss');
+      if (!el) return;
+      const id = parseInt(el.getAttribute('data-id'), 10);
+      if (!isNaN(id)) dismissNotice(id);
+    });
+
+    // Toggle the panel.
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = panel.classList.toggle('open');
+      btn.setAttribute('aria-expanded', String(open));
+      if (open) fetchHeartbeatNotices(); // refresh on open
+    });
+    // Close on outside click / Escape.
+    document.addEventListener('click', (e) => {
+      if (panel.classList.contains('open') && !panel.contains(e.target) && e.target !== btn) {
+        panel.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && panel.classList.contains('open')) {
+        panel.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+    });
+
+    // Poll periodically, but only while the tab is visible.
+    let timer = null;
+    function startPolling() {
+      if (timer) return;
+      timer = setInterval(() => { if (!document.hidden) fetchHeartbeatNotices(); }, POLL_MS);
+    }
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) fetchHeartbeatNotices(); // catch up on return
+    });
+
+    fetchHeartbeatNotices(); // initial load
+    startPolling();
+  })();
+  </script>
+
+  <!-- ============================ SECURITY SHIELD ============================ -->
+  <script>
+  (function () {
+    const POLL_MS = 300000; // 5 minutes — a self-audit score doesn't need to be fresher than that
+
+    const btn      = document.getElementById('tr-shield');
+    const panel    = document.getElementById('tr-shield-panel');
+    const elScore  = document.getElementById('tr-shield-score');
+    const elBig    = document.getElementById('tr-shield-big');
+    const elSignals = document.getElementById('tr-shield-signals');
+    const runBtn   = document.getElementById('tr-shield-run');
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    function applyColor(color) {
+      btn.classList.remove('amber', 'red');
+      if (color === 'amber') btn.classList.add('amber');
+      else if (color === 'red') btn.classList.add('red');
+    }
+
+    function render(data) {
+      elScore.textContent = String(data.score);
+      elBig.textContent = String(data.score) + ' / 100';
+      applyColor(data.color);
+
+      const signals = data.signals || [];
+      if (!signals.length) {
+        elSignals.innerHTML = '<div class="tr-cost-empty">No signals.</div>';
+        return;
+      }
+      elSignals.innerHTML = signals.map((s) =>
+        '<div class="tr-signal-row" title="' + escapeHtml(s.detail || '') + '">'
+        + '<span class="tr-signal-sev ' + escapeHtml(s.severity) + '"></span>'
+        + '<span class="tr-signal-body">'
+        + '<span class="tr-signal-label">' + escapeHtml(s.label) + '</span>'
+        + '<span class="tr-signal-value">' + escapeHtml(s.value) + '</span>'
+        + '</span>'
+        + '</div>'
+      ).join('');
+    }
+
+    async function fetchSecurityStatus() {
+      try {
+        const res = await fetch('/api/security/status', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        render(data);
+      } catch (err) {
+        // Endpoint not reachable (e.g. opened as a static file) — degrade quietly.
+      }
+    }
+
+    runBtn.addEventListener('click', async () => {
+      runBtn.disabled = true;
+      runBtn.textContent = 'Running…';
+      await fetchSecurityStatus();
+      runBtn.disabled = false;
+      runBtn.textContent = 'Run audit now';
+    });
+
+    // Toggle the panel.
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = panel.classList.toggle('open');
+      btn.setAttribute('aria-expanded', String(open));
+      if (open) fetchSecurityStatus(); // refresh on open
+    });
+    // Close on outside click / Escape.
+    document.addEventListener('click', (e) => {
+      if (panel.classList.contains('open') && !panel.contains(e.target) && e.target !== btn) {
+        panel.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && panel.classList.contains('open')) {
+        panel.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+    });
+
+    // Poll ~every 5 min, but only while the tab is visible.
+    let timer = null;
+    function startPolling() {
+      if (timer) return;
+      timer = setInterval(() => { if (!document.hidden) fetchSecurityStatus(); }, POLL_MS);
+    }
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) fetchSecurityStatus(); // catch up on return
+    });
+
+    fetchSecurityStatus(); // initial load
     startPolling();
   })();
   </script>
