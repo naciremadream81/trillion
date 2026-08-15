@@ -53,6 +53,35 @@ class TestIsAuthorized(unittest.TestCase):
     def test_correct_bearer_token_authorized(self):
         self.assertTrue(is_authorized({"Authorization": "Bearer secret"}, "secret"))
 
+    def test_scheme_matched_case_insensitively(self):
+        # RFC 7235 §2.1 — auth scheme names are case-insensitive, so a
+        # standards-compliant client sending "bearer" must not get a 401.
+        for scheme in ("bearer", "BEARER", "BeArEr"):
+            with self.subTest(scheme=scheme):
+                self.assertTrue(is_authorized({"Authorization": f"{scheme} secret"}, "secret"))
+
+    def test_non_ascii_credential_rejected_not_raised(self):
+        # hmac.compare_digest() raises TypeError on non-ASCII str, which an
+        # unauthenticated client could use to turn a 401 into a 500. The
+        # comparison happens on encoded bytes, so this is a plain non-match.
+        for value in ("é", "Ã©", "éÿ", "tokén"):
+            with self.subTest(value=value):
+                self.assertFalse(is_authorized({"Authorization": f"Bearer {value}"}, "secret"))
+
+    def test_surrogate_escaped_credential_rejected_not_raised(self):
+        # A raw non-UTF-8 byte on the wire (0xE9) reaches us from aiohttp
+        # already decoded with surrogateescape. Plain .encode("utf-8") would
+        # raise UnicodeEncodeError here and 500 the request.
+        for value in ("\udce9", "tok\udce9n", "\udcff\udcfe"):
+            with self.subTest(value=repr(value)):
+                self.assertFalse(is_authorized({"Authorization": f"Bearer {value}"}, "secret"))
+
+    def test_non_ascii_token_still_matches_itself(self):
+        # Encoding both sides means a non-ASCII configured token is usable
+        # rather than permanently un-matchable.
+        self.assertTrue(is_authorized({"Authorization": "Bearer tokén"}, "tokén"))
+        self.assertFalse(is_authorized({"Authorization": "Bearer tokén"}, "token"))
+
 
 class TestServeBearerAuth(AioHTTPTestCase):
     AUTH_TOKEN = "test-token-value"
@@ -102,6 +131,27 @@ class TestServeBearerAuth(AioHTTPTestCase):
     async def test_api_route_rejects_missing_header(self):
         resp = await self.client.request("GET", "/api/usage")
         self.assertEqual(resp.status, 401)
+
+    async def test_non_ascii_header_returns_401_not_500(self):
+        # Regression: comparing non-ASCII str raised TypeError inside the
+        # middleware, letting an unauthenticated client force a 500.
+        resp = await self.client.request(
+            "GET", "/api/usage", headers={"Authorization": "Bearer é"}
+        )
+        self.assertEqual(resp.status, 401)
+
+    async def test_raw_non_utf8_byte_returns_401_not_500(self):
+        # Regression: 0xE9 arrives surrogate-escaped and blew up the encode.
+        resp = await self.client.request(
+            "GET", "/api/usage", headers={"Authorization": "Bearer \udce9"}
+        )
+        self.assertEqual(resp.status, 401)
+
+    async def test_lowercase_bearer_scheme_accepted(self):
+        resp = await self.client.request(
+            "GET", "/api/usage", headers={"Authorization": f"bearer {self.AUTH_TOKEN}"}
+        )
+        self.assertEqual(resp.status, 200)
 
     async def test_api_route_rejects_wrong_token(self):
         resp = await self.client.request(
