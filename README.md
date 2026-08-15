@@ -34,9 +34,11 @@ Web UI + cost dashboard (default port `8123`):
 trillion serve
 # or
 TRILLION_WEB_PORT=8123 trillion serve
+# fixed-port service mode
+TRILLION_WEB_STRICT_PORT=1 TRILLION_WEB_PORT=8123 trillion serve
 ```
 
-Then open `http://localhost:8123/` — serves `index.html`, `POST /api/chat`, and `GET /api/usage`.
+Then open the URL printed by the server — by default `http://localhost:8123/`, falling forward to the next free local port if `8123` is already in use. It serves `index.html`, `POST /api/chat`, and `GET /api/usage`.
 
 ---
 
@@ -124,7 +126,7 @@ Type normally for a streaming turn. Slash commands:
 - `POST /api/transcribe` — audio in, transcript out (Deepgram; needs `DEEPGRAM_API_KEY`)
 - `POST /api/tts` — text in, WAV out (local Piper; no key needed)
 
-`serve.py` binds `127.0.0.1` deliberately — there is no auth layer, so it must not be exposed to a network.
+`serve.py` binds `127.0.0.1` deliberately — there is no auth layer, so it must not be exposed to a network. Set `TRILLION_WEB_STRICT_PORT=1` when a service manager should fail instead of falling forward on a busy configured port.
 
 Usage rows are written when the agent runs (CLI or web) so the dashboard stays live against the same SQLite file.
 

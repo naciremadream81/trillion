@@ -20,6 +20,7 @@ Permissions-Policy, and a report-only Content-Security-Policy.
 Run:
     python serve.py
     TRILLION_WEB_PORT=8123 python serve.py
+    TRILLION_WEB_STRICT_PORT=1 TRILLION_WEB_PORT=8123 python serve.py
 
 Binds to TRILLION_WEB_HOST (default 127.0.0.1). Binding anything else
 requires TRILLION_WEB_AUTH_TOKEN to be set — see agent/security/
@@ -34,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import socket
 import uuid
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
@@ -583,12 +585,57 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
     return app
 
 
+def _can_bind(host: str, port: int) -> bool:
+    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as probe:
+        try:
+            probe.bind((host, port))
+        except OSError:
+            return False
+    return True
+
+
+def _select_web_port(
+    host: str,
+    preferred_port: int,
+    *,
+    strict: bool = False,
+    search_limit: int = 10,
+) -> int:
+    if preferred_port == 0 or _can_bind(host, preferred_port):
+        return preferred_port
+
+    if strict:
+        next_port = preferred_port + 1
+        raise SystemExit(
+            f"Port {preferred_port} is already in use on {host}. "
+            f"Stop the other server or run TRILLION_WEB_PORT={next_port} trillion serve."
+        )
+
+    for port in range(preferred_port + 1, preferred_port + search_limit + 1):
+        if _can_bind(host, port):
+            print(f"Port {preferred_port} is busy on {host}; starting on {port} instead.")
+            return port
+
+    raise SystemExit(
+        f"No free web port found on {host} from {preferred_port} "
+        f"through {preferred_port + search_limit}."
+    )
+
+
 def main() -> None:
     from agent.security.startup_guard import check_bind_safety
 
-    port = int(os.getenv("TRILLION_WEB_PORT", "8123"))
+    raw_port = os.getenv("TRILLION_WEB_PORT")
+    port = int(raw_port or "8123")
+    strict_port = os.getenv("TRILLION_WEB_STRICT_PORT", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     settings = get_settings()
     check_bind_safety(settings.web_host, auth_configured=bool(settings.web_auth_token))
+    port = _select_web_port(settings.web_host, port, strict=strict_port)
     web.run_app(build_app(), host=settings.web_host, port=port)
 
 
