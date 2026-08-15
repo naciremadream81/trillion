@@ -15,7 +15,17 @@ Repo: https://github.com/naciremadream81/trillion (pushed, `main` branch).
 
 ---
 
-## Status: Tier 1 + Tier 2 (partial) + cost dashboard + voice-smoothness (Tier 3/5) + browser voice V1 — all built, verified live
+## Status
+
+> **This file no longer tracks build status.** It kept a third copy of the same
+> tier table as `README.md` and `AGENT.md`, and all three drifted apart. There is
+> now one status source: **[`README.md`](README.md)** — its opening paragraph
+> says what works today and what doesn't. `AGENT.md` owns the product and safety
+> spec. This file keeps only what the other two don't: the *history* of how the
+> build got here, the pivots and their reasons, and the working agreements below.
+>
+> All six tiers are built. The narrative below is preserved as history and
+> describes the state at the time it was written.
 
 The text brain, tool-calling, a full cost/usage dashboard, prompt caching,
 sign-off detection, and browser-based voice are all in and working. Voice
@@ -282,18 +292,24 @@ voice quality turns out to be unacceptable in daily use, or if
 
 ---
 
-## Open questions (still unanswered)
+## Open questions
 
-1. **First "real" tool beyond analytics:** `web_search`, `draft_email`, and
-   `search_notes` were the original Tier 2 plan and none exist yet. Still
-   worth building, or has priority shifted?
+*Items 1–3 below are answered; kept with their answers because the reasoning
+still matters.*
 
-2. **Notes location:** where do Sean's notes live — `~/notes/`, an Obsidian
-   vault, Notion? (Note: a separate, unrelated Obsidian vault at
-   `~/obsidian-vault/` is used for *Claude Code's own memory* — don't conflate
-   the two if/when `search_notes` gets built.)
+1. ~~**First "real" tool beyond analytics.**~~ Answered: all three shipped.
+   `web_search` (Brave or Firecrawl behind one seam, registered only when a key
+   is set), `draft_email`, and `search_notes` are in `build_registry()`.
 
-3. **Web search API:** Brave Search vs. Tavily, if/when that tool gets built.
+2. ~~**Notes location.**~~ Answered: the Aires Ai Brain vault at
+   `~/AiresAiBrain` (rclone-mounted Google Drive), indexed into SQLite FTS5 at
+   `memory/notes_index.db`. The caution still stands — that vault is *also*
+   Claude Code's own memory store; `agent/notes/index.py` excludes
+   `.obsidian/` and `03-Agents/Claude-Code/` so the two don't get conflated.
+
+3. ~~**Web search API.**~~ Answered: Brave and Firecrawl, not Tavily. Either
+   key works; with both set, Firecrawl wins unless `TRILLION_SEARCH_PROVIDER`
+   says otherwise.
 
 4. **Piper voice quality in daily use:** chosen for zero cost/offline
    operation over ElevenLabs' quality. Worth checking in on after some real
@@ -305,18 +321,14 @@ voice quality turns out to be unacceptable in daily use, or if
 
 ## Tier roadmap
 
-| Tier | What | Status |
-|------|------|--------|
-| 0 | Interview + spec | ✅ Done |
-| 1 | Text conversation loop, streaming, provider seam | ✅ Done |
-| 2 | Tool registry + tools | 🟡 Partial — registry + `query_analytics` only |
-| — | Cost/usage dashboard | ✅ Done (not in original roadmap) |
-| — | Voice-smoothness: prompt caching + sign-off detection | ✅ Done |
-| 3 | Voice V0: browser STT/TTS, push-to-talk | ⛔ Abandoned — permanent Pi/Chromium key limitation |
-| 3 | Voice V1: Deepgram (STT) + Piper (TTS, local) | ✅ Done, verified live end-to-end |
-| 4 | Persistent memory across restarts | ⬜ |
-| 5 | Heartbeat — proactive, scheduled checks | ⬜ |
-| 6 | Safety rails: confirmation gate, config file, audit log, kill switch | ⬜ |
+Moved. The tier checklist lives in [`AGENT.md`](AGENT.md#tier-checklist), and
+what actually runs today is in [`README.md`](README.md). All six tiers are
+built; maintaining a third copy here is what let the three drift apart.
+
+One decision worth keeping, because it isn't recorded elsewhere: **Voice V0**
+(free browser STT/TTS) was abandoned, not deferred — a permanent
+Chromium-on-Pi API-key limitation, not something a later tier fixes. V1 is
+Deepgram STT + local Piper TTS.
 
 ---
 
@@ -324,9 +336,8 @@ voice quality turns out to be unacceptable in daily use, or if
 
 Paste this into the chat:
 
-> "We're building Trillion. Read HANDOFF.md for full context. The brain,
-> tools (Supabase read-only query), cost dashboard, voice-smoothness, and
-> browser voice (Deepgram STT + local Piper TTS) are all built and verified
-> live end-to-end. Next open items are the unbuilt Tier 2 tools
-> (web_search/draft_email/search_notes) and persistent memory (Tier 4).
-> Don't swap any provider (model, STT, TTS) without asking me first."
+> "We're building Trillion. Read README.md for what's built, AGENT.md for the
+> product and safety spec, and HANDOFF.md for how we got here. All six tiers
+> are done; remaining work is self-knowledge, cosmic-orb UI tiers 4-6, and
+> voice latency instrumentation. Don't swap any provider (model, STT, TTS)
+> without asking me first, and don't merge anything without my say-so."
