@@ -161,9 +161,10 @@ class Settings:
     # ── Web server bind (§1.5 startup guard) ────────────────────────────────
     # serve.py's bind host. Defaults to loopback-only; agent/security/
     # startup_guard.py refuses to start on anything else unless
-    # web_auth_token is set. There is no bearer-auth middleware built yet
-    # (see §1.4/§2.1's veto in the playbooks plan) — this token only proves
-    # to the guard that Sean has deliberately opted into a non-loopback bind.
+    # web_auth_token is set. The token is also enforced per-request on /api/
+    # routes by agent/security/auth.py's bearer_auth_middleware, so rotating
+    # it immediately revokes anyone holding the old value. When it's empty
+    # (the loopback-only default) that middleware is a no-op.
     web_host: str = "127.0.0.1"
     web_auth_token: str = ""
 

@@ -15,7 +15,10 @@ agent writes to, so cost data shows up live.
 
 Every response carries the security_headers_middleware (agent/security/
 headers.py, §2.2): X-Content-Type-Options, Referrer-Policy, X-Frame-Options,
-Permissions-Policy, and a report-only Content-Security-Policy.
+Permissions-Policy, and a report-only Content-Security-Policy. Every /api/
+request (except the CSP report endpoint) is also checked by
+bearer_auth_middleware (agent/security/auth.py) against
+TRILLION_WEB_AUTH_TOKEN, when that token is set.
 
 Run:
     python serve.py
@@ -24,8 +27,7 @@ Run:
 
 Binds to TRILLION_WEB_HOST (default 127.0.0.1). Binding anything else
 requires TRILLION_WEB_AUTH_TOKEN to be set — see agent/security/
-startup_guard.py — since there is no auth middleware to protect a public
-listener yet.
+startup_guard.py.
 
 This is the server the systemd unit runs in place of `python -m http.server`.
 """
@@ -46,6 +48,7 @@ from dotenv import load_dotenv
 from agent.config import get_settings
 from agent.cost.aggregate import UsageDashboard
 from agent.cost.storage import UsageRepo
+from agent.security.auth import bearer_auth_middleware
 from agent.security.headers import security_headers_middleware
 
 # Load .env so the web server honors the same config as the CLI agent
@@ -409,6 +412,7 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
     Construct the aiohttp app. Pass a dashboard in tests; in production it's
     built from the default usage database.
     """
+    settings = get_settings()
     dash = dashboard or UsageDashboard(
         UsageRepo(), monthly_budget=_monthly_budget_from_env()
     )
@@ -557,7 +561,12 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
         print(f"[csp-violation] {data}")
         return web.Response(status=204)
 
-    app = web.Application(middlewares=[security_headers_middleware])
+    app = web.Application(
+        middlewares=[
+            security_headers_middleware,
+            bearer_auth_middleware(settings.web_auth_token),
+        ]
+    )
     app.router.add_get("/api/usage", usage)
     app.router.add_post("/api/chat", chat)
     app.router.add_post("/api/transcribe", transcribe_audio)
