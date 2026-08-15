@@ -215,6 +215,67 @@ class TestCheckOrigin(unittest.TestCase):
                     check_origin("POST", "/api/chat", {"Origin": origin}, LOCAL)
                 )
 
+    # -- Wildcard bind (TRILLION_WEB_HOST=0.0.0.0 / ::) --
+    #
+    # Regression: the Host allowlist for a wildcard bind used to be
+    # frozenset({"0.0.0.0"}), which no real browser ever sends as a Host
+    # value, so every legitimate same-origin request was refused before
+    # Sec-Fetch-Site was even read.
+
+    def test_wildcard_bind_allowed_hostnames_is_none(self):
+        self.assertIsNone(allowed_hostnames("0.0.0.0"))
+        self.assertIsNone(allowed_hostnames("::"))
+
+    def test_wildcard_bind_same_origin_request_allowed(self):
+        # The case the bug broke: a real LAN Host, Sec-Fetch-Site attesting
+        # same-origin, on a wildcard bind. Must not be refused on Host.
+        for web_host in ("0.0.0.0", "::"):
+            with self.subTest(web_host=web_host):
+                self.assertIsNone(
+                    check_origin(
+                        "POST",
+                        "/api/chat",
+                        {
+                            "Host": "192.168.1.50:8123",
+                            "Sec-Fetch-Site": "same-origin",
+                        },
+                        web_host,
+                    )
+                )
+
+    def test_wildcard_bind_hostile_fetch_site_still_refused(self):
+        self.assertIsNotNone(
+            check_origin(
+                "POST",
+                "/api/chat",
+                {"Host": "192.168.1.50:8123", "Sec-Fetch-Site": "cross-site"},
+                "0.0.0.0",
+            )
+        )
+
+    def test_wildcard_bind_null_origin_still_refused(self):
+        reason = check_origin(
+            "POST", "/api/chat", {"Host": "192.168.1.50:8123", "Origin": "null"}, "0.0.0.0"
+        )
+        self.assertEqual(reason, "Origin: null")
+
+    def test_wildcard_bind_origin_without_fetch_site_refused(self):
+        # No Sec-Fetch-Site and no way to verify the Origin's hostname against
+        # a wildcard bind — refused rather than trusted, per the module
+        # docstring's documented residual.
+        reason = check_origin(
+            "POST",
+            "/api/chat",
+            {"Host": "192.168.1.50:8123", "Origin": "http://192.168.1.50:8123"},
+            "0.0.0.0",
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("cannot be verified", reason)
+
+    def test_wildcard_bind_no_browser_headers_still_allowed(self):
+        # curl / systemd / a reverse proxy — unchanged by the wildcard case.
+        self.assertIsNone(check_origin("POST", "/api/chat", {}, "0.0.0.0"))
+
 
 class TestServeOriginGate(AioHTTPTestCase):
     """End to end through build_app(), which is where the wiring can break."""

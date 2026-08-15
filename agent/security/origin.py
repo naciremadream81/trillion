@@ -48,6 +48,27 @@ independently checked against what the server was configured to bind. On the
 default loopback bind that means only 127.0.0.1/localhost/::1 are accepted, and
 rebinding — whose whole point is arriving under an attacker-controlled name —
 fails.
+
+## Wildcard binds (0.0.0.0, ::)
+
+`TRILLION_WEB_HOST=0.0.0.0` is a supported configuration — startup_guard.py
+allows any non-loopback bind once an auth token is set — and it breaks the
+hostname comparison above in a specific way: the browser's Host header carries
+whatever LAN address or domain actually reached the server ("192.168.1.50" or
+a real domain), never the literal wildcard string. An allowlist of `{"0.0.0.0"}`
+therefore matches nothing a real client ever sends, and every legitimate
+request would be refused before `Sec-Fetch-Site` is even read.
+
+There is no config here that names the server's externally reachable
+hostname(s), so `allowed_hostnames()` returns `None` for a wildcard bind — "not
+checkable by name" — and both the Host check and the Origin-hostname check are
+skipped. `Sec-Fetch-Site` does not need a hostname to prove same-origin (the
+browser makes that determination itself), so it remains fully authoritative.
+The gap this opens: an old browser that omits Fetch Metadata (pre-2021
+Firefox, pre-2023 Safari) sending only `Origin` on a wildcard-bind deployment
+can't have that Origin verified, and is refused rather than trusted blindly —
+a documented residual specific to wildcard binds, not the default loopback
+case.
 """
 
 from __future__ import annotations
@@ -78,16 +99,24 @@ GUARDED_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _HOSTILE_FETCH_SITES = frozenset({"cross-site", "same-site"})
 
 
-def allowed_hostnames(web_host: str) -> frozenset[str]:
+# A wildcard bind has no single "this is the server's own address" — see the
+# module docstring's "Wildcard binds" section.
+_WILDCARD_BIND_HOSTS = frozenset({"0.0.0.0", "::", ""})
+
+
+def allowed_hostnames(web_host: str) -> frozenset[str] | None:
     """
-    The hostnames a request may claim to have arrived on.
+    The hostnames a request may claim to have arrived on, or None if that
+    can't be determined by name (a wildcard bind).
 
     Loopback binds accept all three spellings of loopback because the browser
-    uses whichever one is in the URL bar. A non-loopback bind accepts only the
-    exact configured host — the point is to reject a request that arrived under
-    some *other* name that happens to resolve here, which is what DNS rebinding
-    does.
+    uses whichever one is in the URL bar. A non-loopback, non-wildcard bind
+    accepts only the exact configured host — the point is to reject a request
+    that arrived under some *other* name that happens to resolve here, which
+    is what DNS rebinding does.
     """
+    if web_host in _WILDCARD_BIND_HOSTS:
+        return None
     if web_host in _LOOPBACK_HOSTS:
         return frozenset(_LOOPBACK_HOSTS)
     return frozenset({web_host})
@@ -134,9 +163,11 @@ def check_origin(
     # The host the request claims to have arrived on. Checked before Origin so
     # that a rebinding attack — where Host and Origin agree with each other but
     # neither is us — is refused on the value the attacker actually needed to
-    # control.
+    # control. Skipped entirely on a wildcard bind (allowed is None): there is
+    # no configured hostname to compare against, so Sec-Fetch-Site below does
+    # this job instead.
     host_name = _hostname_of(headers.get("Host", ""))
-    if host_name and host_name not in allowed:
+    if allowed is not None and host_name and host_name not in allowed:
         return f"host {host_name!r} is not an address this server serves"
 
     fetch_site = (headers.get("Sec-Fetch-Site") or "").strip().lower()
@@ -156,6 +187,13 @@ def check_origin(
         # A sandboxed iframe, a data: URL, or a redirect that lost its origin.
         # Distinct from absent, and never something we want to trust.
         return "Origin: null"
+
+    if allowed is None:
+        # Wildcard bind, and Sec-Fetch-Site (checked above) didn't already
+        # resolve this. There's no hostname to compare Origin against, so an
+        # unverifiable claim is refused rather than trusted blindly — see
+        # "Wildcard binds" in the module docstring.
+        return f"origin {origin!r} cannot be verified against a wildcard bind"
 
     origin_name = _hostname_of(origin)
     if not origin_name or origin_name not in allowed:
