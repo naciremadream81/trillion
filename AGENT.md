@@ -1,14 +1,16 @@
 # Trillion — Agent Spec
 *Single source of truth for this build. Update this file whenever a decision changes.*
 
-> **Note on staleness:** this is the original Tier 0 planning spec. The Tier
-> checklist and "First Three Capabilities" below describe the *original*
-> intent, not the current build — e.g. no `web_search`, email-draft, or
-> notes-search tool was ever built; the actual tool registry
-> (`agent/tools/registry.py`) today only wires up `query_analytics`, plus
-> whatever Agent Factory specialists have been approved. Trust
-> [`README.md`](README.md) for what's actually implemented — the **Safety
-> rules** section below remains authoritative regardless.
+> **Note on scope:** this file is the product and safety spec — identity, tone,
+> hard gates, stack decisions. It is *not* the status board; when this file and
+> [`README.md`](README.md) disagree about what is built, the README and the tree
+> win. The **Safety rules** section below is authoritative regardless.
+>
+> The "First Three Capabilities" below are all built and registered in
+> `agent/tools/registry.py`: `web_search` (Brave or Firecrawl, when a key is
+> set), `draft_email`, and `search_notes` (both unconditional), alongside
+> `query_analytics` (when `SUPABASE_ANALYTICS_URL` is set) and the Tier 4
+> memory tools (when a confirmation gate is present).
 
 ---
 
@@ -85,12 +87,19 @@ Swapping providers = changing one env var (`TRILLION_PROVIDER=claude|openai|olla
 | Tier | Input | Output |
 |------|-------|--------|
 | 1–2 | Typed text | Streamed text |
-| 3 | Push-to-talk (hold key → speak → release) | ElevenLabs TTS (streaming) |
+| 3 | Tap mic → speak → tap to send | Local Piper TTS, spoken sentence-by-sentence as the reply streams |
 | Later | Wake-word open mic | Same |
 
-STT: Deepgram (fast, streaming, accurate). TTS: ElevenLabs (natural, streaming).
-*Voice choice for ElevenLabs: ask Sean during Tier 3.*
-Typed interface stays alive permanently — fallback + debugging path.
+STT: Deepgram (fast, streaming, accurate) via `POST /api/transcribe`.
+TTS: **Piper**, running locally and offline via `POST /api/tts` — not ElevenLabs.
+ElevenLabs' free tier blocks all API voice access (premade *and* cloned voices
+both require a paid plan), so TTS moved on-device. Voice model defaults to
+`voices/en_US-amy-medium.onnx`, overridable with `PIPER_VOICE_PATH`.
+
+Tier 3 shipped as tap-to-toggle rather than hold-a-key: tap the mic to start,
+tap again to stop and send. The browser speaks each complete sentence as it
+arrives rather than waiting for the full reply, and a new recording barges in on
+playback. Typed interface stays alive permanently — fallback + debugging path.
 
 ---
 
@@ -145,30 +154,39 @@ Yes — Trillion can reach out first. But **quiet by default**: it earns interru
 assume them. Most checks produce nothing. A true interruption is reserved for things that
 genuinely warrant Sean's attention. Everything else accumulates in a calm log.
 
-Quiet hours: configurable (default: 10 PM – 8 AM, no non-urgent pings).
+Quiet hours: configurable via `QUIET_HOURS_START` / `QUIET_HOURS_END` (UTC,
+default 10 PM – 8 AM). Enforced in `agent/heartbeat/storage.py` — a non-critical
+notice raised inside the window is deferred to the window's end rather than
+delivered; `CRITICAL` severity still goes through. Set start == end to disable.
 
 ---
 
 ## Tier checklist
 
 - [x] **Tier 0** — Interview complete, spec written
-- [ ] **Tier 1** — Text conversation loop (streaming, history, provider seam)
-- [x] **Tier 2** — Tool registry + first three tools
-- [ ] **Tier 3** — Voice layer (Deepgram STT + ElevenLabs TTS, push-to-talk)
+- [x] **Tier 1** — Text conversation loop (streaming, history, provider seam)
+- [x] **Tier 2** — Tool registry + first three tools (`web_search`, `draft_email`, `search_notes`)
+- [x] **Tier 3** — Voice layer (Deepgram STT + local Piper TTS, tap-to-toggle mic)
 - [x] **Tier 4** — Persistent memory across restarts
-- [ ] **Tier 5** — Heartbeat (proactive, scheduled checks)
+- [x] **Tier 5** — Heartbeat (proactive, scheduled checks, quiet hours, Code Sentinel)
 - [x] **Tier 6** — Safety rails (confirmation gate, config file, audit log, kill switch)
 
----
-
-## Open questions
-
-- **Tier 2:** Is "make me a million dollars" → web research the right first tool, or something
-  more specific (lead tracking, KPI dashboard, etc.)?
-- **Tier 3:** Which ElevenLabs voice should Trillion use? Describe the feel (e.g., "calm male,
-  mid-Atlantic," "warm female, conversational").
-- **Tier 4:** Where do your notes live — `~/notes/`, Obsidian vault, Notion, or somewhere else?
+All six tiers are built. Remaining work is tracked in [`README.md`](README.md)'s
+"Not done yet" line, not here.
 
 ---
 
-*Last updated: Tier 0 complete.*
+## Resolved questions
+
+- **Tier 2:** Web research shipped as a general `web_search` tool (Brave or Firecrawl behind
+  one seam) rather than a narrower lead tracker. Still open whether a dedicated
+  opportunity/lead surface is worth building on top.
+- **Tier 3:** Moot — ElevenLabs' free tier blocks API voice access entirely, so TTS runs
+  locally on Piper (`en_US-amy-medium` by default). A different Piper voice is a one-env-var
+  change.
+- **Tier 4:** Notes live in the Aires Ai Brain vault (`~/AiresAiBrain`, rclone-mounted Google
+  Drive), indexed into SQLite FTS5 for `search_notes`.
+
+---
+
+*Last updated: all six tiers built; docs reconciled against the tree.*
