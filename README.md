@@ -10,7 +10,7 @@ Trillion is a **single-user** Python agent: chat in the terminal or browser, swa
 
 ## Quick start
 
-**Prerequisites:** Python 3.11+ (see `.python-version`), and an API key for at least one provider.
+**Prerequisites:** Python 3.11+ (see `.python-version`), an API key for at least one provider, and [`bubblewrap`](https://github.com/containers/bubblewrap) (`apt install bubblewrap` / `dnf install bubblewrap`) if you want the Software Factory to actually run project test suites — without it, `run_project_tests` refuses to run rather than executing untrusted, LLM-authored test commands unsandboxed.
 
 ```bash
 cd trillion

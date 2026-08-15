@@ -1,6 +1,15 @@
 # Trillion — Agent Spec
 *Single source of truth for this build. Update this file whenever a decision changes.*
 
+> **Note on staleness:** this is the original Tier 0 planning spec. The Tier
+> checklist and "First Three Capabilities" below describe the *original*
+> intent, not the current build — e.g. no `web_search`, email-draft, or
+> notes-search tool was ever built; the actual tool registry
+> (`agent/tools/registry.py`) today only wires up `query_analytics`, plus
+> whatever Agent Factory specialists have been approved. Trust
+> [`README.md`](README.md) for what's actually implemented — the **Safety
+> rules** section below remains authoritative regardless.
+
 ---
 
 ## Identity

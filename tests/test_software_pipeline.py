@@ -12,6 +12,7 @@ import asyncio
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from agent.config import Settings
 from agent.factory.software.pipeline import (
@@ -40,14 +41,14 @@ CODING_DONE_REPLY = CODING_DONE_SENTINEL
 VALID_PLAN_REPLY = (
     '{"project_name": "md-to-csv", "tech_stack": "python", '
     '"files": ["main.py"], "entry_point": "main.py", '
-    '"test_command": "true", "summary": "Converts markdown tables to CSV.", '
+    '"test_command": "python3 -c \\"print(\'ok\')\\"", "summary": "Converts markdown tables to CSV.", '
     '"tasks": [{"title": "Implement CLI", "description": "Write main.py.", '
     '"acceptance_criteria": "python main.py works"}]}'
 )
 VALID_PLAN_REPLY_FAILING_TESTS = (
     '{"project_name": "md-to-csv", "tech_stack": "python", '
     '"files": ["main.py"], "entry_point": "main.py", '
-    '"test_command": "exit 1", "summary": "Converts markdown tables to CSV.", '
+    '"test_command": "python3 -c \\"import sys; sys.exit(1)\\"", "summary": "Converts markdown tables to CSV.", '
     '"tasks": [{"title": "Implement CLI", "description": "Write main.py.", '
     '"acceptance_criteria": "python main.py works"}]}'
 )
@@ -120,7 +121,13 @@ class TestRunBuildPipeline(unittest.TestCase):
             VALID_PLAN_REPLY, ARCHITECTURE_REPLY, CODING_DONE_REPLY, QA_PASS_REPLY, INTEGRATION_READY_REPLY,
         ])
         task_id = self.repo.create_build_task("a CLI that converts markdown tables to CSV")
-        run(run_build_pipeline(task_id, "a CLI that converts markdown tables to CSV", self.repo, provider, self.settings))
+        with patch(
+            "agent.factory.software.pipeline._run_testing",
+            return_value=(True, "exit_code=0\nok\n"),
+        ):
+            run(run_build_pipeline(
+                task_id, "a CLI that converts markdown tables to CSV", self.repo, provider, self.settings
+            ))
         task = self.repo.get_build_task(task_id)
         self.assertEqual(task["status"], BUILT)
         self.assertEqual(task["slug"], "md-to-csv")
@@ -262,7 +269,11 @@ class TestStartBuild(unittest.TestCase):
                 background_tasks=bg,
             )
             self.assertEqual(len(bg), 1)
-            await asyncio.gather(*bg)
+            with patch(
+                "agent.factory.software.pipeline._run_testing",
+                return_value=(True, "exit_code=0\nok\n"),
+            ):
+                await asyncio.gather(*bg)
             return task_id
 
         task_id = run(scenario())

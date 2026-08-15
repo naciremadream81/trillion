@@ -183,7 +183,7 @@ def get_settings() -> Settings:
     return Settings(
         supabase_analytics_url=os.getenv("SUPABASE_ANALYTICS_URL", ""),
         software_factory_root=os.getenv("TRILLION_SOFTWARE_FACTORY_ROOT", "generated-projects"),
-        factory_daily_build_cap=int(os.getenv("TRILLION_FACTORY_DAILY_BUILD_CAP", "3")),
+        factory_daily_build_cap=_env_int("TRILLION_FACTORY_DAILY_BUILD_CAP", 3),
         factory_daily_budget_usd=_env_float("TRILLION_FACTORY_DAILY_BUDGET_USD", None),
         factory_paused=_env_bool("TRILLION_FACTORY_PAUSED", False),
         factory_autonomous_themes=_env_list("TRILLION_FACTORY_AUTONOMOUS_THEMES"),
