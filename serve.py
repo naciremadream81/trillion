@@ -18,7 +18,10 @@ headers.py, §2.2): X-Content-Type-Options, Referrer-Policy, X-Frame-Options,
 Permissions-Policy, and a report-only Content-Security-Policy. Every /api/
 request (except the CSP report endpoint) is also checked by
 bearer_auth_middleware (agent/security/auth.py) against
-TRILLION_WEB_AUTH_TOKEN, when that token is set.
+TRILLION_WEB_AUTH_TOKEN, when that token is set, and every state-changing one
+by origin_check_middleware (agent/security/origin.py), which refuses
+cross-origin POSTs so a page you happen to be visiting can't drive /api/chat
+or /api/security/cve-scan on your behalf.
 
 Run:
     python serve.py
@@ -50,6 +53,7 @@ from agent.cost.aggregate import UsageDashboard
 from agent.cost.storage import UsageRepo
 from agent.security.auth import bearer_auth_middleware
 from agent.security.headers import security_headers_middleware
+from agent.security.origin import origin_check_middleware
 
 # Load .env so the web server honors the same config as the CLI agent
 # (TRILLION_MONTHLY_BUDGET_USD, TRILLION_USAGE_DB, TRILLION_WEB_PORT).
@@ -62,6 +66,12 @@ _SESSION_COOKIE = "trillion_session"
 # of which owns an Agent (and its growing conversation history) that nothing
 # else ever cleans up — oldest session evicted once the cap is hit.
 _MAX_CHAT_SESSIONS = 50
+
+# Cap on how much of a CSP violation report we read and log. Real reports from
+# Chrome and Firefox run a few hundred bytes; 4 KiB is generous for a genuine
+# one and small enough that a hostile page POSTing in a loop can't fill the
+# journal. The endpoint is unauthenticated by necessity — see csp_report().
+CSP_REPORT_MAX_BYTES = 4096
 
 # A single shared provider/registry for the browser voice UI (personal,
 # single-user). Built lazily so importing serve.py doesn't require the
@@ -554,16 +564,34 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
         # same posture as every other print() in this file — a malformed
         # report body must not 500. 204 No Content is what the Reporting
         # API expects back.
+        #
+        # This is the one write surface exempt from *both* the bearer gate and
+        # the origin gate, because the browser posts these itself and we can't
+        # influence the headers it attaches. So it is also the one place where
+        # an attacker fully controls what reaches a print(): unbounded, that is
+        # a journald flood and a log-injection vector. Read a bounded number of
+        # bytes and log a single truncated line.
+        raw = await request.content.read(CSP_REPORT_MAX_BYTES + 1)
+        truncated = len(raw) > CSP_REPORT_MAX_BYTES
         try:
-            data = await request.json()
+            body = raw[:CSP_REPORT_MAX_BYTES].decode("utf-8", "replace")
         except Exception:
-            data = {}
-        print(f"[csp-violation] {data}")
+            body = ""
+        # Collapse newlines so a crafted report can't forge extra log lines.
+        line = " ".join(body.split())[:CSP_REPORT_MAX_BYTES]
+        print(f"[csp-violation] {line}{' …[truncated]' if truncated else ''}")
         return web.Response(status=204)
 
+    # Middlewares wrap in reverse list order, so the first entry is outermost.
+    # Headers go outside everything, which is what puts them on 403s and 401s
+    # too. The origin gate sits outside the bearer gate deliberately: a forged
+    # cross-origin request should be refused on that basis whether or not it
+    # also carried a token, and the browser-attested evidence is cheaper to
+    # check than a constant-time token compare.
     app = web.Application(
         middlewares=[
             security_headers_middleware,
+            origin_check_middleware(settings.web_host),
             bearer_auth_middleware(settings.web_auth_token),
         ]
     )

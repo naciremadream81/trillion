@@ -219,12 +219,16 @@ class TestAuditSignals(unittest.TestCase):
         sig = next(s for s in result["signals"] if s["name"] == "db-readonly-role")
         self.assertEqual(sig["delta"], -3)
 
-    def test_csrf_origin_gate_reports_absent(self):
+    def test_csrf_origin_gate_reports_enforcing(self):
+        # Was "absent", -10 while the signal was hardcoded. agent/security/
+        # origin.py now exists, and the signal proves it by running a forged
+        # cross-origin POST through check_origin() rather than by importing
+        # the module and assuming.
         result = audit(self._settings(), ToolRegistry())
         sig = next(s for s in result["signals"] if s["name"] == "csrf-origin-gate")
-        self.assertEqual(sig["value"], "absent")
-        self.assertEqual(sig["delta"], -10)
-        self.assertEqual(sig["severity"], "warning")
+        self.assertEqual(sig["value"], "enforcing")
+        self.assertEqual(sig["delta"], 0)
+        self.assertEqual(sig["severity"], "ok")
 
     def test_cve_scan_never_run_is_warning(self):
         result = audit(self._settings(), ToolRegistry())
