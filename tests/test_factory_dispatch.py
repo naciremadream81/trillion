@@ -12,7 +12,14 @@ import os
 import tempfile
 import unittest
 
-from agent.factory.dispatch import ConfigDrivenAgent, DispatchTool, RegistryWatcher, dispatch_tool_name
+from agent.factory.dispatch import (
+    ConfigDrivenAgent,
+    DispatchActivity,
+    DispatchTool,
+    RegistryWatcher,
+    dispatch_tool_name,
+    get_dispatch_activity,
+)
 from agent.factory.storage import FactoryRepo
 from agent.providers.base import BaseProvider, ProviderResponse, TextChunk, TokenUsage
 from agent.tools.base import BaseTool
@@ -112,6 +119,77 @@ class TestDispatchTool(unittest.TestCase):
 
     def test_dispatch_tool_name_replaces_hyphens(self):
         self.assertEqual(dispatch_tool_name("sql-migration-review"), "dispatch_to_sql_migration_review")
+
+
+class TestDispatchActivity(unittest.TestCase):
+    def test_mark_started_then_snapshot_contains_slug(self):
+        activity = DispatchActivity()
+        activity.mark_started("x")
+        self.assertIn("x", activity.snapshot())
+
+    def test_mark_finished_removes_slug(self):
+        activity = DispatchActivity()
+        activity.mark_started("x")
+        activity.mark_finished("x")
+        self.assertNotIn("x", activity.snapshot())
+
+    def test_mark_finished_on_unknown_slug_is_a_no_op(self):
+        DispatchActivity().mark_finished("never-started")  # must not raise
+
+    def test_snapshot_is_a_copy_not_a_live_view(self):
+        activity = DispatchActivity()
+        activity.mark_started("x")
+        snap = activity.snapshot()
+        activity.mark_started("y")
+        self.assertNotIn("y", snap)
+
+    def test_get_dispatch_activity_returns_the_same_singleton(self):
+        self.assertIs(get_dispatch_activity(), get_dispatch_activity())
+
+
+class TestDispatchToolActivityTracking(unittest.TestCase):
+    """
+    Covers what serve.py's GET /api/agents reads: DispatchTool.run() must
+    mark its slug working for the duration of the sub-agent call, real
+    signal for the browser's constellation "working" pulse — and must clear
+    it even when the sub-agent blows up, so a crash doesn't strand an agent
+    permanently shown as busy.
+    """
+
+    def tearDown(self):
+        # Belt and braces: every test below pairs a start with a finish via
+        # DispatchTool.run()'s own try/finally, but clear defensively so a
+        # failed assertion mid-test can't leak state into the next test.
+        activity = get_dispatch_activity()
+        for slug in list(activity.snapshot()):
+            activity.mark_finished(slug)
+
+    def test_slug_is_working_during_the_call_and_clear_after(self):
+        row = make_row(slug="probe-agent")
+        tool = DispatchTool(row, FakeProvider([]), None)
+        seen = {}
+
+        async def probe(message):
+            seen["working_during_call"] = "probe-agent" in get_dispatch_activity().snapshot()
+            return "done"
+
+        tool._sub_agent.run = probe
+        result = run(tool.run(message="hi"))
+
+        self.assertTrue(seen["working_during_call"])
+        self.assertNotIn("probe-agent", get_dispatch_activity().snapshot())
+        self.assertEqual(result, "done")
+
+    def test_working_state_clears_even_when_sub_agent_raises(self):
+        row = make_row(slug="boom-agent")
+        tool = DispatchTool(row, FakeProvider([]), None)
+
+        async def boom(message):
+            raise RuntimeError("sub-agent exploded")
+
+        tool._sub_agent.run = boom
+        run(tool.run(message="hi"))
+        self.assertNotIn("boom-agent", get_dispatch_activity().snapshot())
 
 
 class TestRegistryWatcher(unittest.TestCase):

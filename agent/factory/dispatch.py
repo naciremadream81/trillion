@@ -34,6 +34,42 @@ def dispatch_tool_name(slug: str) -> str:
     return DISPATCH_PREFIX + slug.replace("-", "_")
 
 
+class DispatchActivity:
+    """
+    Tracks which spawned specialists are currently mid-dispatch.
+
+    Read by serve.py's GET /api/agents so the browser's sub-agent
+    constellation (cosmic-orb-ui Tier 5) can show a real "working" pulse
+    instead of a fabricated one. In-memory and per-process by design, same
+    posture as everything else here: a specialist mid-run when the process
+    restarts just reverts to idle, which is correct — the run itself didn't
+    survive either.
+    """
+
+    def __init__(self) -> None:
+        self._active: set[str] = set()
+
+    def mark_started(self, slug: str) -> None:
+        self._active.add(slug)
+
+    def mark_finished(self, slug: str) -> None:
+        self._active.discard(slug)
+
+    def snapshot(self) -> set[str]:
+        return set(self._active)
+
+
+# Module-level singleton, not per-DispatchTool: serve.py's endpoint has no
+# reference to any one DispatchTool instance, only to "which slugs are
+# active right now" — the same shape FactoryRepo.list_active_agents() and
+# RegistryWatcher already use for this process.
+_activity = DispatchActivity()
+
+
+def get_dispatch_activity() -> DispatchActivity:
+    return _activity
+
+
 class ConfigDrivenAgent:
     """A spawned specialist, fully specified by a spawned_agents row."""
 
@@ -99,10 +135,14 @@ class DispatchTool:
 
     async def run(self, **kwargs) -> str:
         message = kwargs.get("message", "")
+        activity = get_dispatch_activity()
+        activity.mark_started(self._sub_agent.slug)
         try:
             return await self._sub_agent.run(message)
         except Exception as e:  # noqa: BLE001 — never crash the caller's tool round-trip
             return f"[dispatch to '{self._sub_agent.slug}' failed: {e}]"
+        finally:
+            activity.mark_finished(self._sub_agent.slug)
 
 
 class RegistryWatcher:

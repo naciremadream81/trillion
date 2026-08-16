@@ -40,6 +40,44 @@
     touch-action: none;   /* let it handle its own drag/gesture input */
   }
 
+  /* ========================= SUB-AGENT CONSTELLATION (Tier 4) ========================= */
+  .tr-agent-labels {
+    position: fixed;
+    inset: 0;
+    z-index: 10; /* above the canvas (1), below cards/panels/header */
+    pointer-events: none;
+  }
+  .tr-agent-label {
+    position: absolute;
+    top: 0; left: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    white-space: nowrap;
+    opacity: 0;
+    transition: opacity 0.25s var(--ease);
+    pointer-events: auto;
+    cursor: default;
+  }
+  .tr-agent-label.visible { transition: opacity 0.4s var(--ease); }
+  .tr-agent-name {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.2px;
+    color: var(--agent-color, var(--text));
+    text-shadow: 0 1px 6px rgba(0, 0, 0, 0.8);
+  }
+  .tr-agent-specialty {
+    font-size: 9.5px; color: var(--text-dim);
+    text-shadow: 0 1px 6px rgba(0, 0, 0, 0.8);
+    margin-top: 1px;
+  }
+  @media (max-width: 640px) {
+    .tr-agent-labels { display: none; }
+  }
+
+  /* ========================= PERF MODE TOGGLE ========================= */
+  .tr-icon-btn.perf-on { color: var(--accent); }
+
   /* ============================ HEADER ============================ */
   .tr-header {
     position: fixed;
@@ -447,6 +485,7 @@
 </head>
 <body>
   <canvas id="scene"></canvas>
+  <div class="tr-agent-labels" id="tr-agent-labels"></div>
 
   <!-- ============================ HEADER ============================ -->
   <header class="tr-header">
@@ -480,6 +519,13 @@
           <path d="M13.7 21a2 2 0 0 1-3.4 0"/>
         </svg>
         <span class="tr-badge" id="tr-alerts-badge" style="display:none;"></span>
+      </button>
+      <button class="tr-icon-btn" id="tr-perf" title="Performance mode" aria-label="Toggle performance mode" aria-pressed="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3a9 9 0 1 0 9 9"/>
+          <path d="M12 12l5-5"/>
+          <path d="M12 3v2M21 12h-2M12 21v-2M3 12h2"/>
+        </svg>
       </button>
       <button class="tr-icon-btn" title="Settings" aria-label="Settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -983,12 +1029,18 @@
   // ============================================================
   function onResize() {
     const w = window.innerWidth, h = window.innerHeight;
+    // perfMode (declared below, in the Tier 6 section) is read here too —
+    // onResize() only ever runs after the whole module has evaluated once
+    // (the initial call at the bottom, or a later 'resize'/perf-toggle
+    // event), so the binding always exists by call time.
+    renderer.setPixelRatio(typeof perfMode !== 'undefined' && perfMode ? 1 : Math.min(window.devicePixelRatio, 2));
     renderer.setSize(w, h);
     composer.setSize(w, h);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
     nebulaMat.uniforms.uAspect.value = w / h;
-    bloom.setSize(w, h);
+    const bloomScale = (typeof perfMode !== 'undefined' && perfMode) ? 0.5 : 1;
+    bloom.setSize(Math.floor(w * bloomScale), Math.floor(h * bloomScale));
     starMat.uniforms.uPixelRatio.value = renderer.getPixelRatio();
   }
   window.addEventListener('resize', onResize);
@@ -1008,11 +1060,593 @@
   window.setVoiceBright = (v) => { voiceTarget = Math.max(0, Math.min(1, v)); };
 
   // ============================================================
+  // ACCESSIBILITY / PERFORMANCE STATE (Tier 6)
+  // ============================================================
+  const reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+  let reducedMotion = reducedMotionQuery.matches;
+  reducedMotionQuery.addEventListener('change', (e) => { reducedMotion = e.matches; });
+
+  // Perf mode: this build renders the nebula/stars/orb as ONE shared scene
+  // and composer (not the playbook's separate background/orb renderers), so
+  // there's no independent "background layer" to selectively downsample.
+  // Adapted equivalent that's honest about that: cap the pixel ratio, shrink
+  // the bloom pass's internal resolution, and render every other frame
+  // (reusing the prior frame in between) — the nebula/stars drift slowly
+  // enough that half the framerate reads as smooth, same as the spec's
+  // intent, just applied to the whole composited frame instead of one layer.
+  let perfMode = localStorage.getItem('trillion-orb-perf') === '1';
+  let perfSkipFrame = false;
+  const perfBtn = document.getElementById('tr-perf');
+  function reflectPerfButton() {
+    if (!perfBtn) return;
+    perfBtn.classList.toggle('perf-on', perfMode);
+    perfBtn.setAttribute('aria-pressed', String(perfMode));
+  }
+  window.setOrbPerfMode = (on) => {
+    perfMode = !!on;
+    localStorage.setItem('trillion-orb-perf', perfMode ? '1' : '0');
+    onResize(); // re-derives pixel ratio + bloom resolution from perfMode
+    reflectPerfButton();
+    document.dispatchEvent(new CustomEvent('trillion:perf-mode', { detail: { on: perfMode } }));
+  };
+  if (perfBtn) perfBtn.addEventListener('click', () => window.setOrbPerfMode(!perfMode));
+  reflectPerfButton();
+
+  // ============================================================
+  // ORB STATE COLOR (extends Tier 3's "processing" state only — see
+  // Tier 5's ring/helix section below, which needs the orb itself drifting
+  // teal -> purple to read as one coherent moment, not two disconnected
+  // effects. idle/listening/speaking/error keep their existing
+  // brightness-only behavior; giving them their own body color is a
+  // pre-existing Tier 3 gap, out of scope for Tiers 4-6.)
+  // ============================================================
+  let uColorMix = 0; // eased 0..1 -- how "in processing" the orb color is
+  const _scratchColor = new THREE.Color();
+  const orbMaterials = [coreMat, halo.material, atmos.material];
+
+  // ============================================================
+  // SUB-AGENT CONSTELLATION (Tier 4)
+  // ============================================================
+  const AGENT_LABEL_LAYER = document.getElementById('tr-agent-labels');
+  const MOBILE_HIDE_WIDTH = 640;
+
+  function isMobileHideWidth() { return window.innerWidth < MOBILE_HIDE_WIDTH; }
+
+  // Deterministic per-slug hue so a newly-approved specialist gets a
+  // stable, distinct color with zero configuration (mirrors the "no
+  // hand-maintained parallel list" spirit of agent/selfknowledge).
+  function hueForSlug(slug) {
+    let h = 0;
+    for (let i = 0; i < slug.length; i++) h = (h * 31 + slug.charCodeAt(i)) >>> 0;
+    return h % 360;
+  }
+  function colorForSlug(slug, fixedHex) {
+    if (fixedHex) return new THREE.Color(fixedHex);
+    const c = new THREE.Color();
+    c.setHSL(hueForSlug(slug) / 360, 0.65, 0.58);
+    return c;
+  }
+
+  // Fallback constellation shown until /api/agents reports real active
+  // specialists (playbook Tier 0 default: "invent three plausible ones so
+  // the constellation isn't empty"). Named to match the Activity panel's
+  // existing Scout/Relay/Flux sections so the fallback still feels wired
+  // to the rest of the UI rather than arbitrary.
+  const DEMO_AGENTS = [
+    { slug: 'scout', name: 'Scout', specialty: 'Watches the market for signal.', color: '#2DD4A8' },
+    { slug: 'relay', name: 'Relay', specialty: 'Drafts replies for your review.', color: '#3B6FE0' },
+    { slug: 'flux',  name: 'Flux',  specialty: 'Keeps the pipeline moving.',      color: '#7C4DFF' },
+  ];
+
+  // Dock anchors: a few named agents settle near an existing on-screen
+  // element instead of just pulsing in place while working (Tier 5,
+  // "if the working agent has a matching panel"). Computed in NDC (-1..1)
+  // so they track resize/aspect without a DOM raycast — chosen to sit near
+  // the Scout/Relay floating cards already in the shell.
+  const DOCK_ANCHORS_NDC = {
+    scout: { x: -0.62, y: -0.55 },
+    relay: { x: -0.30, y: -0.78 },
+  };
+  const DOCK_DEPTH = 4.2; // world distance from camera the anchor sits at
+
+  // Unprojects a normalized-device-coordinate point to a world position at
+  // a fixed distance from the camera, so a dock anchor tracks resize/aspect
+  // without needing a DOM element to raycast against.
+  function ndcToWorld(ndcX, ndcY, depth) {
+    const v = new THREE.Vector3(ndcX, ndcY, 0.5);
+    v.unproject(camera);
+    v.sub(camera.position).normalize();
+    return camera.position.clone().add(v.multiplyScalar(depth));
+  }
+
+  function makeAvatarTexture(initial, color) {
+    const size = 128;
+    const cnv = document.createElement('canvas');
+    cnv.width = cnv.height = size;
+    const ctx = cnv.getContext('2d');
+    const cx = size / 2, cy = size / 2;
+    const hex = '#' + color.getHexString();
+    const grad = ctx.createRadialGradient(cx, cy, 2, cx, cy, size / 2);
+    grad.addColorStop(0, '#06070a');
+    grad.addColorStop(0.55, hex);
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(cx, cy, size / 2 - 2, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = hex;
+    ctx.globalAlpha = 0.85;
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(cx, cy, size / 2 - 4, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#fff';
+    ctx.font = '600 46px Inter, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText((initial || '?').slice(0, 1).toUpperCase(), cx, cy + 2);
+    const tex = new THREE.CanvasTexture(cnv);
+    tex.needsUpdate = true;
+    return tex;
+  }
+
+  // One shared soft-circle texture for every agent's glow sprite — colorless
+  // (SpriteMaterial's `color` tints it), so it's built once rather than
+  // once per agent. A SpriteMaterial with no map renders as an opaque
+  // hard-edged square, not a glow, which is what this exists to avoid.
+  const GLOW_TEXTURE = (function () {
+    const size = 128;
+    const cnv = document.createElement('canvas');
+    cnv.width = cnv.height = size;
+    const ctx = cnv.getContext('2d');
+    const cx = size / 2, cy = size / 2;
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, size / 2);
+    grad.addColorStop(0, 'rgba(255,255,255,1)');
+    grad.addColorStop(0.4, 'rgba(255,255,255,0.55)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, size, size);
+    const tex = new THREE.CanvasTexture(cnv);
+    tex.needsUpdate = true;
+    return tex;
+  })();
+
+  const constellation = new THREE.Group();
+  orbGroup.add(constellation);
+  const agents = new Map(); // slug -> agent state
+
+  function addAgent(cfg) {
+    if (agents.has(cfg.slug)) return agents.get(cfg.slug);
+
+    const color = colorForSlug(cfg.slug, cfg.color);
+    const texture = makeAvatarTexture(cfg.name, color);
+
+    const avatarMat = new THREE.SpriteMaterial({
+      map: texture, transparent: true, depthWrite: false, depthTest: true,
+    });
+    const avatar = new THREE.Sprite(avatarMat);
+    avatar.scale.set(0.34, 0.34, 1);
+
+    const glowMat = new THREE.SpriteMaterial({
+      map: GLOW_TEXTURE, color, transparent: true, opacity: 0.35,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const glow = new THREE.Sprite(glowMat);
+    glow.scale.set(0.62, 0.62, 1);
+
+    const group = new THREE.Group();
+    group.add(glow);
+    group.add(avatar);
+    constellation.add(group);
+
+    const label = document.createElement('div');
+    label.className = 'tr-agent-label';
+    label.innerHTML =
+      '<span class="tr-agent-name"></span><span class="tr-agent-specialty"></span>';
+    label.querySelector('.tr-agent-name').textContent = cfg.name;
+    label.querySelector('.tr-agent-specialty').textContent = cfg.specialty || '';
+    label.style.setProperty('--agent-color', '#' + color.getHexString());
+    AGENT_LABEL_LAYER.appendChild(label);
+
+    const agent = {
+      slug: cfg.slug,
+      name: cfg.name,
+      color,
+      group, avatar, avatarMat, glow, glowMat, texture, label,
+      radius: 2.7 + Math.random() * 0.9,
+      speed: (0.10 + Math.random() * 0.08) * (Math.random() < 0.5 ? 1 : -1),
+      tilt: (Math.random() * 0.7 + 0.15) * (Math.random() < 0.5 ? 1 : -1),
+      breathPhase: Math.random() * Math.PI * 2,
+      angle: Math.random() * Math.PI * 2,
+      working: false,
+      workingT: 0,     // eased 0..1 working-pulse amount
+      dockT: 0,        // eased 0..1 how far settled toward its dock anchor
+      revealed: false, // guards against a first-frame flash at the origin
+      flare: { active: false, t: 0, dur: 1.0 },
+    };
+    agents.set(cfg.slug, agent);
+    return agent;
+  }
+
+  function removeAgent(slug) {
+    const agent = agents.get(slug);
+    if (!agent) return;
+    constellation.remove(agent.group);
+    agent.avatarMat.dispose();
+    agent.glowMat.dispose();
+    agent.texture.dispose();
+    agent.label.remove();
+    agents.delete(slug);
+  }
+
+  DEMO_AGENTS.forEach(addAgent);
+  let usingDemoAgents = true;
+
+  function updateAgentOrbits(dt) {
+    const hideAll = isMobileHideWidth();
+    constellation.visible = !hideAll;
+    if (hideAll) return;
+
+    agents.forEach((agent) => {
+      if (!reducedMotion) agent.angle += agent.speed * dt;
+
+      const r = agent.radius;
+      let x = Math.cos(agent.angle) * r;
+      let z = Math.sin(agent.angle) * r;
+      let y = Math.sin(agent.angle) * r * agent.tilt * 0.5;
+
+      // Dock settle: blend from the orbit position toward a fixed anchor
+      // in front of the scene while working, and back when it stops.
+      const dockAnchor = DOCK_ANCHORS_NDC[agent.slug];
+      const dockTarget = agent.working && dockAnchor ? 1 : 0;
+      // fast in, slow out (Tier 5: "in quickly and out slowly")
+      const dockRate = dockTarget > agent.dockT ? 6.0 : 1.4;
+      agent.dockT += (dockTarget - agent.dockT) * Math.min(1, dt * dockRate);
+
+      if (dockAnchor && agent.dockT > 0.001) {
+        const world = ndcToWorld(dockAnchor.x, dockAnchor.y, DOCK_DEPTH);
+        const local = orbGroup.worldToLocal(world.clone());
+        x = x + (local.x - x) * agent.dockT;
+        y = y + (local.y - y) * agent.dockT;
+        z = z + (local.z - z) * agent.dockT;
+      }
+
+      agent.group.position.set(x, y, z);
+
+      if (!agent.revealed) {
+        agent.revealed = true;
+        agent.label.classList.add('visible');
+      }
+
+      // working pulse + dispatch flare, layered on top of the base breathe
+      const targetWorking = agent.working ? 1 : 0;
+      agent.workingT += (targetWorking - agent.workingT) * Math.min(1, dt * 5);
+      if (agent.flare.active) {
+        agent.flare.t += dt / agent.flare.dur;
+        if (agent.flare.t >= 1) agent.flare.active = false;
+      }
+      const flareEase = agent.flare.active
+        ? Math.sin(Math.min(1, agent.flare.t) * Math.PI) : 0;
+
+      const breathe = reducedMotion ? 0 : 0.5 + 0.5 * Math.sin(uTime.value * 1.1 + agent.breathPhase);
+      const workingPulse = agent.workingT * (0.5 + 0.5 * Math.sin(uTime.value * 4.5 + agent.breathPhase));
+      const scale = 0.34 * (1 + 0.10 * breathe + 0.22 * workingPulse + 0.55 * flareEase);
+      agent.avatar.scale.set(scale, scale, 1);
+      agent.glow.scale.set(scale * 1.9, scale * 1.9, 1);
+      const glowBaseOpacity = 0.28 + 0.18 * breathe + 0.35 * workingPulse + 0.5 * flareEase;
+
+      // Depth read: world Z relative to camera decides front/back-of-orb
+      // fade. Camera looks toward -Z from +Z, so a more-negative local Z is
+      // farther from camera i.e. "behind" the orb from this angle. Neither
+      // the orb nor the avatar sprites write depth (see their materials),
+      // so nothing occludes an agent behind the orb by itself — this is
+      // what stands in for that, on the avatar/glow as well as the label:
+      // the orb reads as a translucent field, so "behind" dims rather than
+      // fully vanishes; the label (plain text) can afford to disappear.
+      const depth = THREE.MathUtils.clamp((z / r + 1) / 2, 0, 1); // 0 far .. 1 near
+      const spriteFade = 0.22 + 0.78 * THREE.MathUtils.smoothstep(depth, 0.05, 0.6);
+      agent.avatarMat.opacity = spriteFade;
+      agent.glowMat.opacity = glowBaseOpacity * spriteFade;
+
+      const labelOpacity = THREE.MathUtils.smoothstep(depth, 0.10, 0.55);
+      agent.label.style.opacity = String(labelOpacity);
+      agent.label.style.zIndex = String(100 + Math.round(depth * 900));
+
+      // project to screen space for the label
+      const worldPos = new THREE.Vector3();
+      agent.group.getWorldPosition(worldPos);
+      worldPos.project(camera);
+      const sx = (worldPos.x * 0.5 + 0.5) * window.innerWidth;
+      const sy = (-worldPos.y * 0.5 + 0.5) * window.innerHeight;
+      agent.label.style.transform = `translate(-50%, 12px) translate(${sx}px, ${sy}px)`;
+    });
+  }
+
+  // ============================================================
+  // DISPATCH REACTIONS: beams + rings (Tier 5)
+  // ============================================================
+  const effects = new THREE.Group();
+  orbGroup.add(effects);
+
+  function makeBeamMaterial(color) {
+    return new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+      uniforms: { uColor: { value: color }, uHead: { value: 0 }, uOpacity: { value: 1 } },
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+      `,
+      fragmentShader: /* glsl */`
+        precision highp float;
+        varying vec2 vUv;
+        uniform vec3 uColor; uniform float uHead; uniform float uOpacity;
+        void main(){
+          float band = smoothstep(uHead - 0.28, uHead, vUv.x) * smoothstep(uHead + 0.28, uHead, vUv.x);
+          float edge = 1.0 - abs(vUv.y - 0.5) * 2.0;
+          float a = band * pow(edge, 1.5) * uOpacity;
+          gl_FragColor = vec4(uColor, a);
+        }
+      `,
+    });
+  }
+
+  function makeRingMesh(color) {
+    const geo = new THREE.RingGeometry(0.16, 0.24, 48);
+    const mat = new THREE.MeshBasicMaterial({
+      color, transparent: true, opacity: 0.9, side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    return new THREE.Mesh(geo, mat);
+  }
+
+  function fireDispatchBeam(agent) {
+    if (reducedMotion) {
+      pingRingAt(new THREE.Vector3(0, 0, 0), 1.3, agent.color);
+      agent.flare.active = true; agent.flare.t = 0;
+      return;
+    }
+
+    const beamGeo = new THREE.PlaneGeometry(1, 0.05, 1, 1);
+    const mat = makeBeamMaterial(agent.color.clone());
+    const beam = new THREE.Mesh(beamGeo, mat);
+    effects.add(beam);
+
+    // a small ring pulse right at the orb (local origin), the "sending" beat
+    pingRingAt(new THREE.Vector3(0, 0, 0), 0.5, agent.color);
+
+    const start = performance.now();
+    const OUT_MS = 650, HOLD_MS = 250, BACK_MS = 550;
+    const AXIS_X = new THREE.Vector3(1, 0, 0);
+    function step() {
+      const worldPos = new THREE.Vector3();
+      agent.group.getWorldPosition(worldPos);
+      const local = orbGroup.worldToLocal(worldPos);
+      const dist = local.length();
+
+      // Beam is a unit-length plane along local +X, stretched to the
+      // current distance and rotated so +X points at the agent — rebuilt
+      // every frame since the agent keeps orbiting while the beam travels.
+      beam.geometry.dispose();
+      beam.geometry = new THREE.PlaneGeometry(Math.max(dist, 0.001), 0.05, 1, 1);
+      beam.geometry.translate(dist / 2, 0, 0);
+      beam.position.set(0, 0, 0);
+      if (dist > 1e-4) beam.quaternion.setFromUnitVectors(AXIS_X, local.clone().divideScalar(dist));
+
+      const elapsed = performance.now() - start;
+      if (elapsed < OUT_MS) {
+        mat.uniforms.uHead.value = elapsed / OUT_MS;
+        mat.uniforms.uOpacity.value = 1;
+      } else if (elapsed < OUT_MS + HOLD_MS) {
+        mat.uniforms.uHead.value = 1;
+        if (Math.abs(elapsed - OUT_MS) < 20) {
+          agent.flare.active = true; agent.flare.t = 0;
+          pingRingAt(local, 1.0, agent.color);
+        }
+      } else if (elapsed < OUT_MS + HOLD_MS + BACK_MS) {
+        const t = (elapsed - OUT_MS - HOLD_MS) / BACK_MS;
+        mat.uniforms.uHead.value = 1 - t;
+        mat.uniforms.uOpacity.value = 1 - t;
+      } else {
+        effects.remove(beam);
+        beam.geometry.dispose();
+        mat.dispose();
+        return;
+      }
+      requestAnimationFrame(step);
+    }
+    step();
+  }
+
+  const activeRings = [];
+  // localPos is in orbGroup's local space (same space `effects` lives in).
+  function pingRingAt(localPos, scaleSpeed, color) {
+    const ring = makeRingMesh((color || COL_ORB).clone());
+    effects.add(ring);
+    ring.position.copy(localPos);
+    ring.lookAt(camera.position);
+    activeRings.push({ mesh: ring, t: 0, speed: scaleSpeed || 1 });
+  }
+  function updateRings(dt) {
+    for (let i = activeRings.length - 1; i >= 0; i--) {
+      const r = activeRings[i];
+      r.t += dt * r.speed;
+      const scale = 0.3 + r.t * 2.4;
+      r.mesh.scale.set(scale, scale, scale);
+      r.mesh.material.opacity = Math.max(0, 0.9 * (1 - r.t));
+      if (r.t >= 1) {
+        effects.remove(r.mesh);
+        r.mesh.geometry.dispose();
+        r.mesh.material.dispose();
+        activeRings.splice(i, 1);
+      }
+    }
+  }
+
+  // ============================================================
+  // PROCESSING HELIX — orbital rings around the orb (Tier 5)
+  // ============================================================
+  const helix = new THREE.Group();
+  orbGroup.add(helix);
+  const HELIX_RING_COUNT = 4;
+  const helixRings = [];
+  for (let i = 0; i < HELIX_RING_COUNT; i++) {
+    const geo = new THREE.RingGeometry(1.55 + i * 0.14, 1.58 + i * 0.14, 96);
+    const mat = new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false, side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      uniforms: {
+        uTeal: { value: COL_TEAL }, uPurple: { value: COL_PURPLE },
+        uMix: { value: 0 }, uSweep: { value: 0 }, uOpacity: { value: 0 },
+      },
+      vertexShader: /* glsl */`
+        varying float vAngle;
+        void main(){
+          vAngle = atan(position.y, position.x);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        precision highp float;
+        varying float vAngle;
+        uniform vec3 uTeal, uPurple; uniform float uMix, uSweep, uOpacity;
+        void main(){
+          float d = mod(vAngle - uSweep + 3.14159265, 6.2831853) - 3.14159265;
+          float pulse = smoothstep(0.9, 0.0, abs(d));
+          vec3 col = mix(uTeal, uPurple, uMix);
+          float a = (0.18 + pulse * 0.9) * uOpacity;
+          gl_FragColor = vec4(col, a);
+        }
+      `,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.rotation.x = (i % 2 === 0 ? 1 : -1) * (0.35 + i * 0.12);
+    mesh.rotation.z = i * 0.7;
+    helix.add(mesh);
+    helixRings.push({ mesh, mat, spin: (0.15 + i * 0.05) * (i % 2 === 0 ? 1 : -1), sweepSpeed: 0.8 + i * 0.35 });
+  }
+  let helixTarget = 0;
+  let helixVisibility = 0;
+
+  function updateHelix(dt) {
+    helixTarget = currentState === 'processing' ? 1 : 0;
+    helixVisibility += (helixTarget - helixVisibility) * Math.min(1, dt * 2.2);
+    const mixPhase = 0.5 + 0.5 * Math.sin(uTime.value * 0.35);
+    helixRings.forEach((r) => {
+      if (!reducedMotion) {
+        r.mesh.rotation.y += r.spin * dt;
+        r.mat.uniforms.uSweep.value += r.sweepSpeed * dt;
+      }
+      r.mat.uniforms.uMix.value = mixPhase;
+      r.mat.uniforms.uOpacity.value = helixVisibility;
+    });
+    helix.visible = helixVisibility > 0.01;
+  }
+
+  // ============================================================
+  // WIRING (Tier 6) — global hooks, real-event polling
+  // ============================================================
+  let currentState = 'idle';
+  // Wrap rather than replace: window.setStatus already exists by the time
+  // this (deferred module) script runs — a classic <script> below defines
+  // it, and classic scripts execute during HTML parsing, before any
+  // deferred/module script fires. That script already owns the status dot
+  // and voiceBright coupling; this only adds tracking currentState for the
+  // helix/orb-color effects above, which need to know when Trillion enters
+  // "processing" specifically.
+  const _prevSetStatus = window.setStatus;
+  window.setStatus = function (state) {
+    currentState = state;
+    if (typeof _prevSetStatus === 'function') _prevSetStatus(state);
+  };
+
+  window.trillionOrb = {
+    dispatch(slug) {
+      const agent = agents.get(slug);
+      if (agent) fireDispatchBeam(agent);
+    },
+    setWorking(slug, working) {
+      const agent = agents.get(slug);
+      if (agent) agent.working = !!working;
+    },
+    addAgent(cfg) { return addAgent(cfg); },
+    removeAgent(slug) { removeAgent(slug); },
+    listAgents() { return Array.from(agents.keys()); },
+  };
+
+  // Poll /api/agents for real Factory specialists. Reconciles membership
+  // (swap the demo fallback out the first time a real one shows up, add/
+  // remove as agents are approved/disabled) and detects working-state
+  // transitions to trigger the dispatch beam for real — see
+  // agent/factory/dispatch.py's DispatchActivity for the source signal.
+  const AGENTS_POLL_MS = 5000;
+  async function pollAgents() {
+    try {
+      const res = await fetch('/api/agents', { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      const real = data.agents || [];
+
+      if (real.length && usingDemoAgents) {
+        DEMO_AGENTS.forEach((d) => removeAgent(d.slug));
+        usingDemoAgents = false;
+      }
+      if (!real.length && !usingDemoAgents) {
+        DEMO_AGENTS.forEach(addAgent);
+        usingDemoAgents = true;
+      }
+      if (usingDemoAgents) return; // nothing further to reconcile against demo data
+
+      const seen = new Set();
+      real.forEach((row) => {
+        seen.add(row.slug);
+        let agent = agents.get(row.slug);
+        if (!agent) agent = addAgent({ slug: row.slug, name: row.name, specialty: row.specialty });
+        const wasWorking = agent.working;
+        agent.working = !!row.working;
+        if (!wasWorking && agent.working) fireDispatchBeam(agent);
+      });
+      agents.forEach((_agent, slug) => { if (!seen.has(slug)) removeAgent(slug); });
+    } catch (err) {
+      // Endpoint not reachable (e.g. opened as a static file) — the demo
+      // constellation just stays up, same degrade-quietly posture as the
+      // cost/notices/shield panels.
+    }
+  }
+  let agentsPollTimer = null;
+  function startAgentsPolling() {
+    if (agentsPollTimer) return;
+    agentsPollTimer = setInterval(() => { if (!document.hidden) pollAgents(); }, AGENTS_POLL_MS);
+  }
+  pollAgents();
+  startAgentsPolling();
+
+  // ============================================================
+  // BATTERY / FOCUS (Tier 6) — pause the loop when the tab is hidden,
+  // resume without a jarring jump.
+  // ============================================================
+  let looping = true;
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      looping = false;
+    } else if (!looping) {
+      looping = true;
+      clock.getDelta(); // discard the hidden interval so dt doesn't spike
+      requestAnimationFrame(tick);
+    }
+  });
+
+  // ============================================================
   // LOOP
   // ============================================================
   const clock = new THREE.Clock();
   function tick() {
-    const dt = clock.getDelta();
+    if (!looping) return;
+    const dt = Math.min(clock.getDelta(), 0.1); // clamp so a stall never spikes physics
+
+    perfSkipFrame = !perfSkipFrame;
+    if (perfMode && perfSkipFrame) {
+      requestAnimationFrame(tick);
+      return;
+    }
+
     uTime.value += dt;
 
     // smooth the voice value toward its target
@@ -1022,8 +1656,26 @@
     halo.quaternion.copy(camera.quaternion);
     atmos.quaternion.copy(camera.quaternion);
 
-    // very slow orb drift so it feels alive
-    orbGroup.position.y = Math.sin(uTime.value * 0.3) * 0.05;
+    // very slow orb drift so it feels alive — reduced-motion calms it,
+    // same spirit as calming camera drift (this build has no separate
+    // camera-drift motion to calm; this bob is the closest analog).
+    orbGroup.position.y = reducedMotion ? 0 : Math.sin(uTime.value * 0.3) * 0.05;
+
+    // Tier 5: ease the orb's own color toward the processing teal<->purple
+    // cycle so the helix rings don't feel disconnected from the orb itself.
+    const mixTarget = currentState === 'processing' ? 1 : 0;
+    uColorMix += (mixTarget - uColorMix) * Math.min(1, dt * 1.5);
+    if (uColorMix > 0.01) {
+      const cyclePhase = 0.5 + 0.5 * Math.sin(uTime.value * 0.35);
+      _scratchColor.copy(COL_TEAL).lerp(COL_PURPLE, cyclePhase * uColorMix);
+      orbMaterials.forEach((m) => m.uniforms.uColor.value.copy(_scratchColor));
+    } else {
+      orbMaterials.forEach((m) => m.uniforms.uColor.value.copy(COL_ORB));
+    }
+
+    updateAgentOrbits(dt);
+    updateRings(dt);
+    updateHelix(dt);
 
     composer.render();
 

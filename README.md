@@ -6,7 +6,9 @@ Trillion is a **single-user** Python agent: chat in the terminal or browser, swa
 
 **Working today:** text brain (CLI + web chat), provider seam, tool registry, cost dashboard, Agent Factory, Software Factory, voice V1 (Deepgram STT + local Piper TTS, wired to `POST /api/transcribe` and `POST /api/tts`), Tier 6 safety rails (confirmation gate, audit log, `/pause` kill switch), durable cross-session memory (`agent/memory.py` + `remember_fact`/`forget_fact`), the heartbeat scheduler with quiet hours and the Code Sentinel, the `search_notes` and `draft_email` tools, untrusted-content sanitization on every tool result, and the security shield (`GET /api/security/status`).
 
-**Not done yet:** self-knowledge (Trillion cannot describe its own tools from source), cosmic-orb UI tiers 4-6, and voice latency instrumentation.
+**Not done yet:** voice latency instrumentation.
+
+Self-knowledge (`agent/selfknowledge/`, generating `context/self/trillion.md`) and cosmic-orb UI tiers 4-6 (sub-agent constellation, dispatch beams/rings, performance mode, `prefers-reduced-motion`) are built — the orb UI change couldn't be visually verified against a real WebGL context in this session's sandboxed preview browser (no GPU there), so treat it as code-reviewed and unit-tested but not yet eyeballed running; check it in a real browser before relying on it.
 
 ---
 

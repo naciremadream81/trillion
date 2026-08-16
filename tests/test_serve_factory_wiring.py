@@ -100,6 +100,30 @@ class TestFactoryWiring(AioHTTPTestCase):
         await self.app.cleanup()
         self.assertTrue(task.cancelled() or task.done())
 
+    async def test_api_agents_lists_the_active_specialist(self):
+        # cosmic-orb-ui's sub-agent constellation (Tier 4/5) polls this to
+        # know which specialists exist — real Factory data, not synthetic.
+        resp = await self.client.get("/api/agents")
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertEqual(len(data["agents"]), 1)
+        agent = data["agents"][0]
+        self.assertEqual(agent["slug"], "sql-migration-review")
+        self.assertEqual(agent["specialty"], "You review SQL.")
+        self.assertFalse(agent["working"])
+
+    async def test_api_agents_reflects_working_state_from_dispatch_activity(self):
+        from agent.factory.dispatch import get_dispatch_activity
+
+        activity = get_dispatch_activity()
+        activity.mark_started("sql-migration-review")
+        try:
+            resp = await self.client.get("/api/agents")
+            data = await resp.json()
+            self.assertTrue(data["agents"][0]["working"])
+        finally:
+            activity.mark_finished("sql-migration-review")
+
 
 if __name__ == "__main__":
     import unittest
