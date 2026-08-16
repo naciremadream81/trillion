@@ -203,7 +203,16 @@ def _token_scope_audit() -> Signal:
     )
 
 
-def _db_readonly_role() -> Signal:
+def _db_readonly_role(settings) -> Signal:
+    # registry.py only wires up QueryAnalyticsTool when supabase_analytics_url
+    # is set — with no analytics DB connected, there is no role to attest to,
+    # and treating that as "pending" would ask for an attestation about a
+    # connection that doesn't exist.
+    if not settings.supabase_analytics_url:
+        return Signal(
+            "db-readonly-role", "DB read-only role", "not configured", 0, "ok",
+            "No analytics DB is wired up (SUPABASE_ANALYTICS_URL unset) — nothing to audit.",
+        )
     if _env_bool("TRILLION_DB_READONLY_AUDITED"):
         return Signal("db-readonly-role", "DB read-only role", "active", 0, "ok")
     return Signal(
@@ -292,7 +301,7 @@ def collect_signals(settings, registry) -> list[Signal]:
         _hardline_blocklist(),
         _csp_status(),
         _token_scope_audit(),
-        _db_readonly_role(),
+        _db_readonly_role(settings),
         _cve_scan(),
         _csrf_origin_gate(settings),
     ]

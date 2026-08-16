@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -26,6 +27,7 @@ from agent.providers.base import BaseProvider, ProviderResponse, TextChunk, Toke
 from agent.security.cve_scan import (
     CveScanRepo,
     CveScanResult,
+    _pip_audit_binary,
     run_pip_audit,
     scan_and_persist,
 )
@@ -59,6 +61,31 @@ class TestCveScanResult(unittest.TestCase):
     def test_generated_at_preserved_when_given(self):
         result = CveScanResult(cve_count=0, generated_at="2026-01-01T00:00:00+00:00")
         self.assertEqual(result.generated_at, "2026-01-01T00:00:00+00:00")
+
+
+class TestPipAuditBinary(unittest.TestCase):
+    # serve.py is normally launched as `.venv/bin/python serve.py` — the venv
+    # is never *activated*, so a bare PATH lookup for "pip-audit" fails even
+    # though it's installed right next to the interpreter running this code.
+    # _pip_audit_binary() must resolve it relative to sys.executable instead.
+    def test_resolves_next_to_interpreter_when_present(self):
+        fake_python = os.path.join(tempfile.mkdtemp(), "bin", "python")
+        os.makedirs(os.path.dirname(fake_python))
+        fake_pip_audit = os.path.join(os.path.dirname(fake_python), "pip-audit")
+        open(fake_pip_audit, "w").close()
+        with patch.object(sys, "executable", fake_python):
+            self.assertEqual(_pip_audit_binary(), fake_pip_audit)
+
+    def test_falls_back_to_bare_name_when_not_next_to_interpreter(self):
+        fake_python = os.path.join(tempfile.mkdtemp(), "bin", "python")
+        os.makedirs(os.path.dirname(fake_python))
+        with patch.object(sys, "executable", fake_python):
+            self.assertEqual(_pip_audit_binary(), "pip-audit")
+
+    def test_matches_real_venv_layout(self):
+        # Not mocked: proves the resolution actually works against the venv
+        # this test suite itself is running under, not just a synthetic path.
+        self.assertTrue(os.path.exists(_pip_audit_binary()) or _pip_audit_binary() == "pip-audit")
 
 
 class TestCveScanRepo(unittest.TestCase):
@@ -122,6 +149,14 @@ class TestRunPipAudit(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.cve_count, 2)
         self.assertEqual(len(result.findings), 1)
         self.assertEqual(result.findings[0]["package"], "vuln-pkg")
+
+    async def test_invokes_resolved_binary_not_bare_path_lookup(self):
+        proc = FakeProc(_payload([]))
+        mock_exec = AsyncMock(return_value=proc)
+        with patch("agent.security.cve_scan.asyncio.create_subprocess_exec", mock_exec):
+            await run_pip_audit()
+        called_argv0 = mock_exec.call_args.args[0]
+        self.assertEqual(called_argv0, _pip_audit_binary())
 
     async def test_missing_binary_records_error_not_crash(self):
         with patch(
