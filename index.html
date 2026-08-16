@@ -1776,6 +1776,11 @@
     let mediaStream = null;
     let mediaRecorder = null;
     let chunks = [];
+    // Captured synchronously in stopListening(), read synchronously at the
+    // top of onRecordingStopped() (the mediaRecorder 'stop' event handler)
+    // before any await — see the voice latency instrumentation block below
+    // for why this needs to be an explicit id, not a re-read of shared state.
+    let recordingStopTurnId = null;
 
     function setHint(t) { if (hint) hint.textContent = t; }
     function setMic(on) {
@@ -1788,6 +1793,53 @@
 
     if (!canRecord) setHint('Voice input unsupported here — use the terminal');
     else setHint(IDLE_HINT);
+
+    // ============= Voice latency instrumentation (smooth-voice_2 Tier 1) =============
+    // Measures, doesn't fix: breaks one real turn into the checkpoints the
+    // playbook asks for — stop speaking, transcript final, first model
+    // token, first audio byte, first sound actually playing. Logged to the
+    // console and left on window.trillionVoiceLatency for inspection
+    // (mirrors the window.trillionOrb/setOrbPerfMode console-hook pattern
+    // already used elsewhere in this file) rather than a UI panel or a
+    // persisted store — Tier 1 is explicitly "show the breakdown," not
+    // ship a dashboard; that's a call for a later tier, if this one's
+    // numbers say it's worth it.
+    //
+    // Each turn gets an id (vlStartTurn's return value), threaded as an
+    // explicit parameter through onRecordingStopped -> sendToAgent -> speak
+    // -> synthesizeAndPlay, rather than read back off a mutable global at
+    // each step. Barge-in means a new turn can start while the previous
+    // one's model stream, TTS fetch, or audio element is still in flight —
+    // without the id check, a late callback from the OLD turn would write
+    // into (or report) the NEW turn's breakdown.
+    let voiceLatency = null;
+    let voiceLatencyTurnId = 0;
+    function vlStartTurn() {
+      voiceLatencyTurnId += 1;
+      voiceLatency = { turnId: voiceLatencyTurnId, stopSpeaking: performance.now() };
+      return voiceLatencyTurnId;
+    }
+    function vlMark(turnId, name) {
+      if (voiceLatency && voiceLatency.turnId === turnId && voiceLatency[name] == null) {
+        voiceLatency[name] = performance.now();
+      }
+    }
+    function vlReport(turnId) {
+      if (!voiceLatency || voiceLatency.turnId !== turnId) return;
+      const v = voiceLatency;
+      const span = (fromKey, toKey) =>
+        (v[fromKey] != null && v[toKey] != null) ? Math.round(v[toKey] - v[fromKey]) : null;
+      const breakdown = {
+        'stop speaking -> transcript final': span('stopSpeaking', 'transcriptFinal'),
+        'transcript final -> first model token': span('transcriptFinal', 'firstModelToken'),
+        'first model token -> first audio byte': span('firstModelToken', 'firstAudioByte'),
+        'first audio byte -> first sound playing': span('firstAudioByte', 'firstSoundPlaying'),
+        'total: stop speaking -> first sound playing': span('stopSpeaking', 'firstSoundPlaying'),
+      };
+      console.log('[trillion voice-latency] turn breakdown (ms):', breakdown);
+      window.trillionVoiceLatency = { raw: v, breakdown };
+      voiceLatency = null; // one report per turn; the next tap starts fresh
+    }
 
     async function startListening() {
       if (!canRecord) return;
@@ -1813,9 +1865,14 @@
     function stopListening() {
       if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
       setMic(false);
+      // smooth-voice_2 Tier 1: push-to-talk means "tap to stop" IS "stopped
+      // speaking". Set synchronously, before the 'stop' event (which fires
+      // onRecordingStopped) — see recordingStopTurnId's declaration.
+      recordingStopTurnId = vlStartTurn();
     }
 
     async function onRecordingStopped() {
+      const turnId = recordingStopTurnId; // captured now, before any await
       if (mediaStream) { mediaStream.getTracks().forEach((t) => t.stop()); mediaStream = null; }
       const blob = new Blob(chunks, { type: (mediaRecorder && mediaRecorder.mimeType) || 'audio/webm' });
       chunks = [];
@@ -1829,9 +1886,10 @@
           body: blob,
         });
         const data = await res.json();
+        vlMark(turnId, 'transcriptFinal');
         if (!res.ok) { setHint(data.error || 'Transcription error — tap to retry'); window.setStatus('idle'); return; }
         const text = (data.text || '').trim();
-        if (text) { setHint('“' + text + '”'); sendToAgent(text); }
+        if (text) { setHint('“' + text + '”'); sendToAgent(text, turnId); }
         else { window.setStatus('idle'); setHint('Didn’t catch that — tap to retry'); }
       } catch (err) {
         window.setStatus('idle');
@@ -1841,7 +1899,7 @@
 
     mic.addEventListener('click', () => { listening ? stopListening() : startListening(); });
 
-    async function sendToAgent(text) {
+    async function sendToAgent(text, turnId) {
       window.setStatus('processing');
       setHint('Thinking…');
       let spoke = false;
@@ -1857,17 +1915,18 @@
         for (;;) {
           const { value, done } = await reader.read();
           if (done) break;
+          if (value && value.length) vlMark(turnId, 'firstModelToken');
           buf += dec.decode(value, { stream: true });
           let m;
           // Speak complete sentences as they stream in.
           while ((m = buf.match(/[^.!?]+[.!?]+(\s|$)/))) {
             const sentence = m[0].trim();
             buf = buf.slice(m[0].length);
-            if (sentence) { speak(sentence); spoke = true; }
+            if (sentence) { speak(sentence, turnId); spoke = true; }
           }
         }
         const tail = buf.trim();
-        if (tail) { speak(tail); spoke = true; }
+        if (tail) { speak(tail, turnId); spoke = true; }
       } catch (err) {
         setHint('Connection error — is the server running?');
       }
@@ -1883,9 +1942,9 @@
     let pendingSpeech = 0;
     let currentAudio = null;
 
-    function speak(sentence) {
+    function speak(sentence, turnId) {
       pendingSpeech++;
-      speechQueue = speechQueue.then(() => synthesizeAndPlay(sentence)).catch((err) => {
+      speechQueue = speechQueue.then(() => synthesizeAndPlay(sentence, turnId)).catch((err) => {
         console.log('[trillion voice] tts error:', err);
       }).finally(() => {
         pendingSpeech--;
@@ -1897,21 +1956,36 @@
       });
     }
 
-    async function synthesizeAndPlay(sentence) {
+    async function synthesizeAndPlay(sentence, turnId) {
       const res = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: sentence }),
       });
       if (!res.ok) { console.log('[trillion voice] tts http', res.status); return; }
-      const buf = await res.arrayBuffer();
+      // Read the body via a stream reader (like sendToAgent's model-token
+      // read above) rather than res.arrayBuffer(), so "first audio byte"
+      // marks when a body chunk actually arrives — fetch()'s own promise
+      // resolves on response headers, before any body bytes are read.
       const contentType = res.headers.get('Content-Type') || 'audio/wav';
-      const url = URL.createObjectURL(new Blob([buf], { type: contentType }));
+      const reader = res.body.getReader();
+      const chunks = [];
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        // vlMark no-ops after the first call each turn, so calling this on
+        // every chunk of every sentence is fine: only the turn's actual
+        // first "audio coming back" moment ever gets recorded.
+        if (value && value.length) vlMark(turnId, 'firstAudioByte');
+        chunks.push(value);
+      }
+      const url = URL.createObjectURL(new Blob(chunks, { type: contentType }));
       const audio = new Audio(url);
       currentAudio = audio;
       window.setVoiceBright && window.setVoiceBright(0.9);
       window.setStatus('processing');
       await new Promise((resolve) => {
+        audio.onplaying = () => { vlMark(turnId, 'firstSoundPlaying'); vlReport(turnId); };
         audio.onended = resolve;
         audio.onerror = resolve;
         audio.play().catch(resolve);

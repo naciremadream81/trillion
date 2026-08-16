@@ -6,9 +6,11 @@ Trillion is a **single-user** Python agent: chat in the terminal or browser, swa
 
 **Working today:** text brain (CLI + web chat), provider seam, tool registry, cost dashboard, Agent Factory, Software Factory, voice V1 (Deepgram STT + local Piper TTS, wired to `POST /api/transcribe` and `POST /api/tts`), Tier 6 safety rails (confirmation gate, audit log, `/pause` kill switch), durable cross-session memory (`agent/memory.py` + `remember_fact`/`forget_fact`), the heartbeat scheduler with quiet hours and the Code Sentinel, the `search_notes` and `draft_email` tools, untrusted-content sanitization on every tool result, and the security shield (`GET /api/security/status`).
 
-**Not done yet:** voice latency instrumentation.
+**Not done yet:** acting on the voice latency numbers below (smooth-voice_2 Tiers 2-6) — end-of-turn detection tuning, prompt-caching hygiene, and any provider change are all still open, and a provider swap requires asking Sean first regardless.
 
 Self-knowledge (`agent/selfknowledge/`, generating `context/self/trillion.md`) and cosmic-orb UI tiers 4-6 (sub-agent constellation, dispatch beams/rings, performance mode, `prefers-reduced-motion`) are built — the orb UI change couldn't be visually verified against a real WebGL context in this session's sandboxed preview browser (no GPU there), so treat it as code-reviewed and unit-tested but not yet eyeballed running; check it in a real browser before relying on it.
+
+Voice latency instrumentation (smooth-voice_2 Tier 1, measure-only) is built into `index.html`'s voice flow: `console.log`s a per-turn breakdown (stop speaking → transcript final → first model token → first audio byte → first sound playing) and leaves it at `window.trillionVoiceLatency`. Real numbers captured against this dev sandbox (not the deployed Pi — see caveat below): first Claude token ~1.4s; Piper TTS ~500-1200ms per sentence once its ~63MB voice model is warm in memory, but **~4s extra on the very first synthesis after a process (re)start** while that model loads — worth fixing before the STT leg even matters. STT (Deepgram) couldn't be measured here at all: `DEEPGRAM_API_KEY` isn't set in this dev `.env`. None of these numbers transfer directly to the Pi — different CPU, different network path — re-run the measurement there before prioritizing Tier 2+.
 
 ---
 
