@@ -1035,6 +1035,13 @@
     // event), so the binding always exists by call time.
     renderer.setPixelRatio(typeof perfMode !== 'undefined' && perfMode ? 1 : Math.min(window.devicePixelRatio, 2));
     renderer.setSize(w, h);
+    // EffectComposer captures the renderer's pixel ratio once at
+    // construction and never re-reads it — composer.setSize() alone
+    // resizes its render targets using that stale ratio, so on a DPR>1
+    // device toggling perf mode left the composer's (expensive) main
+    // render targets at the original high-DPR size. setPixelRatio() here
+    // updates it and re-sizes together.
+    composer.setPixelRatio(renderer.getPixelRatio());
     composer.setSize(w, h);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
@@ -1259,6 +1266,12 @@
       workingT: 0,     // eased 0..1 working-pulse amount
       dockT: 0,        // eased 0..1 how far settled toward its dock anchor
       revealed: false, // guards against a first-frame flash at the origin
+      // null (not 0) until the first real poll sets it — a fresh agent's
+      // pre-existing dispatch history must not read as "just dispatched".
+      // See pollAgents(): a dispatch_count diff, not a working-flag
+      // transition, is what catches a dispatch short enough to start and
+      // finish between two polls.
+      lastSeenDispatchCount: cfg.dispatchCount != null ? cfg.dispatchCount : null,
       flare: { active: false, t: 0, dur: 1.0 },
     };
     agents.set(cfg.slug, agent);
@@ -1573,9 +1586,17 @@
 
   // Poll /api/agents for real Factory specialists. Reconciles membership
   // (swap the demo fallback out the first time a real one shows up, add/
-  // remove as agents are approved/disabled) and detects working-state
-  // transitions to trigger the dispatch beam for real — see
-  // agent/factory/dispatch.py's DispatchActivity for the source signal.
+  // remove as agents are approved/disabled) and fires the dispatch beam for
+  // real activity — see agent/factory/dispatch.py's DispatchActivity for
+  // the source signal.
+  //
+  // Firing on a dispatch_count DIFF, not a working-flag transition, is
+  // deliberate: a dispatch short enough to start and finish between two
+  // ~5s polls (routine for a quick model response) would set working ->
+  // true -> false entirely between samples, so a transition check would
+  // silently miss the whole call. dispatch_count only ever goes up, so
+  // "did it increase since I last looked" catches it on the very next poll
+  // even though the live moment was missed.
   const AGENTS_POLL_MS = 5000;
   async function pollAgents() {
     try {
@@ -1598,10 +1619,18 @@
       real.forEach((row) => {
         seen.add(row.slug);
         let agent = agents.get(row.slug);
-        if (!agent) agent = addAgent({ slug: row.slug, name: row.name, specialty: row.specialty });
-        const wasWorking = agent.working;
+        if (!agent) {
+          agent = addAgent({
+            slug: row.slug, name: row.name, specialty: row.specialty,
+            dispatchCount: row.dispatch_count,
+          });
+        }
         agent.working = !!row.working;
-        if (!wasWorking && agent.working) fireDispatchBeam(agent);
+        const count = row.dispatch_count || 0;
+        if (agent.lastSeenDispatchCount !== null && count > agent.lastSeenDispatchCount) {
+          fireDispatchBeam(agent);
+        }
+        agent.lastSeenDispatchCount = count;
       });
       agents.forEach((_agent, slug) => { if (!seen.has(slug)) removeAgent(slug); });
     } catch (err) {

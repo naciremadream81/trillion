@@ -510,21 +510,25 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
     async def active_agents(_request: web.Request) -> web.Response:
         # Polled by the browser (cosmic-orb-ui's sub-agent constellation,
         # index.html), mirroring /api/usage's read-only, best-effort-cached
-        # shape. `working` comes from agent/factory/dispatch.py's in-process
-        # DispatchActivity tracker — real signal, not a simulated one, but
-        # coarse-grained at this poll interval since a dispatch call is a
-        # single request/response, not a stream of progress events.
+        # shape. `working`/`dispatch_count` come from agent/factory/
+        # dispatch.py's in-process DispatchActivity tracker — real signals,
+        # not simulated ones. dispatch_count is what lets the browser catch
+        # a dispatch that started and finished between two polls (see that
+        # class's docstring): it's monotonic, so a diff against the last
+        # poll's value never misses one, even though `working` alone would.
         from agent.factory.dispatch import get_dispatch_activity
         from agent.factory.storage import FactoryRepo
 
         rows = FactoryRepo().list_active_agents()
-        working = get_dispatch_activity().snapshot()
+        activity = get_dispatch_activity()
+        working = activity.snapshot()
         agents = [
             {
                 "slug": r["slug"],
                 "name": r["name"],
                 "specialty": (r["system_prompt"] or "").strip().splitlines()[0][:140],
                 "working": r["slug"] in working,
+                "dispatch_count": activity.total_dispatches(r["slug"]),
             }
             for r in rows
         ]

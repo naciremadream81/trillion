@@ -146,6 +146,45 @@ class TestDispatchActivity(unittest.TestCase):
     def test_get_dispatch_activity_returns_the_same_singleton(self):
         self.assertIs(get_dispatch_activity(), get_dispatch_activity())
 
+    def test_overlapping_dispatches_to_the_same_slug_stay_active_until_both_finish(self):
+        # Codex review finding on PR #14: two concurrent dispatches to one
+        # slug used to collapse into one set entry, so the first to finish
+        # discarded it while the second was still running.
+        activity = DispatchActivity()
+        activity.mark_started("x")
+        activity.mark_started("x")  # a second, overlapping call
+        activity.mark_finished("x")  # the first call finishes
+        self.assertIn("x", activity.snapshot())  # still active — the second isn't done
+        activity.mark_finished("x")  # the second call finishes
+        self.assertNotIn("x", activity.snapshot())
+
+    def test_mark_finished_never_goes_negative_on_an_unbalanced_call(self):
+        activity = DispatchActivity()
+        activity.mark_started("x")
+        activity.mark_finished("x")
+        activity.mark_finished("x")  # an extra finish shouldn't happen, but must not corrupt state
+        activity.mark_started("x")
+        self.assertIn("x", activity.snapshot())
+
+    def test_total_dispatches_counts_every_start_and_never_decreases(self):
+        # Codex review finding on PR #14: a dispatch short enough to start
+        # and finish between two browser polls needs a signal that stays
+        # observable until acknowledged — total_dispatches is that signal,
+        # a monotonic counter the browser diffs against, not the current
+        # active/inactive snapshot.
+        activity = DispatchActivity()
+        self.assertEqual(activity.total_dispatches("x"), 0)
+        activity.mark_started("x")
+        activity.mark_finished("x")
+        activity.mark_started("x")
+        activity.mark_finished("x")
+        self.assertEqual(activity.total_dispatches("x"), 2)
+
+    def test_total_dispatches_is_per_slug(self):
+        activity = DispatchActivity()
+        activity.mark_started("x")
+        self.assertEqual(activity.total_dispatches("y"), 0)
+
 
 class TestDispatchToolActivityTracking(unittest.TestCase):
     """
