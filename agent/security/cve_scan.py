@@ -22,10 +22,25 @@ import asyncio
 import json
 import os
 import sqlite3
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .subprocess_env import shell_minimal
+
+
+def _pip_audit_binary() -> str:
+    """Resolve pip-audit next to the running interpreter when possible.
+
+    serve.py is normally launched as `.venv/bin/python serve.py` — the venv
+    is never *activated*, so `.venv/bin` isn't on PATH and a bare
+    `asyncio.create_subprocess_exec("pip-audit", ...)` reliably fails with
+    FileNotFoundError even though pip-audit is installed right next to the
+    interpreter that's running this code. Falls back to a bare PATH lookup
+    for environments where it's installed globally instead of in a venv.
+    """
+    candidate = os.path.join(os.path.dirname(sys.executable), "pip-audit")
+    return candidate if os.path.exists(candidate) else "pip-audit"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cve_scans (
@@ -66,7 +81,7 @@ async def run_pip_audit(timeout_seconds: float = 120.0) -> CveScanResult:
     """
     try:
         proc = await asyncio.create_subprocess_exec(
-            "pip-audit",
+            _pip_audit_binary(),
             "--format",
             "json",
             "--progress-spinner",

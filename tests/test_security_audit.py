@@ -256,10 +256,28 @@ class TestAuditSignals(unittest.TestCase):
         self.assertEqual(sig["value"], "audited")
         self.assertEqual(sig["delta"], 0)
 
-    def test_db_readonly_role_pending_by_default(self):
+    def test_db_readonly_role_not_configured_when_no_analytics_url(self):
+        # registry.py only wires up the analytics tool when
+        # supabase_analytics_url is set — with no analytics DB connected
+        # (the default), there's no role to attest to.
         result = audit(self._settings(), ToolRegistry())
         sig = next(s for s in result["signals"] if s["name"] == "db-readonly-role")
+        self.assertEqual(sig["value"], "not configured")
+        self.assertEqual(sig["delta"], 0)
+
+    def test_db_readonly_role_pending_when_analytics_url_set(self):
+        result = audit(self._settings(supabase_analytics_url="postgresql://trillion_analytics@host/db"), ToolRegistry())
+        sig = next(s for s in result["signals"] if s["name"] == "db-readonly-role")
+        self.assertEqual(sig["value"], "pending")
         self.assertEqual(sig["delta"], -3)
+
+    def test_db_readonly_role_attested_via_env_when_analytics_url_set(self):
+        os.environ["TRILLION_DB_READONLY_AUDITED"] = "true"
+        self.addCleanup(lambda: os.environ.pop("TRILLION_DB_READONLY_AUDITED", None))
+        result = audit(self._settings(supabase_analytics_url="postgresql://trillion_analytics@host/db"), ToolRegistry())
+        sig = next(s for s in result["signals"] if s["name"] == "db-readonly-role")
+        self.assertEqual(sig["value"], "active")
+        self.assertEqual(sig["delta"], 0)
 
     def test_csrf_origin_gate_reports_enforcing(self):
         # Was "absent", -10 while the signal was hardcoded. agent/security/
