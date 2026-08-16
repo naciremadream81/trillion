@@ -50,8 +50,11 @@ class ConfigDrivenAgent:
         # it must not be able to approve one either, since its history isn't
         # Sean's conversation. Tier 6's untrusted-content pass belongs at the
         # registry for exactly this reason: that one *does* need to reach here.
-        self._agent = Agent(provider=provider, tool_registry=restricted_registry)
-        self._agent.system = row["system_prompt"]
+        self._agent = Agent(
+            provider=provider,
+            tool_registry=restricted_registry,
+            system_prompt_override=row["system_prompt"],
+        )
 
     async def run(self, message: str) -> str:
         reply = ""

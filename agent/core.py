@@ -38,11 +38,20 @@ class Agent:
         tool_registry=None,  # ToolRegistry, added in Tier 2
         gate=None,  # agent.safety.approval.Gate, added in Tier 6
         memory_path: str | None = None,  # Tier 4 store path
+        system_prompt_override: str | None = None,
     ) -> None:
         self.provider = provider
         self.tool_registry = tool_registry
         self.gate = gate
         self.history: list[dict] = []
+        self._memory_facts = memory_facts or []
+
+        # A spawned Factory specialist (agent/factory/dispatch.py's
+        # ConfigDrivenAgent) passes its own spawned_agents row's prompt here
+        # instead of Trillion's own personality — that prompt is fixed for
+        # the specialist's lifetime, so _build_system_prompt() returns it
+        # verbatim rather than deriving anything from tool_registry.
+        self._system_prompt_override = system_prompt_override
 
         # Give the model the one tool it needs to act on Sean's yes. Registered
         # here rather than in build_registry() because it has to be bound to
@@ -76,7 +85,7 @@ class Agent:
         # (agent/system_prompt.py's _load_self_knowledge()), so it must see
         # confirm_action/remember_fact/forget_fact already registered rather
         # than describing a registry that's about to change out from under it.
-        self.system = build_system_prompt(memory_facts=memory_facts, tool_registry=tool_registry)
+        self.system = self._build_system_prompt()
 
     # ── Public interface ──────────────────────────────────────────────────────
 
@@ -110,6 +119,16 @@ class Agent:
             collected_text = ""
             tool_calls: list[ToolCall] = []
             final_response: ProviderResponse | None = None
+
+            # Rebuilt every round, not just at construction: RegistryWatcher
+            # (agent/factory/dispatch.py) mutates tool_registry from a
+            # background poll while this Agent stays alive across many
+            # turns, and a CLI /approve triggers the same mutation
+            # synchronously. tools_schema below is already read fresh from
+            # tool_registry every round — this keeps the system prompt's
+            # prose description of "tools currently available" from
+            # contradicting the schemas actually offered in the same call.
+            self.system = self._build_system_prompt()
 
             # Stream the provider's response
             tools_schema = (
@@ -188,9 +207,22 @@ class Agent:
         Reload memory facts into the system prompt.
         Called by the memory store (Tier 4) when facts change.
         """
-        self.system = build_system_prompt(memory_facts=memory_facts, tool_registry=self.tool_registry)
+        self._memory_facts = memory_facts
+        self.system = self._build_system_prompt()
 
     # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _build_system_prompt(self) -> str:
+        """
+        The prompt for the *next* thing sent to the provider — an override
+        for a spawned Factory specialist (see __init__), otherwise built
+        live from the current tool_registry/memory facts. Called at
+        construction, after a memory change, and once per tool-calling
+        round in turn() — see the call site there for why per-round matters.
+        """
+        if self._system_prompt_override is not None:
+            return self._system_prompt_override
+        return build_system_prompt(memory_facts=self._memory_facts, tool_registry=self.tool_registry)
 
     async def _run_tool(self, tc: ToolCall) -> str:
         """
