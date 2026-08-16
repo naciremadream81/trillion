@@ -337,7 +337,7 @@ Deepgram STT + local Piper TTS.
 Paste this into the chat:
 
 > "We're building Trillion. Read README.md for what's built, AGENT.md for the
-> product and safety spec, and HANDOFF.md for how we got here. All six tiers
-> are done; remaining work is self-knowledge, cosmic-orb UI tiers 4-6, and
+> product and safety spec, and HANDOFF.md for how we got here. All six tiers,
+> self-knowledge, and cosmic-orb UI tiers 4-6 are done; remaining work is
 > voice latency instrumentation. Don't swap any provider (model, STT, TTS)
 > without asking me first, and don't merge anything without my say-so."
