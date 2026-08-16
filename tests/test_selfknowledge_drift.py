@@ -23,8 +23,15 @@ class TestCheckNoDrift(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.path = os.path.join(self.tmp, "trillion.md")
 
-    def test_missing_file_is_not_drift(self):
-        drift.check_no_drift(self.path)  # must not raise
+    def test_missing_file_is_drift(self):
+        # A deleted context/self/trillion.md must fail the check, not pass
+        # it silently — _load_self_knowledge() falls back to reading this
+        # exact file, so a missing file silently drops the capability
+        # summary from every prompt built without a live tool_registry.
+        with self.assertRaises(drift.DriftError) as ctx:
+            drift.check_no_drift(self.path)
+        self.assertIn("missing", str(ctx.exception))
+        self.assertIn("--refresh", str(ctx.exception))
 
     def test_freshly_refreshed_file_has_no_drift(self):
         render.refresh_file(self.path, Settings())

@@ -28,10 +28,16 @@ class DriftError(Exception):
 
 
 def check_no_drift(path: str = render.DOC_PATH) -> None:
-    """Raises DriftError describing every stale/missing block. Returns
-    silently if the file doesn't exist yet — nothing to have drifted."""
+    """Raises DriftError describing every stale/missing block, including a
+    missing file. A missing file is drift, not a clean state: Trillion's
+    system prompt still expects context/self/trillion.md to exist as the
+    fallback source for _load_self_knowledge() (agent/system_prompt.py), so
+    an accidental deletion must fail this check the same way a stale block
+    would, not pass silently."""
     if not os.path.isfile(path):
-        return
+        raise DriftError(
+            f"{path} is missing. Run `python -m agent.selfknowledge --refresh` to create it."
+        )
 
     with open(path, encoding="utf-8") as f:
         existing = f.read()

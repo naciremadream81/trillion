@@ -83,14 +83,14 @@ def _fake_build_registry(settings) -> ToolRegistry:
 class TestProbeConfigGating(unittest.TestCase):
     def test_finds_str_and_bool_gates_only(self):
         gates = generators.probe_config_gating(
-            settings_factory=_FakeSettings, build_registry_fn=_fake_build_registry
+            baseline=_FakeSettings(), build_registry_fn=_fake_build_registry
         )
         fields = {g.field for g in gates}
         self.assertEqual(fields, {"api_key", "enabled"})
 
     def test_reports_which_tool_each_field_gains(self):
         gates = generators.probe_config_gating(
-            settings_factory=_FakeSettings, build_registry_fn=_fake_build_registry
+            baseline=_FakeSettings(), build_registry_fn=_fake_build_registry
         )
         by_field = {g.field: g for g in gates}
         self.assertEqual(by_field["api_key"].gained, ("gated_by_key",))
@@ -98,7 +98,7 @@ class TestProbeConfigGating(unittest.TestCase):
 
     def test_field_with_no_registration_effect_is_not_reported(self):
         gates = generators.probe_config_gating(
-            settings_factory=_FakeSettings, build_registry_fn=_fake_build_registry
+            baseline=_FakeSettings(), build_registry_fn=_fake_build_registry
         )
         fields = {g.field for g in gates}
         self.assertNotIn("tags", fields)
@@ -106,19 +106,56 @@ class TestProbeConfigGating(unittest.TestCase):
     def test_unprobeable_type_is_skipped_without_crashing(self):
         # daily_cap: int isn't in _TOGGLE_VALUES — this must not raise.
         gates = generators.probe_config_gating(
-            settings_factory=_FakeSettings, build_registry_fn=_fake_build_registry
+            baseline=_FakeSettings(), build_registry_fn=_fake_build_registry
         )
         fields = {g.field for g in gates}
         self.assertNotIn("daily_cap", fields)
+
+    def test_no_baseline_given_defaults_to_blank_settings(self):
+        # Matches prior behavior for callers with no real settings on hand
+        # (e.g. a from-scratch doc render).
+        gates = generators.probe_config_gating(build_registry_fn=build_registry)
+        fields = {g.field for g in gates}
+        self.assertEqual(fields, {"supabase_analytics_url", "brave_search_api_key", "firecrawl_api_key"})
 
     def test_against_real_settings_and_registry_matches_known_wiring(self):
         # agent.tools.registry.build_registry() only gates tool *registration*
         # via these three fields today (confirmed by reading resolve_search_
         # provider() and build_registry() directly) — this is the guardrail
         # that catches it silently changing.
-        gates = generators.probe_config_gating(settings_factory=Settings, build_registry_fn=build_registry)
+        gates = generators.probe_config_gating(baseline=Settings(), build_registry_fn=build_registry)
         fields = {g.field for g in gates}
         self.assertEqual(fields, {"supabase_analytics_url", "brave_search_api_key", "firecrawl_api_key"})
+
+    def test_already_satisfied_gate_is_excluded_from_real_baseline(self):
+        # Codex review finding: probing from a blank Settings() reports
+        # brave_search_api_key as "unset config that would add web_search"
+        # even when the real baseline already has it set (and web_search is
+        # therefore already in the baseline registry) — self-contradictory.
+        # Probing from the real baseline must not report it.
+        baseline = Settings(brave_search_api_key="real-key-already-set")
+        gates = generators.probe_config_gating(baseline=baseline, build_registry_fn=build_registry)
+        fields = {g.field for g in gates}
+        self.assertNotIn("brave_search_api_key", fields)
+
+    def test_explicit_provider_selection_blocks_the_other_providers_key_as_a_gate(self):
+        # Codex review finding: resolve_search_provider() fails closed when
+        # search_provider is explicitly set to one backend — setting the
+        # *other* backend's key does not enable web_search. Probing from a
+        # blank Settings() (where search_provider is unset) can't see this;
+        # probing from this real baseline must correctly report no gate.
+        baseline = Settings(search_provider="brave", firecrawl_api_key="fc-key")
+        gates = generators.probe_config_gating(baseline=baseline, build_registry_fn=build_registry)
+        fields = {g.field for g in gates}
+        self.assertNotIn("firecrawl_api_key", fields)
+
+    def test_matching_provider_key_is_still_reported_as_a_gate(self):
+        # Sanity check for the fix above: the key that *does* match the
+        # explicit provider selection must still show up as a real gate.
+        baseline = Settings(search_provider="brave")
+        gates = generators.probe_config_gating(baseline=baseline, build_registry_fn=build_registry)
+        fields = {g.field for g in gates}
+        self.assertIn("brave_search_api_key", fields)
 
 
 class TestGenerateConfigGating(unittest.TestCase):
@@ -158,7 +195,7 @@ class TestGenerateSlimSummary(unittest.TestCase):
 
         settings = get_settings()
         registry = build_registry(settings)
-        gates = generators.probe_config_gating(settings_factory=Settings, build_registry_fn=build_registry)
+        gates = generators.probe_config_gating(baseline=settings, build_registry_fn=build_registry)
         summary = generators.generate_slim_summary(registry, gates)
         self.assertLessEqual(len(summary), generators.SLIM_CHAR_BUDGET)
 

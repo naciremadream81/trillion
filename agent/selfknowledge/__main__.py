@@ -3,6 +3,12 @@ CLI for agent/selfknowledge.
 
     python -m agent.selfknowledge --refresh   regenerate context/self/trillion.md in place
     python -m agent.selfknowledge --check     exit 1 if the file is stale, without writing
+
+Loads .env the same way main.py/serve.py do, before anything reads
+agent.config.get_settings(): without this, a deployment configured entirely
+through .env (as opposed to real exported env vars) would refresh/check
+against a blank Settings(), silently disagreeing with what's actually
+running.
 """
 
 from __future__ import annotations
@@ -10,7 +16,11 @@ from __future__ import annotations
 import argparse
 import sys
 
+from dotenv import load_dotenv
+
 from . import drift, render
+
+load_dotenv()
 
 
 def main(argv: list[str] | None = None) -> int:

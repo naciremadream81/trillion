@@ -28,6 +28,24 @@ class TestRenderBlocks(unittest.TestCase):
         )
         self.assertIn("query_analytics", blocks_with_db["capabilities"])
 
+    def test_capabilities_includes_always_on_per_agent_tools(self):
+        # Codex review finding: confirm_action/remember_fact/forget_fact are
+        # registered by Agent.__init__, not build_registry(), so a freshly
+        # built registry was missing them from the doc even though every
+        # real deployment (main.py, serve.py) always constructs a gate and
+        # therefore always has them.
+        blocks = render.render_blocks(Settings())
+        for name in ("confirm_action", "remember_fact", "forget_fact"):
+            self.assertIn(f"`{name}`", blocks["capabilities"])
+
+    def test_slim_does_not_list_an_already_satisfied_key_as_unset(self):
+        # Codex review finding: with brave_search_api_key already set,
+        # web_search shows as available AND brave_search_api_key was still
+        # listed as "unset config that would add more" — self-contradictory.
+        blocks = render.render_blocks(Settings(brave_search_api_key="real-key"))
+        self.assertIn("web_search", blocks["slim"])
+        self.assertNotIn("brave_search_api_key", blocks["slim"])
+
 
 class TestRefreshText(unittest.TestCase):
     def test_fills_in_blank_scaffold(self):

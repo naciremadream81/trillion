@@ -13,7 +13,10 @@ from __future__ import annotations
 import os
 
 from ..config import Settings, get_settings
-from ..tools.registry import build_registry
+from ..memory import DEFAULT_MEMORY_PATH
+from ..tools.confirm import ConfirmActionTool
+from ..tools.memory import ForgetFactTool, RememberFactTool
+from ..tools.registry import ToolRegistry, build_registry
 from . import generators, parser
 
 DOC_PATH = os.path.join(
@@ -49,17 +52,43 @@ them on" from the source, not from memory. Everything between a block's
 """
 
 
+def _with_always_on_tools(registry: ToolRegistry) -> ToolRegistry:
+    """
+    confirm_action, remember_fact, and forget_fact aren't in build_registry()
+    — agent/core.py's Agent.__init__ registers them itself, bound to that
+    instance's history/update_memory (see its docstring for why). Both real
+    entry points (main.py, serve.py) always construct a gate, so in every
+    real deployment these three are unconditionally present. Registered here
+    with inert bindings purely so this document's capabilities table isn't
+    missing exactly the tools Trillion is most likely to reach for.
+
+    dispatch_to_<slug> tools are deliberately NOT added here: which ones
+    exist depends on live spawned_agents rows, not Settings, so no static
+    probe run at doc-refresh time can predict them.
+    """
+    registry.register(ConfirmActionTool(gate=None, history_provider=lambda: []))
+    registry.register(RememberFactTool(DEFAULT_MEMORY_PATH, on_change=lambda facts: None))
+    registry.register(ForgetFactTool(DEFAULT_MEMORY_PATH, on_change=lambda facts: None))
+    return registry
+
+
 def render_blocks(settings: Settings | None = None) -> dict[str, str]:
     """
     Fresh content for each named block, computed from live settings
     (agent.config.get_settings() when none is given — the SLIM block that
     rides on every turn should describe what's actually deployed, not a
     hypothetical default configuration).
+
+    Gating is probed from this same settings baseline (not a blank
+    Settings()), so conditional interactions like resolve_search_provider()'s
+    fail-closed explicit-provider selection are reflected correctly, and a
+    key that's already set doesn't get listed as "unset config that would
+    add more" for a tool the capabilities table already shows as available.
     """
     if settings is None:
         settings = get_settings()
-    registry = build_registry(settings)
-    gates = generators.probe_config_gating()
+    registry = _with_always_on_tools(build_registry(settings))
+    gates = generators.probe_config_gating(settings)
     return {
         "capabilities": generators.generate_capabilities(registry),
         "config-gating": generators.generate_config_gating(gates),

@@ -57,21 +57,36 @@ def generate_capabilities(registry: ToolRegistry) -> str:
     return "\n".join(lines)
 
 
-def probe_config_gating(settings_factory=Settings, build_registry_fn=build_registry) -> list[ConfigGate]:
+def probe_config_gating(baseline: Settings | None = None, build_registry_fn=build_registry) -> list[ConfigGate]:
     """
-    Which Settings fields gate tool *registration*, discovered by differential
-    probing rather than declared by hand.
+    Which Settings fields still gate tool *registration*, discovered by
+    differential probing against the ACTUAL baseline in use — not a
+    context-free default.
 
-    For each probeable field, build a copy of a baseline Settings with just
-    that field toggled and diff build_registry_fn(...).names() against the
-    baseline. Only fields with an observed effect are reported.
+    For each probeable field, build a copy of baseline with just that field
+    toggled and diff build_registry_fn(...).names() against the baseline.
+    Only fields with an observed effect are reported.
 
+    Probing from the real baseline (rather than always a blank Settings())
+    is what lets this correctly reflect conditional interactions like
+    resolve_search_provider()'s fail-closed explicit-provider selection: if
+    search_provider="brave" is already set, toggling firecrawl_api_key from
+    this baseline has no effect (explicit brave selection still wins), so
+    it's correctly not reported — whereas probing from a blank Settings()
+    would wrongly claim it enables web_search. It also means a field that's
+    already set to something and whose tool is already registered is never
+    reported as "unset config that would add more": the toggle changes
+    nothing relative to a baseline that's already past the gate.
+
+    baseline defaults to a blank Settings() when not given (matches prior
+    behavior for callers with no real deployment settings on hand).
     build_registry_fn defaults to the real agent.tools.registry.build_registry
     but is swappable so the probing algorithm itself can be unit-tested
     against a fake settings/registry pair, independent of whatever tools
     happen to be wired up today.
     """
-    baseline = settings_factory()
+    if baseline is None:
+        baseline = Settings()
     baseline_names = set(build_registry_fn(baseline).names())
 
     findings: list[ConfigGate] = []
