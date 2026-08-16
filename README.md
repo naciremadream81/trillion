@@ -10,7 +10,15 @@ Trillion is a **single-user** Python agent: chat in the terminal or browser, swa
 
 Self-knowledge (`agent/selfknowledge/`, generating `context/self/trillion.md`) and cosmic-orb UI tiers 4-6 (sub-agent constellation, dispatch beams/rings, performance mode, `prefers-reduced-motion`) are built — the orb UI change couldn't be visually verified against a real WebGL context in this session's sandboxed preview browser (no GPU there), so treat it as code-reviewed and unit-tested but not yet eyeballed running; check it in a real browser before relying on it.
 
-Voice latency instrumentation (smooth-voice_2 Tier 1, measure-only) is built into `index.html`'s voice flow: `console.log`s a per-turn breakdown (stop speaking → transcript final → first model token → first audio byte → first sound playing) and leaves it at `window.trillionVoiceLatency`. Real numbers captured against this dev sandbox (not the deployed Pi — see caveat below): first Claude token ~1.4s; Piper TTS ~500-1200ms per sentence once its ~63MB voice model is warm in memory, but **~4s extra on the very first synthesis after a process (re)start** while that model loads — worth fixing before the STT leg even matters. STT (Deepgram) couldn't be measured here at all: `DEEPGRAM_API_KEY` isn't set in this dev `.env`. None of these numbers transfer directly to the Pi — different CPU, different network path — re-run the measurement there before prioritizing Tier 2+.
+Voice latency instrumentation (smooth-voice_2 Tier 1, measure-only) is built into `index.html`'s voice flow: `console.log`s a per-turn breakdown (stop speaking → transcript final → first model token → first audio byte → first sound playing) and leaves it at `window.trillionVoiceLatency`. Real numbers, measured against the actual deployed `trillion-orb.service` on the Pi 5 itself (not a separate dev machine — a prior pass through this README mistakenly assumed otherwise):
+
+| Leg | Real, measured |
+|---|---|
+| STT (Deepgram nova-2) | ~670ms–1.2s, scales with clip length (verified via a real TTS→STT round trip, transcript matched the source text) |
+| Model (Claude, first token) | ~1.2–1.4s for a short reply |
+| TTS (Piper, local) | ~180–620ms/sentence once warm, scales with sentence length, but **~3.5s extra on the very first synthesis after the process starts** while the ~63MB voice model loads — `agent/voice/piper_tts.py` caches the loaded model in a module-level global for the rest of that process's lifetime, so this is a one-time-per-process cost, not a per-idle-period one |
+
+Straight add of the three "first token/byte" legs is ~2.05–3.22s before the first sound plays once the process is warm (STT + model + TTS-warm ranges above). On a fresh process — right after `trillion-orb.service` starts or restarts — add the ~3.5s TTS cold-start tax on top: **~5.55–6.72s** before the first sound plays, once. That one-time cost and the STT leg (previously unmeasured — `DEEPGRAM_API_KEY` wasn't set in `.env` at the time) are both now real, current numbers worth weighing before picking a Tier 2+ target.
 
 ---
 
