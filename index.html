@@ -1108,6 +1108,40 @@
     if (!canRecord) setHint('Voice input unsupported here — use the terminal');
     else setHint(IDLE_HINT);
 
+    // ============= Voice latency instrumentation (smooth-voice_2 Tier 1) =============
+    // Measures, doesn't fix: breaks one real turn into the checkpoints the
+    // playbook asks for — stop speaking, transcript final, first model
+    // token, first audio byte, first sound actually playing. Logged to the
+    // console and left on window.trillionVoiceLatency for inspection
+    // (mirrors the window.trillionOrb/setOrbPerfMode console-hook pattern
+    // already used elsewhere in this file) rather than a UI panel or a
+    // persisted store — Tier 1 is explicitly "show the breakdown," not
+    // ship a dashboard; that's a call for a later tier, if this one's
+    // numbers say it's worth it.
+    let voiceLatency = null;
+    function vlStartTurn() {
+      voiceLatency = { stopSpeaking: performance.now() };
+    }
+    function vlMark(name) {
+      if (voiceLatency && voiceLatency[name] == null) voiceLatency[name] = performance.now();
+    }
+    function vlReport() {
+      if (!voiceLatency) return;
+      const v = voiceLatency;
+      const span = (fromKey, toKey) =>
+        (v[fromKey] != null && v[toKey] != null) ? Math.round(v[toKey] - v[fromKey]) : null;
+      const breakdown = {
+        'stop speaking -> transcript final': span('stopSpeaking', 'transcriptFinal'),
+        'transcript final -> first model token': span('transcriptFinal', 'firstModelToken'),
+        'first model token -> first audio byte': span('firstModelToken', 'firstAudioByte'),
+        'first audio byte -> first sound playing': span('firstAudioByte', 'firstSoundPlaying'),
+        'total: stop speaking -> first sound playing': span('stopSpeaking', 'firstSoundPlaying'),
+      };
+      console.log('[trillion voice-latency] turn breakdown (ms):', breakdown);
+      window.trillionVoiceLatency = { raw: v, breakdown };
+      voiceLatency = null; // one report per turn; the next tap starts fresh
+    }
+
     async function startListening() {
       if (!canRecord) return;
       cancelSpeech(); // barge-in: stop any speech playing
@@ -1132,6 +1166,7 @@
     function stopListening() {
       if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
       setMic(false);
+      vlStartTurn(); // smooth-voice_2 Tier 1: push-to-talk means "tap to stop" IS "stopped speaking"
     }
 
     async function onRecordingStopped() {
@@ -1148,6 +1183,7 @@
           body: blob,
         });
         const data = await res.json();
+        vlMark('transcriptFinal');
         if (!res.ok) { setHint(data.error || 'Transcription error — tap to retry'); window.setStatus('idle'); return; }
         const text = (data.text || '').trim();
         if (text) { setHint('“' + text + '”'); sendToAgent(text); }
@@ -1176,6 +1212,7 @@
         for (;;) {
           const { value, done } = await reader.read();
           if (done) break;
+          if (value && value.length) vlMark('firstModelToken');
           buf += dec.decode(value, { stream: true });
           let m;
           // Speak complete sentences as they stream in.
@@ -1222,6 +1259,10 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: sentence }),
       });
+      // vlMark no-ops after the first call each turn, so calling this for
+      // every sentence — not just the first — is fine: only the turn's
+      // actual first "audio coming back" moment ever gets recorded.
+      vlMark('firstAudioByte');
       if (!res.ok) { console.log('[trillion voice] tts http', res.status); return; }
       const buf = await res.arrayBuffer();
       const contentType = res.headers.get('Content-Type') || 'audio/wav';
@@ -1231,6 +1272,7 @@
       window.setVoiceBright && window.setVoiceBright(0.9);
       window.setStatus('processing');
       await new Promise((resolve) => {
+        audio.onplaying = () => { vlMark('firstSoundPlaying'); vlReport(); };
         audio.onended = resolve;
         audio.onerror = resolve;
         audio.play().catch(resolve);
