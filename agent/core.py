@@ -43,7 +43,6 @@ class Agent:
         self.tool_registry = tool_registry
         self.gate = gate
         self.history: list[dict] = []
-        self.system = build_system_prompt(memory_facts=memory_facts)
 
         # Give the model the one tool it needs to act on Sean's yes. Registered
         # here rather than in build_registry() because it has to be bound to
@@ -71,6 +70,13 @@ class Agent:
             path = memory_path or DEFAULT_MEMORY_PATH
             tool_registry.register(RememberFactTool(path, self.update_memory))
             tool_registry.register(ForgetFactTool(path, self.update_memory))
+
+        # Built after the registrations above, not before: the system
+        # prompt's capability summary is derived live from tool_registry
+        # (agent/system_prompt.py's _load_self_knowledge()), so it must see
+        # confirm_action/remember_fact/forget_fact already registered rather
+        # than describing a registry that's about to change out from under it.
+        self.system = build_system_prompt(memory_facts=memory_facts, tool_registry=tool_registry)
 
     # ── Public interface ──────────────────────────────────────────────────────
 
@@ -182,7 +188,7 @@ class Agent:
         Reload memory facts into the system prompt.
         Called by the memory store (Tier 4) when facts change.
         """
-        self.system = build_system_prompt(memory_facts=memory_facts)
+        self.system = build_system_prompt(memory_facts=memory_facts, tool_registry=self.tool_registry)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
