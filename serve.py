@@ -7,7 +7,7 @@ agent writes to, so cost data shows up live.
     GET /api/usage              → month-to-date cost payload (JSON, ~60s cached)
     GET /api/heartbeat/notices  → active (undismissed) heartbeat notices (JSON)
     POST /api/heartbeat/dismiss → dismiss a notice by id
-    POST /api/security/csp-report → browser CSP-violation reports (report-only mode)
+    POST /api/security/csp-report → browser CSP-violation reports (enforcing + report-only)
     GET /api/security/cve-status → latest pip-audit scan result (JSON)
     POST /api/security/cve-scan  → run a fresh pip-audit scan and persist it
     GET /api/security/status    → self-audit security shield score (§3.5, JSON)
@@ -15,8 +15,10 @@ agent writes to, so cost data shows up live.
 
 Every response carries the security_headers_middleware (agent/security/
 headers.py, §2.2): X-Content-Type-Options, Referrer-Policy, X-Frame-Options,
-Permissions-Policy, and a report-only Content-Security-Policy. Every /api/
-request (except the CSP report endpoint) is also checked by
+Permissions-Policy, and two Content-Security-Policy headers — an enforcing
+one built from index.html's actual inline <script>/<style> hashes, and a
+stricter Content-Security-Policy-Report-Only candidate that only reports.
+Every /api/ request (except the CSP report endpoint) is also checked by
 bearer_auth_middleware (agent/security/auth.py) against
 TRILLION_WEB_AUTH_TOKEN, when that token is set, and every state-changing one
 by origin_check_middleware (agent/security/origin.py), which refuses
@@ -52,7 +54,7 @@ from agent.config import get_settings
 from agent.cost.aggregate import UsageDashboard
 from agent.cost.storage import UsageRepo
 from agent.security.auth import bearer_auth_middleware
-from agent.security.headers import security_headers_middleware
+from agent.security.headers import build_csp_policies, security_headers_middleware
 from agent.security.origin import origin_check_middleware
 
 # Load .env so the web server honors the same config as the CLI agent
@@ -427,6 +429,13 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
         UsageRepo(), monthly_budget=_monthly_budget_from_env()
     )
 
+    # Computed once per app build, not per request: CSP hash-sources come
+    # from index.html's actual inline <script>/<style> bytes, so a real
+    # markup edit that doesn't update these would break the UI immediately
+    # under enforcing mode rather than silently drifting.
+    with open(os.path.join(PROJECT_ROOT, "index.html"), "r", encoding="utf-8") as f:
+        csp_enforcing, csp_report_only = build_csp_policies(f.read())
+
     async def usage(_request: web.Request) -> web.Response:
         # dash.payload() is best-effort-cached and pure-read; if aggregation
         # ever raised it would 500, but it's designed to return a zeroed
@@ -559,11 +568,11 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
         return web.json_response(audit(get_settings(), _get_registry()))
 
     async def csp_report(request: web.Request) -> web.Response:
-        # Browser-sent CSP-violation reports while the policy runs in
-        # report-only mode (agent-security.md §2.2). Best-effort logging,
-        # same posture as every other print() in this file — a malformed
-        # report body must not 500. 204 No Content is what the Reporting
-        # API expects back.
+        # Browser-sent CSP-violation reports, from both the enforcing policy
+        # (agent-security.md §2.2) and the stricter report-only candidate.
+        # Best-effort logging, same posture as every other print() in this
+        # file — a malformed report body must not 500. 204 No Content is what
+        # the Reporting API expects back.
         #
         # This is the one write surface exempt from *both* the bearer gate and
         # the origin gate, because the browser posts these itself and we can't
@@ -590,7 +599,7 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
     # check than a constant-time token compare.
     app = web.Application(
         middlewares=[
-            security_headers_middleware,
+            security_headers_middleware(csp_enforcing, csp_report_only),
             origin_check_middleware(settings.web_host),
             bearer_auth_middleware(settings.web_auth_token),
         ]

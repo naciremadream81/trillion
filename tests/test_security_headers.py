@@ -15,7 +15,12 @@ from aiohttp.test_utils import AioHTTPTestCase
 
 import serve as serve_module
 from agent.providers.base import BaseProvider, ProviderResponse, TextChunk, TokenUsage
-from agent.security.headers import SECURITY_HEADERS, apply_security_headers
+from agent.security.headers import (
+    SECURITY_HEADERS,
+    apply_security_headers,
+    build_csp_policies,
+    inline_asset_hashes,
+)
 from agent.tools.registry import ToolRegistry
 
 
@@ -33,27 +38,84 @@ class FakeProvider(BaseProvider):
         yield ProviderResponse(text=text, tool_calls=[], usage=TokenUsage(), model=self.model_name)
 
 
+_FIXTURE_HTML = """<html><head>
+<style>body { color: red; }</style>
+</head><body>
+<script type="importmap">{"imports": {}}</script>
+<script type="module">console.log("a");</script>
+<script>console.log("b");</script>
+<script src="/vendor/external.js"></script>
+</body></html>"""
+
+
+class TestInlineAssetHashes(unittest.TestCase):
+    def test_finds_one_style_block(self):
+        script_hashes, style_hashes = inline_asset_hashes(_FIXTURE_HTML)
+        self.assertEqual(len(style_hashes), 1)
+
+    def test_finds_every_inline_script_including_importmap(self):
+        script_hashes, _style_hashes = inline_asset_hashes(_FIXTURE_HTML)
+        # importmap + module + plain script = 3; the src= one is excluded.
+        self.assertEqual(len(script_hashes), 3)
+
+    def test_external_script_src_is_excluded(self):
+        script_hashes, _style_hashes = inline_asset_hashes(_FIXTURE_HTML)
+        for h in script_hashes:
+            self.assertNotIn("external.js", h)
+
+    def test_hashes_are_stable_for_identical_content(self):
+        a = inline_asset_hashes(_FIXTURE_HTML)
+        b = inline_asset_hashes(_FIXTURE_HTML)
+        self.assertEqual(a, b)
+
+    def test_hash_changes_if_inline_content_changes(self):
+        changed = _FIXTURE_HTML.replace("color: red", "color: blue")
+        a = inline_asset_hashes(_FIXTURE_HTML)
+        b = inline_asset_hashes(changed)
+        self.assertNotEqual(a, b)
+
+
+class TestBuildCspPolicies(unittest.TestCase):
+    def test_enforcing_policy_has_no_unsafe_inline(self):
+        enforcing, _candidate = build_csp_policies(_FIXTURE_HTML)
+        self.assertNotIn("'unsafe-inline'", enforcing)
+
+    def test_enforcing_policy_carries_hash_sources(self):
+        enforcing, _candidate = build_csp_policies(_FIXTURE_HTML)
+        self.assertIn("'sha256-", enforcing)
+
+    def test_neither_policy_includes_unsafe_eval(self):
+        enforcing, candidate = build_csp_policies(_FIXTURE_HTML)
+        self.assertNotIn("unsafe-eval", enforcing)
+        self.assertNotIn("unsafe-eval", candidate)
+
+    def test_enforcing_connect_src_drops_websocket_schemes(self):
+        enforcing, _candidate = build_csp_policies(_FIXTURE_HTML)
+        self.assertNotIn("ws:", enforcing)
+        self.assertNotIn("wss:", enforcing)
+
+    def test_candidate_is_stricter_than_enforcing_on_img_src(self):
+        enforcing, candidate = build_csp_policies(_FIXTURE_HTML)
+        self.assertIn("img-src 'self' data: blob:", enforcing)
+        self.assertIn("img-src 'self';", candidate)
+
+
 class TestApplySecurityHeaders(unittest.TestCase):
     def test_all_fixed_headers_present(self):
         headers = {}
-        apply_security_headers(headers)
+        apply_security_headers(headers, "enforcing-policy", "candidate-policy")
         for name, value in SECURITY_HEADERS.items():
             self.assertEqual(headers[name], value)
 
-    def test_csp_ships_report_only_not_enforcing(self):
+    def test_csp_ships_both_enforcing_and_report_only(self):
         headers = {}
-        apply_security_headers(headers)
-        self.assertIn("Content-Security-Policy-Report-Only", headers)
-        self.assertNotIn("Content-Security-Policy", headers)
-
-    def test_csp_never_includes_unsafe_eval(self):
-        headers = {}
-        apply_security_headers(headers)
-        self.assertNotIn("unsafe-eval", headers["Content-Security-Policy-Report-Only"])
+        apply_security_headers(headers, "enforcing-policy", "candidate-policy")
+        self.assertEqual(headers["Content-Security-Policy"], "enforcing-policy")
+        self.assertEqual(headers["Content-Security-Policy-Report-Only"], "candidate-policy")
 
     def test_reporting_endpoints_header_present(self):
         headers = {}
-        apply_security_headers(headers)
+        apply_security_headers(headers, "enforcing-policy", "candidate-policy")
         self.assertIn("Reporting-Endpoints", headers)
         self.assertIn("/api/security/csp-report", headers["Reporting-Endpoints"])
 
@@ -106,7 +168,20 @@ class TestServeSecurityHeaders(AioHTTPTestCase):
         resp = await self.client.request("GET", "/")
         for name, value in SECURITY_HEADERS.items():
             self.assertEqual(resp.headers[name], value)
+        self.assertIn("Content-Security-Policy", resp.headers)
         self.assertIn("Content-Security-Policy-Report-Only", resp.headers)
+
+    async def test_enforcing_csp_matches_real_index_html_hashes(self):
+        # build_app() reads the real index.html at PROJECT_ROOT — assert the
+        # served header is exactly what build_csp_policies() computes from
+        # that same file, not a stale or hand-copied string.
+        from agent.security.headers import build_csp_policies
+
+        with open(os.path.join(serve_module.PROJECT_ROOT, "index.html"), "r", encoding="utf-8") as f:
+            expected_enforcing, expected_candidate = build_csp_policies(f.read())
+        resp = await self.client.request("GET", "/")
+        self.assertEqual(resp.headers["Content-Security-Policy"], expected_enforcing)
+        self.assertEqual(resp.headers["Content-Security-Policy-Report-Only"], expected_candidate)
 
     async def test_api_response_carries_security_headers(self):
         resp = await self.client.request("GET", "/api/usage")
