@@ -16,9 +16,9 @@ Voice latency instrumentation (smooth-voice_2 Tier 1, measure-only) is built int
 |---|---|
 | STT (Deepgram nova-2) | ~670ms–1.2s, scales with clip length (verified via a real TTS→STT round trip, transcript matched the source text) |
 | Model (Claude, first token) | ~1.2–1.4s for a short reply |
-| TTS (Piper, local) | ~180–620ms/sentence once warm, scales with sentence length, but **~3.5s extra on the first synthesis after the process starts or has been idle** while the ~63MB voice model loads |
+| TTS (Piper, local) | ~180–620ms/sentence once warm, scales with sentence length, but **~3.5s extra on the very first synthesis after the process starts** while the ~63MB voice model loads — `agent/voice/piper_tts.py` caches the loaded model in a module-level global for the rest of that process's lifetime, so this is a one-time-per-process cost, not a per-idle-period one |
 
-Straight add of the three "first token/byte" legs is ~2-3s before the first sound plays on a fresh process — the TTS cold-start tax and the STT leg (previously unmeasured — `DEEPGRAM_API_KEY` wasn't set in `.env` at the time) are both now real, current numbers worth weighing before picking a Tier 2+ target.
+Straight add of the three "first token/byte" legs is ~2.05–3.22s before the first sound plays once the process is warm (STT + model + TTS-warm ranges above). On a fresh process — right after `trillion-orb.service` starts or restarts — add the ~3.5s TTS cold-start tax on top: **~5.55–6.72s** before the first sound plays, once. That one-time cost and the STT leg (previously unmeasured — `DEEPGRAM_API_KEY` wasn't set in `.env` at the time) are both now real, current numbers worth weighing before picking a Tier 2+ target.
 
 ---
 
