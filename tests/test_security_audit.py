@@ -15,6 +15,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import unittest.mock
 
 from aiohttp.test_utils import AioHTTPTestCase
 
@@ -194,11 +195,52 @@ class TestAuditSignals(unittest.TestCase):
         self.assertEqual(sig["delta"], 0)
         self.assertIn("patterns", sig["value"])
 
-    def test_csp_status_is_report_only(self):
+    def test_csp_status_is_enforcing_hash_based(self):
+        # Reads the real index.html at the real project root, same as
+        # _csp_status() does in production — this is the actual policy that
+        # would be served, not a fixture.
         result = audit(self._settings(), ToolRegistry())
         sig = next(s for s in result["signals"] if s["name"] == "csp-status")
-        self.assertEqual(sig["value"], "report-only")
-        self.assertEqual(sig["delta"], -10)
+        self.assertEqual(sig["value"], "enforcing (hash-based)")
+        self.assertEqual(sig["delta"], 0)
+
+    def test_csp_status_unsafe_inline_retained_scores_minus_five(self):
+        import agent.security.audit as audit_module
+
+        def fake_build_csp_policies(_index_html):
+            return "default-src 'self'; script-src 'self' 'unsafe-inline';", "default-src 'self';"
+
+        with unittest.mock.patch(
+            "agent.security.headers.build_csp_policies", fake_build_csp_policies
+        ):
+            sig = audit_module._csp_status()
+        self.assertEqual(sig.value, "enforcing (unsafe-inline retained)")
+        self.assertEqual(sig.delta, -5)
+        self.assertEqual(sig.severity, "warning")
+
+    def test_csp_status_report_only_when_index_html_unreadable(self):
+        import agent.security.audit as audit_module
+
+        empty_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty_dir, ignore_errors=True)
+        with unittest.mock.patch.object(audit_module, "_PROJECT_ROOT", empty_dir):
+            sig = audit_module._csp_status()
+        self.assertEqual(sig.value, "report-only")
+        self.assertEqual(sig.delta, -10)
+
+    def test_csp_status_absent_when_headers_module_lacks_builder(self):
+        import agent.security.audit as audit_module
+        import agent.security.headers as headers_module
+
+        original = headers_module.build_csp_policies
+        del headers_module.build_csp_policies
+        try:
+            sig = audit_module._csp_status()
+        finally:
+            headers_module.build_csp_policies = original
+        self.assertEqual(sig.value, "absent")
+        self.assertEqual(sig.delta, -20)
+        self.assertEqual(sig.severity, "critical")
 
     def test_token_scope_audit_pending_by_default(self):
         result = audit(self._settings(), ToolRegistry())

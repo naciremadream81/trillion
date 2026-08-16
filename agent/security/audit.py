@@ -159,11 +159,39 @@ def _hardline_blocklist() -> Signal:
     return Signal("hardline-blocklist", "Hardline blocklist", "0 patterns", -20, "critical")
 
 
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
 def _csp_status() -> Signal:
-    # agent/security/headers.py ships CSP_REPORT_ONLY_POLICY unconditionally
-    # via Content-Security-Policy-Report-Only; there is no enforcing mode
-    # wired up yet (see that module's docstring).
-    return Signal("csp-status", "CSP status", "report-only", -10, "info")
+    # Like _csrf_origin_gate(), this actually builds the policy from
+    # index.html rather than trusting that headers.py exists — an import
+    # that succeeds but produces a policy still carrying 'unsafe-inline'
+    # should not score the same as one that doesn't.
+    try:
+        from .headers import build_csp_policies
+    except Exception:
+        return Signal(
+            "csp-status", "CSP status", "absent", -20, "critical",
+            "agent/security/headers.py does not define an enforcing CSP builder.",
+        )
+
+    try:
+        with open(os.path.join(_PROJECT_ROOT, "index.html"), "r", encoding="utf-8") as f:
+            enforcing, _candidate = build_csp_policies(f.read())
+    except Exception as e:
+        return Signal(
+            "csp-status", "CSP status", "report-only", -10, "warning",
+            f"Could not build the enforcing policy from index.html: {e}",
+        )
+
+    if "'unsafe-inline'" in enforcing:
+        return Signal(
+            "csp-status", "CSP status", "enforcing (unsafe-inline retained)", -5, "warning",
+            "Content-Security-Policy is enforcing but 'unsafe-inline' is still present, "
+            "which makes every hash-source in the same directive inert for any browser "
+            "that honors it.",
+        )
+    return Signal("csp-status", "CSP status", "enforcing (hash-based)", 0, "ok")
 
 
 def _token_scope_audit() -> Signal:
