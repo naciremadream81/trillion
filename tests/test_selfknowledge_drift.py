@@ -35,7 +35,10 @@ class TestCheckNoDrift(unittest.TestCase):
 
     def test_freshly_refreshed_file_has_no_drift(self):
         render.refresh_file(self.path, Settings())
-        drift.check_no_drift(self.path)  # must not raise
+        # Same Settings() the file was generated against — check_no_drift's
+        # own default (live env) has no reason to match an explicit
+        # in-test Settings(), and shouldn't need to for this test to hold.
+        drift.check_no_drift(self.path, Settings())  # must not raise
 
     def test_stale_auto_block_is_detected(self):
         render.refresh_file(self.path, Settings())
@@ -46,7 +49,7 @@ class TestCheckNoDrift(unittest.TestCase):
             f.write(text)
 
         with self.assertRaises(drift.DriftError) as ctx:
-            drift.check_no_drift(self.path)
+            drift.check_no_drift(self.path, Settings())
         self.assertIn("capabilities", str(ctx.exception))
 
     def test_stale_slim_block_is_detected(self):
@@ -58,7 +61,7 @@ class TestCheckNoDrift(unittest.TestCase):
             f.write(text)
 
         with self.assertRaises(drift.DriftError) as ctx:
-            drift.check_no_drift(self.path)
+            drift.check_no_drift(self.path, Settings())
         self.assertIn("SLIM", str(ctx.exception))
 
     def test_missing_block_is_detected(self):
@@ -66,7 +69,7 @@ class TestCheckNoDrift(unittest.TestCase):
             f.write("# no marker blocks here at all\n")
 
         with self.assertRaises(drift.DriftError):
-            drift.check_no_drift(self.path)
+            drift.check_no_drift(self.path, Settings())
 
     def test_error_message_points_to_the_fix(self):
         render.refresh_file(self.path, Settings())
@@ -77,7 +80,7 @@ class TestCheckNoDrift(unittest.TestCase):
             f.write(text)
 
         with self.assertRaises(drift.DriftError) as ctx:
-            drift.check_no_drift(self.path)
+            drift.check_no_drift(self.path, Settings())
         self.assertIn("--refresh", str(ctx.exception))
 
 
