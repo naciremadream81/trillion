@@ -20,3 +20,16 @@ repos:
       - id: check-merge-conflict
       - id: end-of-file-fixer
       - id: trailing-whitespace
+
+  # context/self/trillion.md is generated from agent/tools/registry.py and
+  # agent/config.py (agent/selfknowledge/ — Step 6 of the finish-Trillion
+  # plan). This blocks a commit that changes either source without also
+  # running `python -m agent.selfknowledge --refresh`.
+  - repo: local
+    hooks:
+      - id: self-knowledge-drift
+        name: context/self/trillion.md is up to date
+        entry: .venv/bin/python -m agent.selfknowledge --check
+        language: system
+        pass_filenames: false
+        files: ^(agent/(tools/registry\.py|config\.py)|context/self/trillion\.md)$
