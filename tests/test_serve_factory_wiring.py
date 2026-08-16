@@ -100,6 +100,53 @@ class TestFactoryWiring(AioHTTPTestCase):
         await self.app.cleanup()
         self.assertTrue(task.cancelled() or task.done())
 
+    async def test_api_agents_lists_the_active_specialist(self):
+        # cosmic-orb-ui's sub-agent constellation (Tier 4/5) polls this to
+        # know which specialists exist — real Factory data, not synthetic.
+        resp = await self.client.get("/api/agents")
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertEqual(len(data["agents"]), 1)
+        agent = data["agents"][0]
+        self.assertEqual(agent["slug"], "sql-migration-review")
+        self.assertEqual(agent["specialty"], "You review SQL.")
+        self.assertFalse(agent["working"])
+        # dispatch_count is a module-level, process-lifetime counter (see
+        # DispatchActivity) — assert it's present and non-negative rather
+        # than exactly 0, since other tests in this process may have
+        # already dispatched to this same slug.
+        self.assertGreaterEqual(agent["dispatch_count"], 0)
+
+    async def test_api_agents_reflects_working_state_from_dispatch_activity(self):
+        from agent.factory.dispatch import get_dispatch_activity
+
+        activity = get_dispatch_activity()
+        activity.mark_started("sql-migration-review")
+        try:
+            resp = await self.client.get("/api/agents")
+            data = await resp.json()
+            self.assertTrue(data["agents"][0]["working"])
+        finally:
+            activity.mark_finished("sql-migration-review")
+
+    async def test_api_agents_dispatch_count_survives_a_finished_dispatch(self):
+        # This is the field the browser diffs to catch a dispatch that
+        # started and finished between two polls — it must still read
+        # higher after mark_finished, not just while `working` is true.
+        from agent.factory.dispatch import get_dispatch_activity
+
+        before = (await (await self.client.get("/api/agents")).json())["agents"][0]["dispatch_count"]
+
+        activity = get_dispatch_activity()
+        activity.mark_started("sql-migration-review")
+        activity.mark_finished("sql-migration-review")
+
+        resp = await self.client.get("/api/agents")
+        data = await resp.json()
+        agent = data["agents"][0]
+        self.assertFalse(agent["working"])
+        self.assertEqual(agent["dispatch_count"], before + 1)
+
 
 if __name__ == "__main__":
     import unittest

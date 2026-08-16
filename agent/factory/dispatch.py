@@ -34,6 +34,70 @@ def dispatch_tool_name(slug: str) -> str:
     return DISPATCH_PREFIX + slug.replace("-", "_")
 
 
+class DispatchActivity:
+    """
+    Tracks which spawned specialists are currently mid-dispatch, and how
+    many dispatches each has ever started.
+
+    Read by serve.py's GET /api/agents so the browser's sub-agent
+    constellation (cosmic-orb-ui Tier 5) can show a real "working" pulse
+    instead of a fabricated one. In-memory and per-process by design, same
+    posture as everything else here: a specialist mid-run when the process
+    restarts just reverts to idle, which is correct — the run itself didn't
+    survive either.
+
+    Two things a plain "currently active" set got wrong (both caught by
+    review on the PR that introduced this):
+
+    - Two overlapping dispatches to the same slug (two browser tabs, or a
+      specialist Trillion calls twice in one turn) collapsed into one set
+      entry; the first call to finish discarded it while the second was
+      still running, so /api/agents reported idle mid-dispatch. Fixed by
+      counting active dispatches per slug instead of a boolean membership.
+    - A dispatch short enough to start and finish between two ~5s browser
+      polls (a short model response is routine) was invisible: `working`
+      sampled at poll time never observed `True`, and the browser's
+      dispatch-beam animation never fired for it at all. A plain "is it
+      active right now" signal can't fix that — it needs something that
+      stays observable until acknowledged. total_dispatches is that: a
+      monotonically increasing per-slug counter the browser diffs against
+      what it last saw, so even a dispatch it never caught mid-flight still
+      shows up as "the count went up" on the next poll.
+    """
+
+    def __init__(self) -> None:
+        self._active_count: dict[str, int] = {}
+        self._total_dispatches: dict[str, int] = {}
+
+    def mark_started(self, slug: str) -> None:
+        self._active_count[slug] = self._active_count.get(slug, 0) + 1
+        self._total_dispatches[slug] = self._total_dispatches.get(slug, 0) + 1
+
+    def mark_finished(self, slug: str) -> None:
+        remaining = self._active_count.get(slug, 0) - 1
+        if remaining > 0:
+            self._active_count[slug] = remaining
+        else:
+            self._active_count.pop(slug, None)
+
+    def snapshot(self) -> set[str]:
+        return set(self._active_count)
+
+    def total_dispatches(self, slug: str) -> int:
+        return self._total_dispatches.get(slug, 0)
+
+
+# Module-level singleton, not per-DispatchTool: serve.py's endpoint has no
+# reference to any one DispatchTool instance, only to "which slugs are
+# active right now" — the same shape FactoryRepo.list_active_agents() and
+# RegistryWatcher already use for this process.
+_activity = DispatchActivity()
+
+
+def get_dispatch_activity() -> DispatchActivity:
+    return _activity
+
+
 class ConfigDrivenAgent:
     """A spawned specialist, fully specified by a spawned_agents row."""
 
@@ -99,10 +163,14 @@ class DispatchTool:
 
     async def run(self, **kwargs) -> str:
         message = kwargs.get("message", "")
+        activity = get_dispatch_activity()
+        activity.mark_started(self._sub_agent.slug)
         try:
             return await self._sub_agent.run(message)
         except Exception as e:  # noqa: BLE001 — never crash the caller's tool round-trip
             return f"[dispatch to '{self._sub_agent.slug}' failed: {e}]"
+        finally:
+            activity.mark_finished(self._sub_agent.slug)
 
 
 class RegistryWatcher:

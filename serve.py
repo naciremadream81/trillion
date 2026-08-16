@@ -5,6 +5,7 @@ Built on aiohttp (already a project dependency). Reads the same usage.db the
 agent writes to, so cost data shows up live.
 
     GET /api/usage              → month-to-date cost payload (JSON, ~60s cached)
+    GET /api/agents             → active Agent Factory specialists + working state (JSON)
     GET /api/heartbeat/notices  → active (undismissed) heartbeat notices (JSON)
     POST /api/heartbeat/dismiss → dismiss a notice by id
     POST /api/security/csp-report → browser CSP-violation reports (report-only mode)
@@ -506,6 +507,33 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
             return web.Response(status=400, text=str(e))
         return web.Response(body=audio, content_type="audio/wav")
 
+    async def active_agents(_request: web.Request) -> web.Response:
+        # Polled by the browser (cosmic-orb-ui's sub-agent constellation,
+        # index.html), mirroring /api/usage's read-only, best-effort-cached
+        # shape. `working`/`dispatch_count` come from agent/factory/
+        # dispatch.py's in-process DispatchActivity tracker — real signals,
+        # not simulated ones. dispatch_count is what lets the browser catch
+        # a dispatch that started and finished between two polls (see that
+        # class's docstring): it's monotonic, so a diff against the last
+        # poll's value never misses one, even though `working` alone would.
+        from agent.factory.dispatch import get_dispatch_activity
+        from agent.factory.storage import FactoryRepo
+
+        rows = FactoryRepo().list_active_agents()
+        activity = get_dispatch_activity()
+        working = activity.snapshot()
+        agents = [
+            {
+                "slug": r["slug"],
+                "name": r["name"],
+                "specialty": (r["system_prompt"] or "").strip().splitlines()[0][:140],
+                "working": r["slug"] in working,
+                "dispatch_count": activity.total_dispatches(r["slug"]),
+            }
+            for r in rows
+        ]
+        return web.json_response({"agents": agents})
+
     async def heartbeat_notices(_request: web.Request) -> web.Response:
         # Polled by the browser (see index.html's fetchHeartbeatNotices),
         # mirroring /api/usage's read-only, best-effort-cached shape.
@@ -596,6 +624,7 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
         ]
     )
     app.router.add_get("/api/usage", usage)
+    app.router.add_get("/api/agents", active_agents)
     app.router.add_post("/api/chat", chat)
     app.router.add_post("/api/transcribe", transcribe_audio)
     app.router.add_post("/api/tts", synthesize_speech)
