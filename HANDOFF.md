@@ -338,6 +338,8 @@ Paste this into the chat:
 
 > "We're building Trillion. Read README.md for what's built, AGENT.md for the
 > product and safety spec, and HANDOFF.md for how we got here. All six tiers,
-> self-knowledge, and cosmic-orb UI tiers 4-6 are done; remaining work is
-> voice latency instrumentation. Don't swap any provider (model, STT, TTS)
-> without asking me first, and don't merge anything without my say-so."
+> self-knowledge, cosmic-orb UI tiers 4-6, and smooth-voice_2 Tiers 1-6 are
+> done; remaining work is re-running the voice latency measurement on the Pi
+> itself, since the numbers we tuned against came from a dev sandbox. Don't
+> swap any provider (model, STT, TTS) without asking me first, and don't merge
+> anything without my say-so."
