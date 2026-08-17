@@ -126,6 +126,73 @@ class TestBuildIndexAndSearch(unittest.TestCase):
             self.assertEqual(indexed, 0)
             self.assertEqual(len(search("keeper", index_path=index_path)), 1)
 
+    @unittest.skipIf(os.name != "posix" or os.geteuid() == 0, "requires POSIX permission enforcement")
+    def test_listable_vault_whose_files_all_fail_to_read_preserves_the_index(self):
+        # The rclone failure mode the module docstring describes: the mount
+        # keeps serving cached directory entries, so os.walk happily lists
+        # every note, and then every single read returns an error. Reaching
+        # the vault root is not evidence the build is any good.
+        notes = [os.path.join(self.vault, f"note{i}.md") for i in range(3)]
+        for path in notes:
+            _write(path, "keeper content")
+        with tempfile.TemporaryDirectory() as index_dir:
+            index_path = os.path.join(index_dir, "notes.db")
+            self.assertEqual(build_index(self.vault, index_path), 3)
+
+            for path in notes:
+                os.chmod(path, 0o000)
+            try:
+                indexed = build_index(self.vault, index_path)
+            finally:
+                for path in notes:
+                    os.chmod(path, 0o600)
+
+            self.assertEqual(indexed, 0)
+            self.assertEqual(len(search("keeper", index_path=index_path)), 3)
+
+    @unittest.skipIf(os.name != "posix" or os.geteuid() == 0, "requires POSIX permission enforcement")
+    def test_unreadable_subdirectory_does_not_shrink_the_index(self):
+        # The root stays listable here — only a directory below it fails. That
+        # error is one os.walk swallows silently by default, which is how a
+        # partial outage quietly truncates a good index.
+        subdir = os.path.join(self.vault, "02-Projects")
+        _write(os.path.join(subdir, "alpha.md"), "alpha content")
+        _write(os.path.join(subdir, "beta.md"), "beta content")
+        _write(os.path.join(self.vault, "top.md"), "top content")
+        with tempfile.TemporaryDirectory() as index_dir:
+            index_path = os.path.join(index_dir, "notes.db")
+            self.assertEqual(build_index(self.vault, index_path), 3)
+
+            os.chmod(subdir, 0o000)
+            try:
+                indexed = build_index(self.vault, index_path)
+            finally:
+                os.chmod(subdir, 0o700)
+
+            self.assertEqual(indexed, 0)
+            self.assertEqual(len(search("alpha", index_path=index_path)), 1)
+
+    @unittest.skipIf(os.name != "posix" or os.geteuid() == 0, "requires POSIX permission enforcement")
+    def test_a_degraded_build_that_did_not_lose_ground_still_swaps(self):
+        # One unreadable file must not freeze the index forever — the guard is
+        # "don't come back smaller", not "never rebuild after an error".
+        _write(os.path.join(self.vault, "old.md"), "old content")
+        with tempfile.TemporaryDirectory() as index_dir:
+            index_path = os.path.join(index_dir, "notes.db")
+            self.assertEqual(build_index(self.vault, index_path), 1)
+
+            _write(os.path.join(self.vault, "fresh.md"), "fresh content")
+            unreadable = os.path.join(self.vault, "broken.md")
+            _write(unreadable, "unreachable content")
+            os.chmod(unreadable, 0o000)
+            try:
+                indexed = build_index(self.vault, index_path)
+            finally:
+                os.chmod(unreadable, 0o600)
+
+            self.assertEqual(indexed, 2)  # old + fresh; broken skipped
+            self.assertEqual(len(search("fresh", index_path=index_path)), 1)
+
 
 class TestHealthCheck(unittest.TestCase):
     def test_healthy_for_readable_directory(self):

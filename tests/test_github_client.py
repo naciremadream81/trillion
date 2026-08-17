@@ -86,6 +86,17 @@ class TestGitHubClient(unittest.TestCase):
         result = run(client.get_commit("owner/repo", "abc123"))
         self.assertEqual(result, {})
 
+    def test_list_repo_events(self):
+        client = FakeGitHubClient(response=[{"type": "PushEvent"}])
+        result = run(client.list_repo_events("owner/repo"))
+        self.assertEqual(result, [{"type": "PushEvent"}])
+        self.assertEqual(client.calls[0][0], "/repos/owner/repo/events")
+
+    def test_list_repo_events_defaults_to_empty_list(self):
+        client = FakeGitHubClient(response=None)
+        result = run(client.list_repo_events("owner/repo"))
+        self.assertEqual(result, [])
+
     def test_get_participation_returns_dict(self):
         client = FakeGitHubClient(response={"all": [1, 2, 3]})
         result = run(client.get_participation("owner/repo"))

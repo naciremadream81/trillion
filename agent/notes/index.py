@@ -55,10 +55,14 @@ def build_index(
     can't list a single entry, so a transient outage must not erase a
     previously-good index that search() is still serving reads from.
 
-    Builds into a scratch table and only swaps it in for "notes" once the
-    walk actually reaches vault_path — a genuinely empty vault (walk
-    succeeds, zero .md files) still replaces the index, matching the old
-    behavior; a walk that can't even list the top level does not.
+    Builds into a scratch table and only swaps it in for "notes" when the
+    build looks healthy. Reaching vault_path is necessary but not sufficient:
+    the same degraded mount can serve cached directory entries while every
+    file read returns EIO, which would walk the whole vault, index nothing,
+    and swap a good index for an empty one. So a build that hit *any* read or
+    traversal error must also come back no smaller than what's already
+    indexed before it is allowed to replace it. A genuinely empty vault (clean
+    walk, zero .md files) still replaces the index, matching the old behavior.
     """
     dirname = os.path.dirname(index_path)
     if dirname:
@@ -74,7 +78,15 @@ def build_index(
 
         indexed = 0
         reached_vault = False
-        for dirpath, dirnames, filenames in os.walk(vault_path):
+        degraded = False
+
+        def _on_walk_error(error: OSError) -> None:
+            # os.walk swallows these silently by default, which is exactly how
+            # "half the vault became unlistable" turns into a quiet truncation.
+            nonlocal degraded
+            degraded = True
+
+        for dirpath, dirnames, filenames in os.walk(vault_path, onerror=_on_walk_error):
             reached_vault = True
             rel_dir = os.path.relpath(dirpath, vault_path)
             rel_dir = "" if rel_dir == "." else rel_dir
@@ -95,6 +107,7 @@ def build_index(
                     ) as f:
                         content = f.read()
                 except OSError:
+                    degraded = True
                     continue
                 conn.execute(
                     "INSERT INTO notes_new (path, title, content) VALUES (?, ?, ?)",
@@ -102,7 +115,11 @@ def build_index(
                 )
                 indexed += 1
 
-        if reached_vault:
+        # A degraded build may only replace the index if it didn't lose
+        # ground. First build (no "notes" table yet) counts as 0, so it always
+        # lands; a full outage indexes 0 against an existing N and is dropped.
+        healthy = reached_vault and (not degraded or indexed >= _indexed_count(conn))
+        if healthy:
             conn.execute("DROP TABLE IF EXISTS notes")
             conn.execute("ALTER TABLE notes_new RENAME TO notes")
         else:
@@ -112,6 +129,14 @@ def build_index(
     finally:
         conn.close()
     return indexed
+
+
+def _indexed_count(conn: sqlite3.Connection) -> int:
+    """How many notes the live index currently holds; 0 if there isn't one."""
+    try:
+        return conn.execute("SELECT count(*) FROM notes").fetchone()[0]
+    except sqlite3.OperationalError:
+        return 0
 
 
 def search(

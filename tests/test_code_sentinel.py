@@ -28,6 +28,16 @@ def iso(dt: datetime) -> str:
     return dt.isoformat().replace("+00:00", "Z")
 
 
+def push_event(actor: str, branch: str, sha: str) -> dict:
+    """A GitHub PushEvent. `actor` is the pusher — deliberately not the
+    commit's author, which is a different field answering a different question."""
+    return {
+        "type": "PushEvent",
+        "actor": {"login": actor},
+        "payload": {"ref": f"refs/heads/{branch}", "head": sha},
+    }
+
+
 class FakeClient:
     def __init__(self):
         self.check_runs = {}
@@ -37,6 +47,7 @@ class FakeClient:
         self.participation = {}
         self.default_branches = {}
         self.commits = {}
+        self.events = {}
         self.error_repos = set()
         self.check_runs_calls = []
 
@@ -49,6 +60,11 @@ class FakeClient:
         if repo in self.error_repos:
             raise RuntimeError("boom")
         return self.commits.get((repo, sha), {})
+
+    async def list_repo_events(self, repo):
+        if repo in self.error_repos:
+            raise RuntimeError("boom")
+        return self.events.get(repo, [])
 
     async def list_check_runs(self, repo, ref):
         self.check_runs_calls.append((repo, ref))
@@ -126,6 +142,19 @@ class TestCIFailureCheck(unittest.TestCase):
         notices, _ = run(check.run({}))
         self.assertEqual(len(notices), 1)
         self.assertEqual(client.check_runs_calls, [("owner/repo", "master")])
+
+    def test_notice_names_the_branch_it_actually_checked(self):
+        # Querying "master" but reporting "main" sends Sean to investigate a
+        # branch that isn't the one that went red.
+        client = FakeClient()
+        client.default_branches["owner/repo"] = "develop"
+        client.check_runs["owner/repo"] = [
+            {"id": 42, "name": "pytest", "status": "completed", "conclusion": "failure", "started_at": "2026-01-01T00:00:00Z"}
+        ]
+        check = CIFailureCheck(client, ["owner/repo"], cadence_seconds=60.0)
+        notices, _ = run(check.run({}))
+        self.assertIn("develop", notices[0].message)
+        self.assertNotIn("main", notices[0].message)
 
 
 class TestStalePRCheck(unittest.TestCase):
@@ -251,27 +280,71 @@ class TestHotfixPushCheck(unittest.TestCase):
     def test_owners_own_hotfix_push_is_not_notified(self):
         client = FakeClient()
         client.branches["owner/repo"] = [{"name": "hotfix/urgent-fix", "commit": {"sha": "abc123"}}]
-        client.commits[("owner/repo", "abc123")] = {"author": {"login": "Sean"}}
+        client.events["owner/repo"] = [push_event("Sean", "hotfix/urgent-fix", "abc123")]
         check = HotfixPushCheck(client, ["owner/repo"], cadence_seconds=60.0, username="sean")
         notices, cursor = run(check.run({}))
         self.assertEqual(notices, [])
         # Still tracked, so the same push isn't re-fetched/re-evaluated next tick.
         self.assertEqual(cursor["owner/repo"]["hotfix/urgent-fix"], "abc123")
 
-    def test_other_authors_hotfix_push_still_notified_when_username_set(self):
+    def test_someone_elses_hotfix_push_still_notified_when_username_set(self):
         client = FakeClient()
         client.branches["owner/repo"] = [{"name": "hotfix/urgent-fix", "commit": {"sha": "abc123"}}]
-        client.commits[("owner/repo", "abc123")] = {"author": {"login": "someone-else"}}
+        client.events["owner/repo"] = [push_event("someone-else", "hotfix/urgent-fix", "abc123")]
         check = HotfixPushCheck(client, ["owner/repo"], cadence_seconds=60.0, username="sean")
         notices, _ = run(check.run({}))
         self.assertEqual(len(notices), 1)
 
-    def test_commit_fetch_failure_defaults_to_notifying(self):
+    def test_someone_else_pushing_a_commit_sean_authored_still_notifies(self):
+        # The exclusion is about who pushed, not who wrote it. Reading commit
+        # authorship here would silently swallow a real hotfix by someone else
+        # that happened to carry Sean's authorship (a cherry-pick, a rebase).
         client = FakeClient()
         client.branches["owner/repo"] = [{"name": "hotfix/urgent-fix", "commit": {"sha": "abc123"}}]
-        # No entry in client.commits and no error_repos entry that would
-        # short-circuit list_branches — get_commit simply returns {} here,
-        # which must not be mistaken for a match.
+        client.commits[("owner/repo", "abc123")] = {"author": {"login": "Sean"}}
+        client.events["owner/repo"] = [push_event("someone-else", "hotfix/urgent-fix", "abc123")]
+        check = HotfixPushCheck(client, ["owner/repo"], cadence_seconds=60.0, username="sean")
+        notices, _ = run(check.run({}))
+        self.assertEqual(len(notices), 1)
+
+    def test_sean_pushing_someone_elses_commit_is_still_his_own_push(self):
+        # The mirror image, and the normal shape of an emergency cherry-pick:
+        # commit authored by a colleague, pushed by Sean. He doesn't need a
+        # notification about something he just did.
+        client = FakeClient()
+        client.branches["owner/repo"] = [{"name": "hotfix/urgent-fix", "commit": {"sha": "abc123"}}]
+        client.commits[("owner/repo", "abc123")] = {"author": {"login": "someone-else"}}
+        client.events["owner/repo"] = [push_event("sean", "hotfix/urgent-fix", "abc123")]
+        check = HotfixPushCheck(client, ["owner/repo"], cadence_seconds=60.0, username="sean")
+        notices, _ = run(check.run({}))
+        self.assertEqual(notices, [])
+
+    def test_push_event_for_a_different_branch_does_not_match(self):
+        client = FakeClient()
+        client.branches["owner/repo"] = [{"name": "hotfix/urgent-fix", "commit": {"sha": "abc123"}}]
+        client.events["owner/repo"] = [push_event("sean", "hotfix/other", "abc123")]
+        check = HotfixPushCheck(client, ["owner/repo"], cadence_seconds=60.0, username="sean")
+        notices, _ = run(check.run({}))
+        self.assertEqual(len(notices), 1)
+
+    def test_non_push_events_are_ignored(self):
+        client = FakeClient()
+        client.branches["owner/repo"] = [{"name": "hotfix/urgent-fix", "commit": {"sha": "abc123"}}]
+        client.events["owner/repo"] = [
+            {"type": "WatchEvent", "actor": {"login": "sean"}, "payload": {}},
+            push_event("sean", "hotfix/urgent-fix", "abc123"),
+        ]
+        check = HotfixPushCheck(client, ["owner/repo"], cadence_seconds=60.0, username="sean")
+        notices, _ = run(check.run({}))
+        self.assertEqual(notices, [])
+
+    def test_push_aged_out_of_the_events_window_defaults_to_notifying(self):
+        # GitHub caps /events at ~300 events / 90 days. A push we can't find
+        # is unknown, not "not Sean's" — and unknown must page rather than
+        # stay silent on a real production hotfix.
+        client = FakeClient()
+        client.branches["owner/repo"] = [{"name": "hotfix/urgent-fix", "commit": {"sha": "abc123"}}]
+        client.events["owner/repo"] = []
         check = HotfixPushCheck(client, ["owner/repo"], cadence_seconds=60.0, username="sean")
         notices, _ = run(check.run({}))
         self.assertEqual(len(notices), 1)

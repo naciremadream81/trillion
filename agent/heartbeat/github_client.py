@@ -60,10 +60,24 @@ class GitHubClient:
         return (data or {}).get("default_branch") or "main"
 
     async def get_commit(self, repo: str, sha: str) -> dict:
-        """A single commit, including its GitHub author/committer identity —
-        used to tell whether a push was the watched account's own."""
+        """A single commit, including its GitHub author/committer identity.
+
+        Note for future callers: commit `author` is who *wrote* the commit,
+        not who pushed it. To attribute a push to an account, use
+        list_repo_events() — see HotfixPushCheck._is_own_push."""
         data = await self._get(f"/repos/{repo}/commits/{sha}")
         return data or {}
+
+    async def list_repo_events(self, repo: str) -> list[dict]:
+        """Recent repository events, newest first.
+
+        The only GitHub surface that reports who *pushed* a SHA (PushEvent's
+        top-level `actor`) as opposed to who authored the commit. Capped by
+        GitHub at ~300 events / 90 days and served from a ~60s cache, so a
+        push can age out of this window — callers must treat "not found" as
+        unknown rather than as a negative answer."""
+        data = await self._get(f"/repos/{repo}/events", params={"per_page": "100"})
+        return data or []
 
     async def get_participation(self, repo: str) -> dict:
         """Weekly commit counts (all branches) for the last 52 weeks, oldest first."""

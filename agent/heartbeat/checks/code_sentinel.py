@@ -5,10 +5,15 @@ sentinel.md, built on the Check protocol (base.py) and GitHubClient
 
 Explicitly excluded (per the playbook): Dependabot updates, green CI runs,
 Sean's own pushes, and PRs he opened himself. CIFailureCheck, DependencyAlertCheck,
-and DormantRepoCheck never need authorship to stay quiet on the excluded
+and DormantRepoCheck never need an identity to stay quiet on the excluded
 cases — but StalePRCheck and HotfixPushCheck do, since a PR or a hotfix
 branch push can belong to anyone, so they compare against
 settings.github_username (case-insensitively) before notifying.
+
+Those two ask *different* questions, and the distinction matters: a PR has an
+opener (`pr.user`), but a push has a pusher, who is not necessarily the commit's
+author. HotfixPushCheck therefore reads PushEvent actors, not commit authorship
+— see _is_own_push. Both fail open: an identity we can't establish gets notified.
 
 Every notice is exactly three sentences: what happened, why it matters,
 what to do next — the playbook's own format.
@@ -65,12 +70,15 @@ class CIFailureCheck:
                 continue
             new_cursor[repo] = latest.get("id")
             check_name = latest.get("name", "a check")
+            # Name the branch we actually queried. Saying "main" for a repo
+            # whose default is "master" or "develop" sends Sean to look at a
+            # branch that isn't the one that broke.
             notices.append(
                 Notice(
                     severity="critical",
                     message=(
-                        f"{check_name!r} failed on {repo}'s main branch. "
-                        f"A red main branch blocks anyone building on top of it until it's fixed. "
+                        f"{check_name!r} failed on {repo}'s {default_branch} branch. "
+                        f"A red {default_branch} blocks anyone building on top of it until it's fixed. "
                         f"I'd open the failing run's logs and fix or revert whatever broke it."
                     ),
                 )
@@ -198,7 +206,11 @@ class HotfixPushCheck:
                 if known.get(branch_name) == sha:
                     continue
                 known[branch_name] = sha
-                if self._username and sha and await self._is_own_push(repo, sha):
+                if (
+                    self._username
+                    and sha
+                    and await self._is_own_push(repo, branch_name, sha)
+                ):
                     continue  # Sean's own push — excluded entirely, per the playbook
                 notices.append(
                     Notice(
@@ -213,19 +225,34 @@ class HotfixPushCheck:
             new_cursor[repo] = known
         return notices, new_cursor
 
-    async def _is_own_push(self, repo: str, sha: str) -> bool:
-        """Whether the commit at sha was authored by the watched account.
+    async def _is_own_push(self, repo: str, branch_name: str, sha: str) -> bool:
+        """Whether the watched account is the one who *pushed* sha to this branch.
 
-        A commit-fetch failure defaults to False (notify anyway) rather than
-        raising — missing one authorship check is far cheaper than staying
-        silent on a real hotfix because GitHub hiccuped."""
+        Deliberately not commit authorship. A commit's `author` is whoever
+        wrote it, which is a different question and gets both cases wrong:
+        someone else pushing a commit Sean authored would be silently
+        suppressed, and Sean pushing someone else's commit — the normal shape
+        of a cherry-picked emergency fix — would page him about his own push.
+        PushEvent's top-level `actor` is the pusher, so that's what this reads.
+
+        Unknown means notify. Events age out of GitHub's window and the API
+        can fail, and neither is evidence the push was Sean's; missing one
+        exclusion is far cheaper than staying silent on a real hotfix."""
         try:
-            commit = await self._client.get_commit(repo, sha)
+            events = await self._client.list_repo_events(repo)
         except Exception:  # noqa: BLE001
-            logger.exception("hotfix_push check failed to fetch commit %r for %r", sha, repo)
+            logger.exception("hotfix_push check failed to fetch events for %r", repo)
             return False
-        author = (commit.get("author") or {}).get("login") or ""
-        return author.lower() == self._username.lower()
+        ref = f"refs/heads/{branch_name}"
+        for event in events:
+            if event.get("type") != "PushEvent":
+                continue
+            payload = event.get("payload") or {}
+            if payload.get("head") != sha or payload.get("ref") != ref:
+                continue
+            actor = (event.get("actor") or {}).get("login") or ""
+            return actor.lower() == self._username.lower()
+        return False
 
 
 class DormantRepoCheck:
