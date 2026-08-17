@@ -1899,15 +1899,24 @@
 
     mic.addEventListener('click', () => { listening ? stopListening() : startListening(); });
 
+    // Aborted by cancelSpeech() on barge-in. Without this, tapping the mic
+    // mid-reply left the old turn's /api/chat stream running: it kept
+    // arriving, kept getting split into sentences, and kept queueing speech
+    // for a turn the person had already talked over.
+    let chatAbort = null;
+
     async function sendToAgent(text, turnId) {
       window.setStatus('processing');
       setHint('Thinking…');
       let spoke = false;
+      chatAbort = new AbortController();
+      const signal = chatAbort.signal;
       try {
         const res = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ message: text }),
+          signal,
         });
         const reader = res.body.getReader();
         const dec = new TextDecoder();
@@ -1928,6 +1937,9 @@
         const tail = buf.trim();
         if (tail) { speak(tail, turnId); spoke = true; }
       } catch (err) {
+        // A barge-in abort is the person interrupting on purpose, not a
+        // failure — the new turn already owns the UI, so say nothing.
+        if (err && err.name === 'AbortError') return;
         setHint('Connection error — is the server running?');
       }
       if (!spoke) {                  // sign-off / empty reply → stay silent
@@ -1938,15 +1950,29 @@
 
     // Sentences are spoken through a queue so playback stays in order even
     // if /api/tts responses for different sentences resolve out of order.
+    //
+    // Every queued sentence carries the generation it was queued in
+    // (smooth-voice_2 Tier 6). Barge-in bumps the generation, which is what
+    // actually makes an interruption stick: resetting speechQueue alone
+    // doesn't cancel the *old* chain, it just stops new work from queueing
+    // behind it — so the sentence after the one being spoken would still
+    // synthesize and play, right over the top of the new turn. The stale
+    // generation check drops those, and keeps their .finally() handlers from
+    // decrementing a pendingSpeech counter that barge-in already zeroed
+    // (which drove it negative, so it never hit 0 again and the orb stayed
+    // stuck on 'processing' for the rest of the session).
     let speechQueue = Promise.resolve();
     let pendingSpeech = 0;
     let currentAudio = null;
+    let speechGeneration = 0;
 
     function speak(sentence, turnId) {
+      const gen = speechGeneration;
       pendingSpeech++;
-      speechQueue = speechQueue.then(() => synthesizeAndPlay(sentence, turnId)).catch((err) => {
+      speechQueue = speechQueue.then(() => synthesizeAndPlay(sentence, turnId, gen)).catch((err) => {
         console.log('[trillion voice] tts error:', err);
       }).finally(() => {
+        if (gen !== speechGeneration) return; // interrupted; the counter isn't ours anymore
         pendingSpeech--;
         if (pendingSpeech === 0) {
           window.setVoiceBright && window.setVoiceBright(0.0);
@@ -1956,7 +1982,8 @@
       });
     }
 
-    async function synthesizeAndPlay(sentence, turnId) {
+    async function synthesizeAndPlay(sentence, turnId, gen) {
+      if (gen !== speechGeneration) return; // interrupted while waiting its turn in the queue
       const res = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1979,6 +2006,7 @@
         if (value && value.length) vlMark(turnId, 'firstAudioByte');
         chunks.push(value);
       }
+      if (gen !== speechGeneration) return; // interrupted while synthesizing — don't start playing
       const url = URL.createObjectURL(new Blob(chunks, { type: contentType }));
       const audio = new Audio(url);
       currentAudio = audio;
@@ -1988,6 +2016,10 @@
         audio.onplaying = () => { vlMark(turnId, 'firstSoundPlaying'); vlReport(turnId); };
         audio.onended = resolve;
         audio.onerror = resolve;
+        // Barge-in pauses this element mid-sentence, which fires neither
+        // 'ended' nor 'error' — without this the promise never settles, the
+        // object URL leaks, and the abandoned chain hangs forever.
+        audio.onpause = resolve;
         audio.play().catch(resolve);
       });
       URL.revokeObjectURL(url);
@@ -1995,9 +2027,14 @@
     }
 
     function cancelSpeech() {
+      // Bump first: everything already queued or in flight reads this and
+      // bails, rather than playing over whatever comes next.
+      speechGeneration++;
       if (currentAudio) { try { currentAudio.pause(); } catch (e) {} currentAudio = null; }
+      if (chatAbort) { try { chatAbort.abort(); } catch (e) {} chatAbort = null; }
       speechQueue = Promise.resolve();
       pendingSpeech = 0;
+      window.setVoiceBright && window.setVoiceBright(0.0);
     }
   })();
   </script>

@@ -335,6 +335,57 @@ async def _stop_software_factory(app: web.Application) -> None:
     await _stop_software_factory_background_tasks(app)
 
 
+def _piper_model_path() -> str:
+    """
+    The configured Piper voice model, resolved against the project root so a
+    relative default (voices/en_US-amy-medium.onnx) works regardless of the
+    server's working directory. Shared by the /api/tts handler and the
+    startup warm-up so the two can never warm one path and synthesize from
+    another.
+    """
+    model_path = get_settings().piper_voice_path
+    if not os.path.isabs(model_path):
+        model_path = os.path.join(PROJECT_ROOT, model_path)
+    return model_path
+
+
+async def _warm_piper_voice(app: web.Application) -> None:
+    """
+    Load Piper's ~63MB voice model at boot instead of on the first spoken
+    reply (smooth-voice_2 Tier 4).
+
+    Measured cold, that load plus its first inference cost ~4s — the single
+    largest number in the Tier 1 latency breakdown, and one every voice turn
+    after a restart used to pay. trillion-orb.service starts on boot, so in
+    practice it landed on the first thing Sean said each day.
+
+    Scheduled as a background task rather than awaited, deliberately: this
+    blocks a CPU core for seconds, and text chat, the cost dashboard, and
+    the UI have no reason to wait behind it. A missing model logs and stays
+    cold — /api/tts still returns its own clear error, exactly as before.
+    """
+    app["piper_warmup_task"] = None
+    try:
+        from agent.voice.piper_tts import warm_up
+
+        model_path = _piper_model_path()
+
+        async def _warm() -> None:
+            try:
+                await asyncio.to_thread(warm_up, model_path)
+                print("Piper voice model warm.")
+            except Exception as e:  # noqa: BLE001
+                print(f"Piper warm-up skipped — {e} First spoken reply will be slower.")
+
+        app["piper_warmup_task"] = asyncio.create_task(_warm())
+    except Exception as e:  # noqa: BLE001
+        print(f"Piper warm-up unavailable ({e}); continuing.")
+
+
+async def _stop_piper_warmup(app: web.Application) -> None:
+    await _stop_task(app, "piper_warmup_task")
+
+
 async def _start_heartbeat_scheduler(app: web.Application) -> None:
     """
     Best-effort Tier 5 heartbeat wiring, mirroring _start_factory_watcher —
@@ -489,10 +540,7 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
         # to a thread rather than awaited directly on the event loop.
         from agent.voice.piper_tts import SynthesisError, synthesize
 
-        settings = get_settings()
-        model_path = settings.piper_voice_path
-        if not os.path.isabs(model_path):
-            model_path = os.path.join(PROJECT_ROOT, model_path)
+        model_path = _piper_model_path()
         try:
             data = await request.json()
         except Exception:
@@ -645,9 +693,11 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
     app.on_startup.append(_build_notes_index)
     app.on_startup.append(_start_software_factory)
     app.on_startup.append(_start_heartbeat_scheduler)
+    app.on_startup.append(_warm_piper_voice)
     app.on_cleanup.append(_stop_factory_watcher)
     app.on_cleanup.append(_stop_software_factory)
     app.on_cleanup.append(_stop_heartbeat_scheduler)
+    app.on_cleanup.append(_stop_piper_warmup)
     return app
 
 
