@@ -48,21 +48,46 @@ def build_index(
 ) -> int:
     """
     Rebuild the local index from markdown files in the vault. Returns the
-    number of files indexed. Missing/unreadable vault_path yields 0, not an
-    error — callers (main.py/serve.py's best-effort startup wiring) treat
-    that the same as "nothing to index yet."
+    number of files indexed. Missing/unreadable vault_path yields 0 and
+    leaves any existing index untouched, rather than replacing it with an
+    empty one — the module docstring's "healthy mount, every read errors"
+    failure mode means os.path.isdir(vault_path) can pass while os.walk still
+    can't list a single entry, so a transient outage must not erase a
+    previously-good index that search() is still serving reads from.
+
+    Builds into a scratch table and only swaps it in for "notes" when the
+    build looks healthy. Reaching vault_path is necessary but not sufficient:
+    the same degraded mount can serve cached directory entries while every
+    file read returns EIO, which would walk the whole vault, index nothing,
+    and swap a good index for an empty one. So a build that hit *any* read or
+    traversal error must also come back no smaller than what's already
+    indexed before it is allowed to replace it. A genuinely empty vault (clean
+    walk, zero .md files) still replaces the index, matching the old behavior.
     """
     dirname = os.path.dirname(index_path)
     if dirname:
         os.makedirs(dirname, exist_ok=True)
 
+    if not os.path.isdir(vault_path):
+        return 0
+
     conn = sqlite3.connect(index_path)
     try:
-        conn.execute("DROP TABLE IF EXISTS notes")
-        conn.execute("CREATE VIRTUAL TABLE notes USING fts5(path, title, content)")
+        conn.execute("DROP TABLE IF EXISTS notes_new")
+        conn.execute("CREATE VIRTUAL TABLE notes_new USING fts5(path, title, content)")
 
         indexed = 0
-        for dirpath, dirnames, filenames in os.walk(vault_path):
+        reached_vault = False
+        degraded = False
+
+        def _on_walk_error(error: OSError) -> None:
+            # os.walk swallows these silently by default, which is exactly how
+            # "half the vault became unlistable" turns into a quiet truncation.
+            nonlocal degraded
+            degraded = True
+
+        for dirpath, dirnames, filenames in os.walk(vault_path, onerror=_on_walk_error):
+            reached_vault = True
             rel_dir = os.path.relpath(dirpath, vault_path)
             rel_dir = "" if rel_dir == "." else rel_dir
             dirnames[:] = [
@@ -82,16 +107,36 @@ def build_index(
                     ) as f:
                         content = f.read()
                 except OSError:
+                    degraded = True
                     continue
                 conn.execute(
-                    "INSERT INTO notes (path, title, content) VALUES (?, ?, ?)",
+                    "INSERT INTO notes_new (path, title, content) VALUES (?, ?, ?)",
                     (rel_file, filename[: -len(".md")], content),
                 )
                 indexed += 1
+
+        # A degraded build may only replace the index if it didn't lose
+        # ground. First build (no "notes" table yet) counts as 0, so it always
+        # lands; a full outage indexes 0 against an existing N and is dropped.
+        healthy = reached_vault and (not degraded or indexed >= _indexed_count(conn))
+        if healthy:
+            conn.execute("DROP TABLE IF EXISTS notes")
+            conn.execute("ALTER TABLE notes_new RENAME TO notes")
+        else:
+            conn.execute("DROP TABLE IF EXISTS notes_new")
+            indexed = 0
         conn.commit()
     finally:
         conn.close()
     return indexed
+
+
+def _indexed_count(conn: sqlite3.Connection) -> int:
+    """How many notes the live index currently holds; 0 if there isn't one."""
+    try:
+        return conn.execute("SELECT count(*) FROM notes").fetchone()[0]
+    except sqlite3.OperationalError:
+        return 0
 
 
 def search(
