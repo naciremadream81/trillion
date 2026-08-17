@@ -39,11 +39,29 @@ def is_authorized(headers, token: str) -> bool:
     empty token means auth isn't configured at all, so every request is
     authorized — split out like headers.py's apply_security_headers() so
     the logic is testable without an aiohttp Request or event loop.
+
+    The scheme is matched case-insensitively (RFC 7235 §2.1: auth scheme
+    names are case-insensitive, so `bearer <token>` is as valid as
+    `Bearer <token>`).
+
+    The credential is compared as bytes, not str, because a hostile header
+    can otherwise turn a 401 into a 500 two different ways:
+    hmac.compare_digest() raises TypeError on non-ASCII str (e.g. `Bearer é`),
+    and a raw non-UTF-8 byte (e.g. 0xE9) arrives from aiohttp already decoded
+    with surrogateescape as '\\udce9', which a plain .encode("utf-8") then
+    rejects with UnicodeEncodeError. Encoding with the same surrogateescape
+    handler round-trips whatever bytes were actually on the wire, so both
+    cases become an ordinary constant-time non-match.
     """
     if not token:
         return True
     scheme, _, value = headers.get("Authorization", "").partition(" ")
-    return scheme == "Bearer" and hmac.compare_digest(value, token)
+    if scheme.lower() != "bearer":
+        return False
+    return hmac.compare_digest(
+        value.encode("utf-8", "surrogateescape"),
+        token.encode("utf-8", "surrogateescape"),
+    )
 
 
 def bearer_auth_middleware(token: str):

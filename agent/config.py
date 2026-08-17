@@ -161,9 +161,10 @@ class Settings:
     # ── Web server bind (§1.5 startup guard) ────────────────────────────────
     # serve.py's bind host. Defaults to loopback-only; agent/security/
     # startup_guard.py refuses to start on anything else unless
-    # web_auth_token is set. This token also gates every /api/ request at
-    # runtime — see agent/security/auth.py's bearer_auth_middleware, wired
-    # into serve.py's build_app().
+    # web_auth_token is set. The token is also enforced per-request on /api/
+    # routes by agent/security/auth.py's bearer_auth_middleware, so rotating
+    # it immediately revokes anyone holding the old value. When it's empty
+    # (the loopback-only default) that middleware is a no-op.
     web_host: str = "127.0.0.1"
     web_auth_token: str = ""
 
@@ -183,7 +184,7 @@ def get_settings() -> Settings:
     return Settings(
         supabase_analytics_url=os.getenv("SUPABASE_ANALYTICS_URL", ""),
         software_factory_root=os.getenv("TRILLION_SOFTWARE_FACTORY_ROOT", "generated-projects"),
-        factory_daily_build_cap=int(os.getenv("TRILLION_FACTORY_DAILY_BUILD_CAP", "3")),
+        factory_daily_build_cap=_env_int("TRILLION_FACTORY_DAILY_BUILD_CAP", 3),
         factory_daily_budget_usd=_env_float("TRILLION_FACTORY_DAILY_BUDGET_USD", None),
         factory_paused=_env_bool("TRILLION_FACTORY_PAUSED", False),
         factory_autonomous_themes=_env_list("TRILLION_FACTORY_AUTONOMOUS_THEMES"),

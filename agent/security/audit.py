@@ -219,10 +219,35 @@ def _cve_scan() -> Signal:
     )
 
 
-def _csrf_origin_gate() -> Signal:
+def _csrf_origin_gate(settings) -> Signal:
+    # Every other signal here that checks a module checks that it *exists*
+    # (hasattr, a non-empty constant). That is weak evidence for a gate whose
+    # whole job is to say no: an origin module that imports fine but allows
+    # everything would score the same as a working one. So this actually runs
+    # the decision function against a forged cross-origin POST and requires a
+    # refusal before claiming the rail is up.
+    try:
+        from .origin import check_origin
+    except Exception:
+        return Signal(
+            "csrf-origin-gate", "CSRF / origin gate", "absent", -10, "warning",
+            "No origin-check middleware is wired up on POST/PUT/PATCH/DELETE.",
+        )
+
+    forged = check_origin(
+        "POST",
+        "/api/chat",
+        {"Origin": "https://evil.example", "Host": settings.web_host},
+        settings.web_host,
+    )
+    if forged is None:
+        return Signal(
+            "csrf-origin-gate", "CSRF / origin gate", "not enforcing", -10, "warning",
+            "agent/security/origin.py is importable but allowed a forged cross-origin POST.",
+        )
     return Signal(
-        "csrf-origin-gate", "CSRF / origin gate", "absent", -10, "warning",
-        "No origin-check middleware is wired up on POST/PUT/PATCH/DELETE.",
+        "csrf-origin-gate", "CSRF / origin gate", "enforcing", 0, "ok",
+        "State-changing /api/ requests are checked against Sec-Fetch-Site, Origin, and a Host allowlist.",
     )
 
 
@@ -241,7 +266,7 @@ def collect_signals(settings, registry) -> list[Signal]:
         _token_scope_audit(),
         _db_readonly_role(),
         _cve_scan(),
-        _csrf_origin_gate(),
+        _csrf_origin_gate(settings),
     ]
 
 

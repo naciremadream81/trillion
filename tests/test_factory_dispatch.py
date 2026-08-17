@@ -12,7 +12,14 @@ import os
 import tempfile
 import unittest
 
-from agent.factory.dispatch import ConfigDrivenAgent, DispatchTool, RegistryWatcher, dispatch_tool_name
+from agent.factory.dispatch import (
+    ConfigDrivenAgent,
+    DispatchActivity,
+    DispatchTool,
+    RegistryWatcher,
+    dispatch_tool_name,
+    get_dispatch_activity,
+)
 from agent.factory.storage import FactoryRepo
 from agent.providers.base import BaseProvider, ProviderResponse, TextChunk, TokenUsage
 from agent.tools.base import BaseTool
@@ -112,6 +119,116 @@ class TestDispatchTool(unittest.TestCase):
 
     def test_dispatch_tool_name_replaces_hyphens(self):
         self.assertEqual(dispatch_tool_name("sql-migration-review"), "dispatch_to_sql_migration_review")
+
+
+class TestDispatchActivity(unittest.TestCase):
+    def test_mark_started_then_snapshot_contains_slug(self):
+        activity = DispatchActivity()
+        activity.mark_started("x")
+        self.assertIn("x", activity.snapshot())
+
+    def test_mark_finished_removes_slug(self):
+        activity = DispatchActivity()
+        activity.mark_started("x")
+        activity.mark_finished("x")
+        self.assertNotIn("x", activity.snapshot())
+
+    def test_mark_finished_on_unknown_slug_is_a_no_op(self):
+        DispatchActivity().mark_finished("never-started")  # must not raise
+
+    def test_snapshot_is_a_copy_not_a_live_view(self):
+        activity = DispatchActivity()
+        activity.mark_started("x")
+        snap = activity.snapshot()
+        activity.mark_started("y")
+        self.assertNotIn("y", snap)
+
+    def test_get_dispatch_activity_returns_the_same_singleton(self):
+        self.assertIs(get_dispatch_activity(), get_dispatch_activity())
+
+    def test_overlapping_dispatches_to_the_same_slug_stay_active_until_both_finish(self):
+        # Codex review finding on PR #14: two concurrent dispatches to one
+        # slug used to collapse into one set entry, so the first to finish
+        # discarded it while the second was still running.
+        activity = DispatchActivity()
+        activity.mark_started("x")
+        activity.mark_started("x")  # a second, overlapping call
+        activity.mark_finished("x")  # the first call finishes
+        self.assertIn("x", activity.snapshot())  # still active — the second isn't done
+        activity.mark_finished("x")  # the second call finishes
+        self.assertNotIn("x", activity.snapshot())
+
+    def test_mark_finished_never_goes_negative_on_an_unbalanced_call(self):
+        activity = DispatchActivity()
+        activity.mark_started("x")
+        activity.mark_finished("x")
+        activity.mark_finished("x")  # an extra finish shouldn't happen, but must not corrupt state
+        activity.mark_started("x")
+        self.assertIn("x", activity.snapshot())
+
+    def test_total_dispatches_counts_every_start_and_never_decreases(self):
+        # Codex review finding on PR #14: a dispatch short enough to start
+        # and finish between two browser polls needs a signal that stays
+        # observable until acknowledged — total_dispatches is that signal,
+        # a monotonic counter the browser diffs against, not the current
+        # active/inactive snapshot.
+        activity = DispatchActivity()
+        self.assertEqual(activity.total_dispatches("x"), 0)
+        activity.mark_started("x")
+        activity.mark_finished("x")
+        activity.mark_started("x")
+        activity.mark_finished("x")
+        self.assertEqual(activity.total_dispatches("x"), 2)
+
+    def test_total_dispatches_is_per_slug(self):
+        activity = DispatchActivity()
+        activity.mark_started("x")
+        self.assertEqual(activity.total_dispatches("y"), 0)
+
+
+class TestDispatchToolActivityTracking(unittest.TestCase):
+    """
+    Covers what serve.py's GET /api/agents reads: DispatchTool.run() must
+    mark its slug working for the duration of the sub-agent call, real
+    signal for the browser's constellation "working" pulse — and must clear
+    it even when the sub-agent blows up, so a crash doesn't strand an agent
+    permanently shown as busy.
+    """
+
+    def tearDown(self):
+        # Belt and braces: every test below pairs a start with a finish via
+        # DispatchTool.run()'s own try/finally, but clear defensively so a
+        # failed assertion mid-test can't leak state into the next test.
+        activity = get_dispatch_activity()
+        for slug in list(activity.snapshot()):
+            activity.mark_finished(slug)
+
+    def test_slug_is_working_during_the_call_and_clear_after(self):
+        row = make_row(slug="probe-agent")
+        tool = DispatchTool(row, FakeProvider([]), None)
+        seen = {}
+
+        async def probe(message):
+            seen["working_during_call"] = "probe-agent" in get_dispatch_activity().snapshot()
+            return "done"
+
+        tool._sub_agent.run = probe
+        result = run(tool.run(message="hi"))
+
+        self.assertTrue(seen["working_during_call"])
+        self.assertNotIn("probe-agent", get_dispatch_activity().snapshot())
+        self.assertEqual(result, "done")
+
+    def test_working_state_clears_even_when_sub_agent_raises(self):
+        row = make_row(slug="boom-agent")
+        tool = DispatchTool(row, FakeProvider([]), None)
+
+        async def boom(message):
+            raise RuntimeError("sub-agent exploded")
+
+        tool._sub_agent.run = boom
+        run(tool.run(message="hi"))
+        self.assertNotIn("boom-agent", get_dispatch_activity().snapshot())
 
 
 class TestRegistryWatcher(unittest.TestCase):

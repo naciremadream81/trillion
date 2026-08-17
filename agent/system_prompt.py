@@ -18,12 +18,14 @@ import os
 import tomllib
 
 from .personality import BANNED_OPENERS, NEEDLE_TOPICS, VOICE_EXAMPLES
+from .selfknowledge.parser import BlockNotFoundError, extract_slim_block
 from .tools.project_fs import PathEscape, resolve_in_sandbox
 
 _CONTEXT_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "context"
 )
 _MANIFEST_PATH = os.path.join(_CONTEXT_DIR, "_manifest.toml")
+_SELF_KNOWLEDGE_PATH = os.path.join(_CONTEXT_DIR, "self", "trillion.md")
 
 
 _BASE_PROMPT_HEAD = """\
@@ -157,19 +159,64 @@ def _load_context_docs() -> str:
     return "\n\n".join(d for d in docs if d)
 
 
-def build_system_prompt(memory_facts: list[str] | None = None) -> str:
+def _load_self_knowledge(tool_registry=None) -> str:
+    """
+    The "what you can do right now" summary injected on every turn.
+
+    When tool_registry is given, this is computed LIVE from it via
+    agent.selfknowledge.generators — the exact registry the calling Agent
+    was built with, not a snapshot from disk. That's what keeps this honest
+    when analytics/search get turned on through .env, or when confirm_action
+    /remember_fact/forget_fact/dispatch_to_<slug> have already been layered
+    onto the registry by the time the caller builds the prompt: none of that
+    depends on context/self/trillion.md having been regenerated and
+    committed. That file's SLIM block is only a fallback, for the rare
+    caller with no tool_registry at all (e.g. a bare Tier 1 Agent).
+
+    Deliberately separate from _load_context_docs(): that loader wraps
+    everything it returns under "## Databases you can query", where a
+    self-knowledge doc would be mislabeled.
+    """
+    if tool_registry is not None:
+        from .config import get_settings
+        from .selfknowledge import generators
+
+        gates = generators.probe_config_gating(get_settings())
+        return generators.generate_slim_summary(tool_registry, gates).strip()
+
+    if not os.path.isfile(_SELF_KNOWLEDGE_PATH):
+        return ""
+    try:
+        with open(_SELF_KNOWLEDGE_PATH, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return ""
+    try:
+        return extract_slim_block(text).strip()
+    except BlockNotFoundError:
+        return ""
+
+
+def build_system_prompt(memory_facts: list[str] | None = None, tool_registry=None) -> str:
     """
     Assembles the full system prompt.
 
     memory_facts: durable facts from the memory store (Tier 4).
                   Injected here so the model walks into every conversation
                   already knowing them.
+    tool_registry: the Agent's actual registry, if it has one — see
+                   _load_self_knowledge() for why this makes the capability
+                   summary live rather than a committed-file snapshot.
     """
     parts = [_BASE_PROMPT_HEAD, _voice_section(), _BASE_PROMPT_TAIL]
 
     if memory_facts:
         facts_block = "\n".join(f"- {f}" for f in memory_facts)
         parts.append(f"\n## What you know about Sean\n{facts_block}")
+
+    self_knowledge = _load_self_knowledge(tool_registry)
+    if self_knowledge:
+        parts.append(f"\n## What you can do right now\n{self_knowledge}")
 
     docs = _load_context_docs()
     if docs:

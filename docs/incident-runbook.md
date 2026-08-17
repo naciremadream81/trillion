@@ -149,30 +149,25 @@ Trillion happens to use.
 ### TRILLION_WEB_AUTH_TOKEN leaked
 
 **Blast radius:** with `agent/security/auth.py`'s `bearer_auth_middleware`
-now wired into `serve.py`, this token is checked on every request under
-`/api/` (not just at startup) — including `/api/chat` and everything else
-that can act on your behalf — except `/api/security/csp-report`, which the
-browser's Reporting API posts with no way to attach a custom header. The
-static UI shell (`/`, `/index.html`, `/vendor/`) is intentionally not
-gated — it's markup and vendored JS, not a capability. Rotating the token
-immediately revokes anyone holding the old value for every `/api/` call.
+now wired into `serve.py`, this token is checked on every request (not just
+at startup) — every route except the CSP report endpoint and `/vendor/`
+static assets requires a matching `Authorization: Bearer <token>` header
+whenever `TRILLION_WEB_AUTH_TOKEN` is set. Rotating the token immediately
+revokes anyone holding the old value.
 
 1. Generate a new token: `python -c "import secrets;
    print(secrets.token_urlsafe(32))"`.
 2. Update `TRILLION_WEB_AUTH_TOKEN` in `.env` in dev and prod.
 3. Restart Trillion (`trillion serve` / `python serve.py`). The old token
-   stops working immediately; any client still using it gets `401` on
-   `/api/` calls.
+   stops working immediately; any client still using it gets `401`.
 4. If `web_host` is bound non-loopback, this is the meaningful fix — the
    window between leak and restart is the abuse window. Review `/audit` and
    `/pending-actions` for anything gated that ran or was approved during
    that window.
-5. There's no built-in way yet for a browser client to attach the
-   `Authorization` header (the stock `index.html` doesn't do this) — a
-   non-loopback deployment needs either manual token entry wired into the
-   UI, or a reverse proxy that injects the header. Until one of those
-   exists, prefer keeping `web_host` at loopback over relying on the token
-   alone for a public bind.
+5. If you don't yet have a way for a browser client to attach the
+   `Authorization` header (the stock `index.html` doesn't), don't rely on
+   the token alone for a public bind — keep `web_host` at loopback, or put a
+   reverse proxy in front that injects the header.
 
 ## After
 

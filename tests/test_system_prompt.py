@@ -29,6 +29,9 @@ class ContextDirCase(unittest.TestCase):
             patch.object(
                 system_prompt, "_MANIFEST_PATH", os.path.join(self.tmp, "_manifest.toml")
             ),
+            patch.object(
+                system_prompt, "_SELF_KNOWLEDGE_PATH", os.path.join(self.tmp, "self", "trillion.md")
+            ),
         ]
         for p in self._patches:
             p.start()
@@ -136,6 +139,55 @@ class TestBuildSystemPrompt(ContextDirCase):
         prompt = system_prompt.build_system_prompt()
         self.assertIn("Databases you can query", prompt)
         self.assertIn("TABLE events(id int)", prompt)
+
+
+class TestLiveSelfKnowledge(ContextDirCase):
+    """
+    A Codex review on PR #12 flagged that the summary was sourced from a
+    committed file rather than the Agent's actual registry — a .env-enabled
+    tool could be live while the prompt still claimed it wasn't. These lock
+    in that a passed-in tool_registry, not context/self/trillion.md, is the
+    source of truth whenever one is available.
+    """
+
+    def _registry_with(self, *tool_names):
+        from agent.safety.risk import READ_ONLY
+        from agent.tools.base import BaseTool
+        from agent.tools.registry import ToolRegistry
+
+        registry = ToolRegistry()
+        for n in tool_names:
+            tool = type(
+                n, (BaseTool,),
+                {"name": n, "description": "x", "risk": READ_ONLY, "run": lambda self, **kw: ""},
+            )()
+            registry.register(tool)
+        return registry
+
+    def test_tool_registry_drives_the_summary_not_the_committed_file(self):
+        # The committed file (if any) says nothing about this tool — a live
+        # registry must still surface it.
+        registry = self._registry_with("made_up_probe_tool")
+        prompt = system_prompt.build_system_prompt(tool_registry=registry)
+        self.assertIn("made_up_probe_tool", prompt)
+        self.assertIn("What you can do right now", prompt)
+
+    def test_tool_registry_reflects_removed_tools_too(self):
+        empty_registry = self._registry_with()
+        prompt = system_prompt.build_system_prompt(tool_registry=empty_registry)
+        self.assertIn("none right now", prompt)
+
+    def test_falls_back_to_committed_file_when_no_registry_given(self):
+        self.write(
+            "self/trillion.md",
+            "<!-- SLIM-START -->\nFALLBACK FILE CONTENT\n<!-- SLIM-END -->\n",
+        )
+        prompt = system_prompt.build_system_prompt()
+        self.assertIn("FALLBACK FILE CONTENT", prompt)
+
+    def test_no_registry_and_no_file_omits_the_section(self):
+        prompt = system_prompt.build_system_prompt()
+        self.assertNotIn("What you can do right now", prompt)
 
 
 if __name__ == "__main__":
