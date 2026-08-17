@@ -94,6 +94,38 @@ class TestBuildIndexAndSearch(unittest.TestCase):
         self.assertEqual(search("alpha", index_path=self.index_path), [])
         self.assertEqual(len(search("beta", index_path=self.index_path)), 1)
 
+    def test_rebuild_with_empty_but_readable_vault_replaces_index(self):
+        _write(os.path.join(self.vault, "old.md"), "old content")
+        build_index(self.vault, self.index_path)
+        self.assertEqual(len(search("old", index_path=self.index_path)), 1)
+
+        os.remove(os.path.join(self.vault, "old.md"))
+        indexed = build_index(self.vault, self.index_path)
+
+        self.assertEqual(indexed, 0)
+        self.assertEqual(search("old", index_path=self.index_path), [])
+
+    @unittest.skipIf(os.name != "posix" or os.geteuid() == 0, "requires POSIX permission enforcement")
+    def test_unreadable_vault_preserves_existing_index(self):
+        # index_path lives outside self.vault so chmod'ing the vault doesn't
+        # also block sqlite from reaching the index file itself.
+        _write(os.path.join(self.vault, "keeper.md"), "keeper content")
+        with tempfile.TemporaryDirectory() as index_dir:
+            index_path = os.path.join(index_dir, "notes.db")
+            build_index(self.vault, index_path)
+            self.assertEqual(len(search("keeper", index_path=index_path)), 1)
+
+            os.chmod(self.vault, 0o000)
+            try:
+                # os.path.isdir still succeeds (stat doesn't need to enter
+                # the directory) — only os.walk's scandir actually fails.
+                indexed = build_index(self.vault, index_path)
+            finally:
+                os.chmod(self.vault, 0o700)
+
+            self.assertEqual(indexed, 0)
+            self.assertEqual(len(search("keeper", index_path=index_path)), 1)
+
 
 class TestHealthCheck(unittest.TestCase):
     def test_healthy_for_readable_directory(self):

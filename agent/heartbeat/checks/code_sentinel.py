@@ -4,10 +4,11 @@ sentinel.md, built on the Check protocol (base.py) and GitHubClient
 (../github_client.py).
 
 Explicitly excluded (per the playbook): Dependabot updates, green CI runs,
-Sean's own pushes, and PRs he opened himself — this module never looks at
-push authorship or PR authorship, only CI conclusions, PR staleness,
-dependency alert severity, branch name patterns, and commit-history gaps,
-none of which need that distinction to stay quiet on the excluded cases.
+Sean's own pushes, and PRs he opened himself. CIFailureCheck, DependencyAlertCheck,
+and DormantRepoCheck never need authorship to stay quiet on the excluded
+cases — but StalePRCheck and HotfixPushCheck do, since a PR or a hotfix
+branch push can belong to anyone, so they compare against
+settings.github_username (case-insensitively) before notifying.
 
 Every notice is exactly three sentences: what happened, why it matters,
 what to do next — the playbook's own format.
@@ -50,7 +51,8 @@ class CIFailureCheck:
         new_cursor = dict(cursor)
         for repo in self._repos:
             try:
-                runs = await self._client.list_check_runs(repo, "main")
+                default_branch = await self._client.get_default_branch(repo)
+                runs = await self._client.list_check_runs(repo, default_branch)
             except Exception:  # noqa: BLE001 — one repo's API error must not block the rest
                 logger.exception("ci_failure check failed for %r", repo)
                 continue
@@ -79,10 +81,13 @@ class CIFailureCheck:
 class StalePRCheck:
     name = "stale_pr"
 
-    def __init__(self, client: GitHubClient, repos: list[str], cadence_seconds: float) -> None:
+    def __init__(
+        self, client: GitHubClient, repos: list[str], cadence_seconds: float, username: str = ""
+    ) -> None:
         self._client = client
         self._repos = repos
         self.cadence_seconds = cadence_seconds
+        self._username = username
 
     async def run(self, cursor: dict) -> tuple[list, dict]:
         notices = []
@@ -97,6 +102,9 @@ class StalePRCheck:
             already_notified = set(new_cursor.get(repo, []))
             still_open = set()
             for pr in prs:
+                author = (pr.get("user") or {}).get("login") or ""
+                if self._username and author.lower() == self._username.lower():
+                    continue  # Sean's own PR — excluded entirely, per the playbook
                 number = pr.get("number")
                 still_open.add(number)
                 updated_at = _parse_iso8601(pr["updated_at"])
@@ -164,10 +172,13 @@ class DependencyAlertCheck:
 class HotfixPushCheck:
     name = "hotfix_push"
 
-    def __init__(self, client: GitHubClient, repos: list[str], cadence_seconds: float) -> None:
+    def __init__(
+        self, client: GitHubClient, repos: list[str], cadence_seconds: float, username: str = ""
+    ) -> None:
         self._client = client
         self._repos = repos
         self.cadence_seconds = cadence_seconds
+        self._username = username
 
     async def run(self, cursor: dict) -> tuple[list, dict]:
         notices = []
@@ -187,6 +198,8 @@ class HotfixPushCheck:
                 if known.get(branch_name) == sha:
                     continue
                 known[branch_name] = sha
+                if self._username and sha and await self._is_own_push(repo, sha):
+                    continue  # Sean's own push — excluded entirely, per the playbook
                 notices.append(
                     Notice(
                         severity="warning",
@@ -199,6 +212,20 @@ class HotfixPushCheck:
                 )
             new_cursor[repo] = known
         return notices, new_cursor
+
+    async def _is_own_push(self, repo: str, sha: str) -> bool:
+        """Whether the commit at sha was authored by the watched account.
+
+        A commit-fetch failure defaults to False (notify anyway) rather than
+        raising — missing one authorship check is far cheaper than staying
+        silent on a real hotfix because GitHub hiccuped."""
+        try:
+            commit = await self._client.get_commit(repo, sha)
+        except Exception:  # noqa: BLE001
+            logger.exception("hotfix_push check failed to fetch commit %r for %r", sha, repo)
+            return False
+        author = (commit.get("author") or {}).get("login") or ""
+        return author.lower() == self._username.lower()
 
 
 class DormantRepoCheck:
@@ -254,10 +281,15 @@ def build_code_sentinel_checks(settings) -> list:
         return []
     client = GitHubClient(settings.github_token)
     repos = settings.github_watched_repos
+    username = settings.github_username
     return [
         CIFailureCheck(client, repos, cadence_seconds=settings.heartbeat_fast_cadence_seconds),
-        HotfixPushCheck(client, repos, cadence_seconds=settings.heartbeat_fast_cadence_seconds),
-        StalePRCheck(client, repos, cadence_seconds=settings.heartbeat_slow_cadence_seconds),
+        HotfixPushCheck(
+            client, repos, cadence_seconds=settings.heartbeat_fast_cadence_seconds, username=username
+        ),
+        StalePRCheck(
+            client, repos, cadence_seconds=settings.heartbeat_slow_cadence_seconds, username=username
+        ),
         DependencyAlertCheck(client, repos, cadence_seconds=settings.heartbeat_slow_cadence_seconds),
         DormantRepoCheck(client, repos, cadence_seconds=settings.heartbeat_slow_cadence_seconds),
     ]

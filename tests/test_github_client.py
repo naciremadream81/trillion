@@ -64,6 +64,28 @@ class TestGitHubClient(unittest.TestCase):
         self.assertEqual(result, [{"name": "hotfix/urgent"}])
         self.assertEqual(client.calls[0][0], "/repos/owner/repo/branches")
 
+    def test_get_default_branch_returns_default_branch(self):
+        client = FakeGitHubClient(response={"default_branch": "master"})
+        result = run(client.get_default_branch("owner/repo"))
+        self.assertEqual(result, "master")
+        self.assertEqual(client.calls[0][0], "/repos/owner/repo")
+
+    def test_get_default_branch_falls_back_to_main(self):
+        client = FakeGitHubClient(response={})
+        result = run(client.get_default_branch("owner/repo"))
+        self.assertEqual(result, "main")
+
+    def test_get_commit_returns_commit(self):
+        client = FakeGitHubClient(response={"author": {"login": "sean"}})
+        result = run(client.get_commit("owner/repo", "abc123"))
+        self.assertEqual(result, {"author": {"login": "sean"}})
+        self.assertEqual(client.calls[0][0], "/repos/owner/repo/commits/abc123")
+
+    def test_get_commit_defaults_to_empty_dict(self):
+        client = FakeGitHubClient(response=None)
+        result = run(client.get_commit("owner/repo", "abc123"))
+        self.assertEqual(result, {})
+
     def test_get_participation_returns_dict(self):
         client = FakeGitHubClient(response={"all": [1, 2, 3]})
         result = run(client.get_participation("owner/repo"))

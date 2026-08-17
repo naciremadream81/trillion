@@ -275,6 +275,72 @@ class SelfApprovalTests(GateTestCase):
         self.assertIn("x", result)
 
 
+class DenialOverrideTests(GateTestCase):
+    """
+    A genuine human turn arriving is necessary but not sufficient: the model
+    calling confirm_action over an explicit "no" must not execute the frozen
+    action either.
+    """
+
+    def test_confirming_after_an_explicit_no_is_refused(self):
+        history = [human("write me a thing"), assistant()]
+        self.gate.evaluate(self.call(content="x"), history)
+        action_id = self.repo.list_pending()[0]["id"]
+        history.append(human("no, don't do that"))
+
+        result = self.run_async(self.gate.confirm(action_id, history))
+        self.assertIn("REFUSED", result)
+        self.assertEqual(self.write.calls, [], "the model ran a denied action")
+        self.assertEqual(self.repo.get(action_id)["status"], storage.PENDING)
+
+    def test_confirming_after_stop_or_cancel_is_refused(self):
+        for reply in ("stop", "cancel that", "wait, no", "never mind"):
+            with self.subTest(reply=reply):
+                history = [human("write me a thing"), assistant()]
+                self.gate.evaluate(self.call(content="x"), history)
+                action_id = self.repo.list_pending()[0]["id"]
+                history.append(human(reply))
+
+                result = self.run_async(self.gate.confirm(action_id, history))
+                self.assertIn("REFUSED", result)
+                self.assertEqual(self.write.calls, [])
+
+    def test_denial_override_is_audited(self):
+        history = [human("write me a thing"), assistant()]
+        self.gate.evaluate(self.call(content="x"), history)
+        action_id = self.repo.list_pending()[0]["id"]
+        history.append(human("no"))
+        self.run_async(self.gate.confirm(action_id, history))
+
+        events = [e["event"] for e in self.repo.recent_audit()]
+        self.assertIn(storage.EVENT_DENIAL_OVERRIDE_REFUSED, events)
+
+    def test_the_action_survives_a_denial_override_and_can_still_be_approved(self):
+        history = [human("write me a thing"), assistant()]
+        self.gate.evaluate(self.call(content="x"), history)
+        action_id = self.repo.list_pending()[0]["id"]
+        history.append(human("no"))
+        self.run_async(self.gate.confirm(action_id, history))
+
+        history.append(human("actually yes, go ahead"))
+        result = self.run_async(self.gate.confirm(action_id, history))
+        self.assertEqual(self.write.calls, [{"content": "x"}])
+        self.assertIn("x", result)
+
+    def test_normal_affirmative_replies_are_not_flagged_as_denials(self):
+        for reply in ("yes", "yes, go ahead", "do it", "sure", "sounds good", "ok"):
+            with self.subTest(reply=reply):
+                self.write.calls.clear()
+                history = [human("write me a thing"), assistant()]
+                self.gate.evaluate(self.call(content="x"), history)
+                action_id = self.repo.list_pending()[0]["id"]
+                history.append(human(reply))
+
+                result = self.run_async(self.gate.confirm(action_id, history))
+                self.assertNotIn("REFUSED", result)
+                self.assertEqual(self.write.calls, [{"content": "x"}])
+
+
 class LastHumanTurnIndexTests(unittest.TestCase):
     def test_empty_history_has_no_human_turn(self):
         self.assertEqual(last_human_turn_index([]), -1)

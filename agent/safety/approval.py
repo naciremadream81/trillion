@@ -24,6 +24,8 @@ action #47 runs #47's arguments, whatever the model would prefer by now.
 
 from __future__ import annotations
 
+import re
+
 from ..providers.base import ToolCall
 from . import storage
 from .risk import (
@@ -60,6 +62,21 @@ def last_human_turn_index(history: list[dict]) -> int:
         if msg.get("role") == "user" and isinstance(msg.get("content"), str):
             return i
     return -1
+
+
+# Word-boundary match, case-insensitive: "no", "don't"/"do not", "stop",
+# "cancel", "wait", "never mind"/"nevermind". Deliberately a keyword net, not
+# NLP — it's a safety net for the common ways of saying no, not a parser for
+# every possible phrasing. A false negative here still requires the model to
+# misread Sean's turn as consent; a false positive just makes it ask again.
+_DENIAL_PATTERN = re.compile(
+    r"\b(no|nope|don'?t|do not|stop|cancel|wait|never ?mind)\b", re.IGNORECASE
+)
+
+
+def _reads_as_denial(text: str) -> bool:
+    """True if `text` reads like Sean saying no rather than yes."""
+    return bool(_DENIAL_PATTERN.search(text))
 
 
 def _summarize(tool_name: str, arguments: dict | None) -> str:
@@ -205,7 +222,8 @@ class Gate:
         # The self-approval defense. A genuine human turn — content is a
         # string, not a list of tool_result blocks — must have arrived after
         # the action was parked.
-        if last_human_turn_index(history) < action["history_index"]:
+        human_index = last_human_turn_index(history)
+        if human_index < action["history_index"]:
             self.repo.log(
                 storage.EVENT_SELF_APPROVAL_REFUSED,
                 tool_name=action["tool_name"],
@@ -216,6 +234,24 @@ class Gate:
                 "Sean has not said anything since this action was parked. Ask "
                 "him, out loud, in your reply, and wait for his answer. His "
                 "next message is what unlocks this."
+            )
+
+        # A genuine human turn arriving is necessary but not sufficient: "no,
+        # don't do that" is a real turn too, and a model that calls
+        # confirm_action over it anyway (mistakenly or otherwise) must not
+        # get the frozen action executed. This is a keyword net, not NLP —
+        # it catches the common ways of saying no, not every phrasing.
+        if _reads_as_denial(history[human_index]["content"]):
+            self.repo.log(
+                storage.EVENT_DENIAL_OVERRIDE_REFUSED,
+                tool_name=action["tool_name"],
+                action_id=action_id,
+            )
+            return (
+                f"[REFUSED — action #{action_id} was not approved.]\n"
+                "Sean's last message reads like a refusal, not a yes. Do not "
+                "call confirm_action again for this id unless he actually "
+                "agrees."
             )
 
         # Pausing after the ask but before the approval still blocks: this is

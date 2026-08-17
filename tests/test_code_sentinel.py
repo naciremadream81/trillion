@@ -35,9 +35,23 @@ class FakeClient:
         self.alerts = {}
         self.branches = {}
         self.participation = {}
+        self.default_branches = {}
+        self.commits = {}
         self.error_repos = set()
+        self.check_runs_calls = []
+
+    async def get_default_branch(self, repo):
+        if repo in self.error_repos:
+            raise RuntimeError("boom")
+        return self.default_branches.get(repo, "main")
+
+    async def get_commit(self, repo, sha):
+        if repo in self.error_repos:
+            raise RuntimeError("boom")
+        return self.commits.get((repo, sha), {})
 
     async def list_check_runs(self, repo, ref):
+        self.check_runs_calls.append((repo, ref))
         if repo in self.error_repos:
             raise RuntimeError("boom")
         return self.check_runs.get(repo, [])
@@ -102,6 +116,17 @@ class TestCIFailureCheck(unittest.TestCase):
         self.assertEqual(notices, [])
         self.assertEqual(cursor, {})
 
+    def test_uses_repos_actual_default_branch_not_hardcoded_main(self):
+        client = FakeClient()
+        client.default_branches["owner/repo"] = "master"
+        client.check_runs["owner/repo"] = [
+            {"id": 42, "name": "pytest", "status": "completed", "conclusion": "failure", "started_at": "2026-01-01T00:00:00Z"}
+        ]
+        check = CIFailureCheck(client, ["owner/repo"], cadence_seconds=60.0)
+        notices, _ = run(check.run({}))
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(client.check_runs_calls, [("owner/repo", "master")])
+
 
 class TestStalePRCheck(unittest.TestCase):
     def test_pr_older_than_48h_notifies(self):
@@ -136,6 +161,27 @@ class TestStalePRCheck(unittest.TestCase):
         check = StalePRCheck(client, ["owner/repo"], cadence_seconds=1800.0)
         _, cursor = run(check.run({"owner/repo": [7]}))
         self.assertEqual(cursor["owner/repo"], [])
+
+    def test_owners_own_stale_pr_is_not_notified(self):
+        client = FakeClient()
+        old = datetime.now(timezone.utc) - timedelta(hours=49)
+        client.pull_requests["owner/repo"] = [
+            {"number": 7, "title": "Fix thing", "updated_at": iso(old), "user": {"login": "Sean"}}
+        ]
+        check = StalePRCheck(client, ["owner/repo"], cadence_seconds=1800.0, username="sean")
+        notices, cursor = run(check.run({}))
+        self.assertEqual(notices, [])
+        self.assertEqual(cursor["owner/repo"], [])
+
+    def test_other_authors_stale_pr_still_notified_when_username_set(self):
+        client = FakeClient()
+        old = datetime.now(timezone.utc) - timedelta(hours=49)
+        client.pull_requests["owner/repo"] = [
+            {"number": 7, "title": "Fix thing", "updated_at": iso(old), "user": {"login": "someone-else"}}
+        ]
+        check = StalePRCheck(client, ["owner/repo"], cadence_seconds=1800.0, username="sean")
+        notices, _ = run(check.run({}))
+        self.assertEqual(len(notices), 1)
 
 
 class TestDependencyAlertCheck(unittest.TestCase):
@@ -202,6 +248,34 @@ class TestHotfixPushCheck(unittest.TestCase):
         notices, _ = run(check.run({}))
         self.assertEqual(notices, [])
 
+    def test_owners_own_hotfix_push_is_not_notified(self):
+        client = FakeClient()
+        client.branches["owner/repo"] = [{"name": "hotfix/urgent-fix", "commit": {"sha": "abc123"}}]
+        client.commits[("owner/repo", "abc123")] = {"author": {"login": "Sean"}}
+        check = HotfixPushCheck(client, ["owner/repo"], cadence_seconds=60.0, username="sean")
+        notices, cursor = run(check.run({}))
+        self.assertEqual(notices, [])
+        # Still tracked, so the same push isn't re-fetched/re-evaluated next tick.
+        self.assertEqual(cursor["owner/repo"]["hotfix/urgent-fix"], "abc123")
+
+    def test_other_authors_hotfix_push_still_notified_when_username_set(self):
+        client = FakeClient()
+        client.branches["owner/repo"] = [{"name": "hotfix/urgent-fix", "commit": {"sha": "abc123"}}]
+        client.commits[("owner/repo", "abc123")] = {"author": {"login": "someone-else"}}
+        check = HotfixPushCheck(client, ["owner/repo"], cadence_seconds=60.0, username="sean")
+        notices, _ = run(check.run({}))
+        self.assertEqual(len(notices), 1)
+
+    def test_commit_fetch_failure_defaults_to_notifying(self):
+        client = FakeClient()
+        client.branches["owner/repo"] = [{"name": "hotfix/urgent-fix", "commit": {"sha": "abc123"}}]
+        # No entry in client.commits and no error_repos entry that would
+        # short-circuit list_branches — get_commit simply returns {} here,
+        # which must not be mistaken for a match.
+        check = HotfixPushCheck(client, ["owner/repo"], cadence_seconds=60.0, username="sean")
+        notices, _ = run(check.run({}))
+        self.assertEqual(len(notices), 1)
+
 
 class TestDormantRepoCheck(unittest.TestCase):
     def test_dormant_after_prior_activity_notifies(self):
@@ -255,6 +329,14 @@ class TestBuildCodeSentinelChecks(unittest.TestCase):
             names,
             {"ci_failure", "stale_pr", "dependency_alert", "hotfix_push", "dormant_repo"},
         )
+
+    def test_github_username_is_threaded_into_stale_pr_and_hotfix_push(self):
+        settings = Settings(
+            github_token="tok", github_watched_repos=["owner/repo"], github_username="sean"
+        )
+        checks = {c.name: c for c in build_code_sentinel_checks(settings)}
+        self.assertEqual(checks["stale_pr"]._username, "sean")
+        self.assertEqual(checks["hotfix_push"]._username, "sean")
 
 
 if __name__ == "__main__":

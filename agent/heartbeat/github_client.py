@@ -53,6 +53,18 @@ class GitHubClient:
         data = await self._get(f"/repos/{repo}/branches", params={"per_page": "100"})
         return data or []
 
+    async def get_default_branch(self, repo: str) -> str:
+        """The repo's default branch. Never assume "main" — watched repos
+        are not required to use that name (e.g. "master", "develop")."""
+        data = await self._get(f"/repos/{repo}")
+        return (data or {}).get("default_branch") or "main"
+
+    async def get_commit(self, repo: str, sha: str) -> dict:
+        """A single commit, including its GitHub author/committer identity —
+        used to tell whether a push was the watched account's own."""
+        data = await self._get(f"/repos/{repo}/commits/{sha}")
+        return data or {}
+
     async def get_participation(self, repo: str) -> dict:
         """Weekly commit counts (all branches) for the last 52 weeks, oldest first."""
         data = await self._get(f"/repos/{repo}/stats/participation")

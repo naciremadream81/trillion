@@ -56,6 +56,7 @@ EVENT_EXPIRED = "expired"
 EVENT_EXECUTED = "executed"
 EVENT_BLOCKED_PAUSED = "blocked_paused"
 EVENT_SELF_APPROVAL_REFUSED = "self_approval_refused"
+EVENT_DENIAL_OVERRIDE_REFUSED = "denial_override_refused"
 EVENT_PAUSED = "paused"
 EVENT_RESUMED = "resumed"
 
