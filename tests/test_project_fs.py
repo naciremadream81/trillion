@@ -12,7 +12,6 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
 
 import agent.tools.project_fs as project_fs
 from agent.tools.project_fs import (

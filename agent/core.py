@@ -87,33 +87,6 @@ class Agent:
         # than describing a registry that's about to change out from under it.
         self.system = self._build_system_prompt()
 
-        # Give the model the one tool it needs to act on Sean's yes. Registered
-        # here rather than in build_registry() because it has to be bound to
-        # *this* agent's history — that binding is the self-approval defense.
-        if gate is not None and tool_registry is not None:
-            from .tools.confirm import ConfirmActionTool
-
-            tool_registry.register(
-                ConfirmActionTool(gate, lambda: self.history)
-            )
-
-        # Tier 4: remember_fact / forget_fact. Registered here (not
-        # build_registry()) for the same reason as ConfirmActionTool above —
-        # they need to reach back into *this* agent's running system prompt
-        # via update_memory(). Gated on `gate is not None` for the same
-        # reason as ConfirmActionTool too: forget_fact is HARDLINE, and
-        # without a gate present nothing would intercept it — it would just
-        # run. A spawned Factory specialist (agent/factory/dispatch.py)
-        # never passes a gate, so this also keeps memory tools out of its
-        # restricted registry unless its allowlist explicitly grants them.
-        if gate is not None and tool_registry is not None:
-            from .memory import DEFAULT_MEMORY_PATH
-            from .tools.memory import ForgetFactTool, RememberFactTool
-
-            path = memory_path or DEFAULT_MEMORY_PATH
-            tool_registry.register(RememberFactTool(path, self.update_memory))
-            tool_registry.register(ForgetFactTool(path, self.update_memory))
-
     # ── Public interface ──────────────────────────────────────────────────────
 
     async def turn(self, user_input: str) -> AsyncIterator[str]:

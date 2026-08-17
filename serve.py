@@ -33,10 +33,6 @@ Binds to TRILLION_WEB_HOST (default 127.0.0.1). Binding anything else
 requires TRILLION_WEB_AUTH_TOKEN to be set — see agent/security/
 startup_guard.py.
 
-Binds to TRILLION_WEB_HOST (default 127.0.0.1). Binding anything else
-requires TRILLION_WEB_AUTH_TOKEN to be set — see agent/security/
-startup_guard.py.
-
 This is the server the systemd unit runs in place of `python -m http.server`.
 """
 
@@ -94,7 +90,6 @@ _agent_sessions: "OrderedDict[str, object]" = OrderedDict()
 # Compatibility for older tests/helpers that reset serve._agent. Browser chat
 # now uses _agent_sessions instead.
 _agent = None
-_gate = None
 
 
 def _ensure_cost_tracking():
