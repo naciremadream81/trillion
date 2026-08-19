@@ -1,30 +1,23 @@
 """
 Piper text-to-speech (Voice V1 TTS) — local, offline, free.
 
-The default TTS provider (see agent/config.py's tts_provider / TTS_PROVIDER).
-ElevenLabs (agent/voice/elevenlabs_tts.py) is now available as an opt-in
-alternative for Sean's paid plan, but Piper stays the default: no API key, no
-per-character cost, no plan gate, works without internet. Trade-off is voice
-quality — synthetic, not a human clone — in exchange for zero ongoing cost or
-dependency on a vendor.
+ElevenLabs' free tier blocks all API voice access (premade library voices
+need a paid plan; so does creating a custom voice via Voice Design or
+Instant Cloning — confirmed live, not assumed). Piper runs the model
+on-device instead: no API key, no per-character cost, no plan gate, works
+without internet. Trade-off is voice quality — synthetic, not a human
+clone — in exchange for zero ongoing cost or dependency on a vendor.
 
 The voice model is loaded once and reused across requests; loading the
 ~63MB ONNX model per-request would make every reply noticeably slower.
 Synthesis is CPU-bound and blocking, so callers should run it in a thread
 (see serve.py, which uses loop.run_in_executor).
 
-serve.py's asyncio default executor is a *multi-worker* thread pool, not a
-single background thread — so two first-requests can race here. Two browser
-tabs opened at once, or the startup warm-up task (serve.py's _warm_tts)
-racing a real user's first turn, can both see `_loaded is None` at the same
-time and both call PiperVoice.load(). That's not just wasted work: it loads
-the 63MB model twice concurrently and leaves `_loaded` set to whichever
-PiperVoice.load() call happens to finish (assign) last, while any synthesis
-already in flight on the other one keeps using an object nothing else can
-reach. The lock below closes that window with the standard double-checked
-pattern: check unlocked (the fast path, once warm), then re-check inside the
-lock before paying for a load, since another thread may have finished loading
-while this one was waiting to acquire it.
+That "loaded once" is lazy, which used to mean the *first* voice turn
+after every process restart paid the load cost — measured at ~4s on this
+Pi, and by far the largest single number in the smooth-voice_2 Tier 1
+breakdown. warm_up() moves that cost to server startup, where nobody is
+waiting on it; serve.py calls it in the background at boot.
 """
 
 from __future__ import annotations
@@ -36,16 +29,20 @@ import wave
 
 from piper.voice import PiperVoice
 
-# The loaded voice and the path it was loaded from are held as ONE tuple in a
-# single global, rather than as two separate globals. That keeps the pair
-# atomic for the unlocked fast-path read in _load_voice below: two separate
-# global writes would let a reader land between them and observe (new voice,
-# old path) — i.e. a caller asking for the OLD path would be handed the NEW
-# voice object. Unreachable today (PIPER_VOICE_PATH never changes mid-process,
-# and this starts as None so the very first load is safe either way), but one
-# tuple closes the window permanently at no cost.
+# The loaded voice and the path it came from are published as ONE tuple in a
+# single global, rather than as two. That keeps the pair atomic for the
+# unlocked fast-path read in _load_voice: two separate writes would let a
+# reader land between them and see (new voice, old path), handing a caller
+# asking for the OLD path the NEW voice object. Unreachable today
+# (PIPER_VOICE_PATH doesn't change mid-process, and this starts as None so the
+# first load is safe either way), but one tuple closes it permanently.
 _loaded: tuple[str, PiperVoice] | None = None
 _voice_lock = threading.Lock()
+
+# Short, cheap, and never heard by anyone — just enough audio to force the
+# first ONNX inference during warm_up(). Loading the model and *running* it
+# are separate costs; only paying the first is a half-warm cache.
+_WARM_UP_TEXT = "Ready."
 
 
 class SynthesisError(RuntimeError):
@@ -55,19 +52,18 @@ class SynthesisError(RuntimeError):
 def _load_voice(model_path: str) -> PiperVoice:
     global _loaded
     # Fast path: no lock once a voice is loaded and matches. This runs on every
-    # synthesis call, and taking the lock unconditionally would serialize
-    # otherwise-independent requests on the common case. One tuple read is
-    # atomic, so this can never see a half-published pair.
+    # synthesis call, and locking unconditionally would serialize otherwise
+    # independent requests on the common case. One tuple read is atomic, so it
+    # can never observe a half-published pair.
     loaded = _loaded
     if loaded is not None and loaded[0] == model_path:
         return loaded[1]
     with _voice_lock:
-        # Re-check inside the lock: another thread may have loaded this exact
-        # model while we waited to acquire it, in which case reuse its work
-        # rather than loading a second 63MB copy. Without this, serve.py's
-        # default multi-worker executor lets two concurrent first-requests
-        # (two browser tabs, or the startup warm-up racing a real user turn)
-        # both observe None and both call PiperVoice.load.
+        # Re-check under the lock: another thread may have loaded this exact
+        # model while we waited. Without this, serve.py's default multi-worker
+        # executor lets two concurrent first-requests — two browser tabs, or
+        # the startup warm-up racing a real user turn — both see None and both
+        # load the ~63MB model, leaving one copy unreachable.
         loaded = _loaded
         if loaded is not None and loaded[0] == model_path:
             return loaded[1]
@@ -87,3 +83,24 @@ def synthesize(text: str, model_path: str) -> bytes:
     with wave.open(buf, "wb") as wav_file:
         voice.synthesize_wav(text, wav_file)
     return buf.getvalue()
+
+
+def is_warm(model_path: str) -> bool:
+    """Whether synthesize() would skip the model load for this path."""
+    loaded = _loaded
+    return loaded is not None and loaded[0] == model_path
+
+
+def warm_up(model_path: str) -> None:
+    """
+    Load the voice model and run one throwaway synthesis, so the first real
+    request doesn't have to.
+
+    Blocking and CPU-bound like synthesize() — call it from a thread. Raises
+    SynthesisError when the model is missing so a caller can report *why* it
+    stayed cold; serve.py logs that and carries on, since TTS being cold is a
+    slow first reply, not a broken server.
+    """
+    if is_warm(model_path):
+        return
+    synthesize(_WARM_UP_TEXT, model_path)

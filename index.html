@@ -3198,6 +3198,11 @@
         audio.onplaying = () => { vlMark(turnId, 'firstSoundPlaying'); vlReport(turnId); };
         audio.onended = resolve;
         audio.onerror = resolve;
+        // Also carried over from main's parallel fix (PR #19). The abort
+        // listener above already covers barge-in, but onpause settles the
+        // promise for ANY pause — including one this code didn't initiate —
+        // so the object URL can't leak and the chain can't hang.
+        audio.onpause = resolve;
         audio.play().catch(resolve);
       });
       URL.revokeObjectURL(url);
@@ -3226,6 +3231,11 @@
       pendingSpeech = 0;
       held = null;
       turnStreamComplete = false;
+      // Carried over from the parallel barge-in fix that landed on main
+      // (PR #19): drop the orb's voice brightness here too. Without it an
+      // interruption leaves the orb lit as though Trillion were still
+      // speaking, until something else happens to reset it.
+      window.setVoiceBright && window.setVoiceBright(0.0);
     }
   })();
   </script>

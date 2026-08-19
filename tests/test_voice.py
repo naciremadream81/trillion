@@ -19,10 +19,11 @@ from unittest import mock
 from aiohttp.test_utils import AioHTTPTestCase
 
 import serve
+from agent.voice import piper_tts
 from agent.voice.deepgram_stt import TranscriptionError, transcribe
 from agent.voice.elevenlabs_tts import SynthesisError as ElevenLabsSynthesisError
 from agent.voice.elevenlabs_tts import synthesize as elevenlabs_synthesize
-from agent.voice.piper_tts import SynthesisError, synthesize
+from agent.voice.piper_tts import SynthesisError, is_warm, synthesize, warm_up
 
 
 class TestDeepgramGuard(unittest.IsolatedAsyncioTestCase):
@@ -39,56 +40,54 @@ class TestPiperGuard(unittest.TestCase):
         self.assertIn("not found", str(ctx.exception))
 
 
-class TestPiperWarmUp(unittest.IsolatedAsyncioTestCase):
-    # Locks in serve.py's _warm_tts never-crash-startup contract: a missing/
-    # misconfigured Piper model must never take the startup sequence down,
-    # even though the background synthesis it kicks off will itself fail
-    # with SynthesisError (that failure lives on the task object, not on
-    # _warm_tts's own call stack — see that function's docstring on why it's
-    # launched as a background task rather than awaited inline).
+class TestPiperWarmUp(unittest.TestCase):
+    """
+    smooth-voice_2 Tier 4: loading the ~63MB ONNX model lazily meant the first
+    spoken reply after every restart paid ~4s for it. warm_up() moves that to
+    server startup. Loading a real model needs the (gitignored) voice file, so
+    these cover the contract around it — the cache check and the failure mode —
+    rather than the load itself.
+    """
+
     def setUp(self):
-        self._prev = os.environ.get("PIPER_VOICE_PATH")
-        self._prev_provider = os.environ.get("TTS_PROVIDER")
-        os.environ["PIPER_VOICE_PATH"] = "/nonexistent/path/voice.onnx"
-        # Pin TTS_PROVIDER too, not just PIPER_VOICE_PATH: tests/__init__.py
-        # calls load_dotenv() before collection, so a real .env value (e.g.
-        # TTS_PROVIDER=elevenlabs, the whole point of this batch) would
-        # otherwise leak in here. _warm_tts skips straight past the Piper
-        # warm-up and leaves app["tts_warm_task"] as None when tts_provider
-        # != "piper", which is exactly what this test asserts against — see
-        # commit e84f7ae for the same env-leak failure class.
-        os.environ["TTS_PROVIDER"] = "piper"
+        self._prev_loaded = piper_tts._loaded
 
     def tearDown(self):
-        if self._prev is None:
-            os.environ.pop("PIPER_VOICE_PATH", None)
-        else:
-            os.environ["PIPER_VOICE_PATH"] = self._prev
-        if self._prev_provider is None:
-            os.environ.pop("TTS_PROVIDER", None)
-        else:
-            os.environ["TTS_PROVIDER"] = self._prev_provider
+        piper_tts._loaded = self._prev_loaded
 
-    async def test_warm_up_does_not_raise_on_missing_model(self):
-        app = {}
-        await serve._warm_tts(app)  # must not raise
-        task = app.get("tts_warm_task")
-        self.assertIsNotNone(task)
-        # The task itself is allowed to fail (missing model -> SynthesisError
-        # inside the thread) — that failure must stay contained to the task,
-        # never propagate out and crash the server. Retrieve it so the
-        # exception doesn't get flagged as "never retrieved" by asyncio.
-        with contextlib.suppress(SynthesisError):
-            await task
+    def test_not_warm_before_anything_is_loaded(self):
+        piper_tts._loaded = None
+        self.assertFalse(is_warm("/some/voice.onnx"))
+
+    def test_warm_only_for_the_path_actually_loaded(self):
+        piper_tts._loaded = ("/loaded/voice.onnx", object())  # stand-in for a loaded PiperVoice
+        self.assertTrue(is_warm("/loaded/voice.onnx"))
+        self.assertFalse(is_warm("/a/different/voice.onnx"))
+
+    def test_warm_up_is_a_no_op_when_already_warm(self):
+        # The path doesn't exist, so reaching the load would raise. Not
+        # raising is the proof that it short-circuited on the cache.
+        piper_tts._loaded = ("/nonexistent/path/voice.onnx", object())
+        warm_up("/nonexistent/path/voice.onnx")
+
+    def test_warm_up_raises_clear_error_for_a_missing_model(self):
+        piper_tts._loaded = None
+        with self.assertRaises(SynthesisError) as ctx:
+            warm_up("/nonexistent/path/voice.onnx")
+        self.assertIn("not found", str(ctx.exception))
 
 
-class TestWarmTtsSkipsForNonPiperProvider(unittest.IsolatedAsyncioTestCase):
-    # The assertion that would have caught the env-leak regression above:
-    # _warm_tts must leave app["tts_warm_task"] as None (and do no work at
-    # all) when settings.tts_provider != "piper" — there's nothing to warm
-    # on the ElevenLabs path (see _warm_tts's own docstring). This is the
-    # opposite side of TestPiperWarmUp: that class exercises the
-    # tts_provider == "piper" path, this exercises everything else.
+class TestWarmPiperVoiceSkipsForNonPiperProvider(unittest.IsolatedAsyncioTestCase):
+    """
+    _warm_piper_voice must do nothing at all when Piper isn't the configured
+    provider. With TTS_PROVIDER=elevenlabs, /api/tts never touches the ONNX
+    model, so loading 63MB and burning a core for seconds at every boot buys
+    nothing. Pinning TTS_PROVIDER here rather than inheriting it also keeps
+    this suite honest about the env-leak class of failure that commit e84f7ae
+    fixed: tests/__init__.py calls load_dotenv(), so an unpinned test silently
+    takes whatever .env happens to say.
+    """
+
     def setUp(self):
         self._prev = os.environ.get("TTS_PROVIDER")
         os.environ["TTS_PROVIDER"] = "elevenlabs"
@@ -99,10 +98,10 @@ class TestWarmTtsSkipsForNonPiperProvider(unittest.IsolatedAsyncioTestCase):
         else:
             os.environ["TTS_PROVIDER"] = self._prev
 
-    async def test_skips_piper_warm_up_when_provider_is_not_piper(self):
+    async def test_skips_warm_up_when_provider_is_not_piper(self):
         app = {}
-        await serve._warm_tts(app)
-        self.assertIsNone(app.get("tts_warm_task"))
+        await serve._warm_piper_voice(app)
+        self.assertIsNone(app.get("piper_warmup_task"))
 
 
 def _fake_provider_and_registry():
@@ -126,57 +125,6 @@ def _fake_provider_and_registry():
 
     serve._provider = FakeProvider()
     serve._registry = ToolRegistry()
-
-
-class TestStopTtsWarmCleanup(AioHTTPTestCase):
-    """
-    Regression test for the shutdown crash fixed in serve.py's
-    _stop_tts_warm: runs a REAL web.AppRunner (aiohttp.test_utils.TestServer
-    wraps one) through both startup and cleanup with PIPER_VOICE_PATH
-    pointed at a model that doesn't exist, so tts_warm_task fails with
-    SynthesisError shortly after startup — the exact scenario the reviewer
-    reproduced ("RUNNER CLEANUP RAISED: SynthesisError: ..."). Before the
-    fix, tearing the runner down (which asyncTearDown does automatically via
-    self.client.close()) would let that SynthesisError escape
-    runner.cleanup() and fail this test during teardown.
-    """
-
-    def setUp(self):
-        self._prev_path = os.environ.get("PIPER_VOICE_PATH")
-        self._prev_provider = os.environ.get("TTS_PROVIDER")
-        os.environ["PIPER_VOICE_PATH"] = "/nonexistent/path/voice.onnx"
-        os.environ["TTS_PROVIDER"] = "piper"
-
-    def tearDown(self):
-        if self._prev_path is None:
-            os.environ.pop("PIPER_VOICE_PATH", None)
-        else:
-            os.environ["PIPER_VOICE_PATH"] = self._prev_path
-        if self._prev_provider is None:
-            os.environ.pop("TTS_PROVIDER", None)
-        else:
-            os.environ["TTS_PROVIDER"] = self._prev_provider
-        serve._provider = None
-        serve._registry = None
-
-    async def get_application(self):
-        _fake_provider_and_registry()
-        return serve.build_app()
-
-    async def test_cleanup_does_not_raise_when_warm_task_failed(self):
-        task = self.app.get("tts_warm_task")
-        self.assertIsNotNone(task)
-        # Let the warm-up actually finish (and fail) before cleanup runs,
-        # mirroring the reviewer's repro ("seconds after startup") rather
-        # than racing a still-pending task.
-        with contextlib.suppress(SynthesisError):
-            await task
-        # No explicit assertion beyond this point: asyncTearDown() (run
-        # automatically right after this method returns) closes the
-        # TestClient, which tears down the real AppRunner underneath it and
-        # runs every on_cleanup hook, including _stop_tts_warm. Before the
-        # fix, that raised SynthesisError out of runner.cleanup() and this
-        # test would error during teardown instead of passing normally.
 
 
 class TestSynthesizeSpeechProviderRouting(AioHTTPTestCase):

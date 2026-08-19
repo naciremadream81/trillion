@@ -275,6 +275,175 @@ class SelfApprovalTests(GateTestCase):
         self.assertIn("x", result)
 
 
+class DenialOverrideTests(GateTestCase):
+    """
+    A genuine human turn arriving is necessary but not sufficient: the model
+    calling confirm_action over an explicit "no" must not execute the frozen
+    action either.
+    """
+
+    def test_confirming_after_an_explicit_no_is_refused(self):
+        history = [human("write me a thing"), assistant()]
+        self.gate.evaluate(self.call(content="x"), history)
+        action_id = self.repo.list_pending()[0]["id"]
+        history.append(human("no, don't do that"))
+
+        result = self.run_async(self.gate.confirm(action_id, history))
+        self.assertIn("REFUSED", result)
+        self.assertEqual(self.write.calls, [], "the model ran a denied action")
+        self.assertEqual(self.repo.get(action_id)["status"], storage.PENDING)
+
+    def test_confirming_after_stop_or_cancel_is_refused(self):
+        for reply in ("stop", "cancel that", "wait, no", "never mind"):
+            with self.subTest(reply=reply):
+                history = [human("write me a thing"), assistant()]
+                self.gate.evaluate(self.call(content="x"), history)
+                action_id = self.repo.list_pending()[0]["id"]
+                history.append(human(reply))
+
+                result = self.run_async(self.gate.confirm(action_id, history))
+                self.assertIn("REFUSED", result)
+                self.assertEqual(self.write.calls, [])
+
+    def test_denial_override_is_audited(self):
+        history = [human("write me a thing"), assistant()]
+        self.gate.evaluate(self.call(content="x"), history)
+        action_id = self.repo.list_pending()[0]["id"]
+        history.append(human("no"))
+        self.run_async(self.gate.confirm(action_id, history))
+
+        events = [e["event"] for e in self.repo.recent_audit()]
+        self.assertIn(storage.EVENT_DENIAL_OVERRIDE_REFUSED, events)
+
+    def test_the_action_survives_a_denial_override_and_can_still_be_approved(self):
+        history = [human("write me a thing"), assistant()]
+        self.gate.evaluate(self.call(content="x"), history)
+        action_id = self.repo.list_pending()[0]["id"]
+        history.append(human("no"))
+        self.run_async(self.gate.confirm(action_id, history))
+
+        history.append(human("actually yes, go ahead"))
+        result = self.run_async(self.gate.confirm(action_id, history))
+        self.assertEqual(self.write.calls, [{"content": "x"}])
+        self.assertIn("x", result)
+
+    def test_normal_affirmative_replies_are_not_flagged_as_denials(self):
+        for reply in ("yes", "yes, go ahead", "do it", "sure", "sounds good", "ok"):
+            with self.subTest(reply=reply):
+                self.write.calls.clear()
+                history = [human("write me a thing"), assistant()]
+                self.gate.evaluate(self.call(content="x"), history)
+                action_id = self.repo.list_pending()[0]["id"]
+                history.append(human(reply))
+
+                result = self.run_async(self.gate.confirm(action_id, history))
+                self.assertNotIn("REFUSED", result)
+                self.assertEqual(self.write.calls, [{"content": "x"}])
+
+
+class AffirmativeConsentTests(GateTestCase):
+    """
+    Absence of a "no" is not a "yes".
+
+    Screening only for denial keywords means every turn that misses that small
+    net counts as approval — "not yet", "why is that necessary?", "I haven't
+    decided" would each execute a consequential action Sean never agreed to.
+    The gate's promise is an *explicit* yes, so it requires one.
+
+    The asymmetry is deliberate: an unrecognized yes costs one more round trip,
+    an unrecognized no costs an action he didn't authorize.
+    """
+
+    def _park(self, history):
+        self.gate.evaluate(self.call(content="x"), history)
+        return self.repo.list_pending()[0]["id"]
+
+    def test_ambiguous_replies_are_not_treated_as_approval(self):
+        for reply in (
+            "not yet",
+            "why is that necessary?",
+            "I haven't decided",
+            "hmm",
+            "what would that even do",
+            "hold off for a sec",
+        ):
+            with self.subTest(reply=reply):
+                self.write.calls.clear()
+                history = [human("write me a thing"), assistant()]
+                action_id = self._park(history)
+                history.append(human(reply))
+
+                result = self.run_async(self.gate.confirm(action_id, history))
+                self.assertIn("REFUSED", result)
+                self.assertEqual(
+                    self.write.calls, [], f"{reply!r} was read as consent"
+                )
+                self.assertEqual(self.repo.get(action_id)["status"], storage.PENDING)
+
+    def test_unclear_consent_is_audited_separately_from_a_denial(self):
+        # Distinct events because they mean different things: a denial is Sean
+        # saying no, an unclear reply may just mean the keyword net is too
+        # narrow for how he talks. Only one of those is a tuning signal.
+        history = [human("write me a thing"), assistant()]
+        action_id = self._park(history)
+        history.append(human("why is that necessary?"))
+        self.run_async(self.gate.confirm(action_id, history))
+
+        events = [e["event"] for e in self.repo.recent_audit()]
+        self.assertIn(storage.EVENT_UNCLEAR_CONSENT_REFUSED, events)
+        self.assertNotIn(storage.EVENT_DENIAL_OVERRIDE_REFUSED, events)
+
+    def test_an_unclear_reply_leaves_the_action_approvable(self):
+        history = [human("write me a thing"), assistant()]
+        action_id = self._park(history)
+        history.append(human("not yet"))
+        self.run_async(self.gate.confirm(action_id, history))
+        self.assertEqual(self.write.calls, [])
+
+        history.append(human("ok yes, go ahead"))
+        result = self.run_async(self.gate.confirm(action_id, history))
+        self.assertEqual(self.write.calls, [{"content": "x"}])
+        self.assertIn("x", result)
+
+    def test_denial_wins_when_a_reply_contains_both(self):
+        # "I don't think yes is the right call" carries an affirmation keyword
+        # and is plainly not consent, so the denial check has to run first.
+        history = [human("write me a thing"), assistant()]
+        action_id = self._park(history)
+        history.append(human("I don't think yes is the right call here"))
+
+        result = self.run_async(self.gate.confirm(action_id, history))
+        self.assertIn("REFUSED", result)
+        self.assertEqual(self.write.calls, [])
+        events = [e["event"] for e in self.repo.recent_audit()]
+        self.assertIn(storage.EVENT_DENIAL_OVERRIDE_REFUSED, events)
+
+    def test_the_ordinary_ways_of_saying_yes_still_work(self):
+        for reply in (
+            "yes",
+            "yep",
+            "go ahead",
+            "go for it",
+            "do it",
+            "sure thing",
+            "okay",
+            "sounds good",
+            "approved",
+            "ship it",
+            "confirmed",
+            "fine",
+        ):
+            with self.subTest(reply=reply):
+                self.write.calls.clear()
+                history = [human("write me a thing"), assistant()]
+                action_id = self._park(history)
+                history.append(human(reply))
+
+                result = self.run_async(self.gate.confirm(action_id, history))
+                self.assertNotIn("REFUSED", result)
+                self.assertEqual(self.write.calls, [{"content": "x"}])
+
+
 class LastHumanTurnIndexTests(unittest.TestCase):
     def test_empty_history_has_no_human_turn(self):
         self.assertEqual(last_human_turn_index([]), -1)

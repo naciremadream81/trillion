@@ -56,6 +56,12 @@ EVENT_EXPIRED = "expired"
 EVENT_EXECUTED = "executed"
 EVENT_BLOCKED_PAUSED = "blocked_paused"
 EVENT_SELF_APPROVAL_REFUSED = "self_approval_refused"
+EVENT_DENIAL_OVERRIDE_REFUSED = "denial_override_refused"
+# Distinct from DENIAL_OVERRIDE: Sean said something, but it was neither a
+# yes nor a recognizable no ("not yet", "why is that necessary?"). Worth its
+# own event because a run of these means the affirmation vocabulary is too
+# narrow for how he actually talks, which is a tuning signal, not an attack.
+EVENT_UNCLEAR_CONSENT_REFUSED = "unclear_consent_refused"
 EVENT_PAUSED = "paused"
 EVENT_RESUMED = "resumed"
 

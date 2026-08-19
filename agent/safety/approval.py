@@ -24,6 +24,8 @@ action #47 runs #47's arguments, whatever the model would prefer by now.
 
 from __future__ import annotations
 
+import re
+
 from ..providers.base import ToolCall
 from . import storage
 from .risk import (
@@ -60,6 +62,47 @@ def last_human_turn_index(history: list[dict]) -> int:
         if msg.get("role") == "user" and isinstance(msg.get("content"), str):
             return i
     return -1
+
+
+# Word-boundary match, case-insensitive: "no", "don't"/"do not", "stop",
+# "cancel", "wait", "never mind"/"nevermind". Deliberately a keyword net, not
+# NLP — it's a safety net for the common ways of saying no, not a parser for
+# every possible phrasing.
+_DENIAL_PATTERN = re.compile(
+    r"\b(no|nope|don'?t|do not|stop|cancel|wait|never ?mind)\b", re.IGNORECASE
+)
+
+# The ways of saying yes. This exists because absence-of-no is not consent:
+# "not yet", "why is that necessary?", and "I haven't decided" all clear the
+# denial net above while being plainly not a yes, and this gate's whole
+# promise is an *explicit* yes.
+#
+# The asymmetry is the point. Requiring an affirmative makes the failure mode
+# a refusal — the gate asks again, Sean says "yes", done — whereas inferring
+# consent from silence makes the failure mode a consequential action he never
+# agreed to. So this net is allowed to be too narrow, and must not be too wide.
+_AFFIRMATION_PATTERN = re.compile(
+    r"\b(yes|yeah|yep|yup|yah|sure|ok|okay|k|fine|go ahead|go for it|"
+    r"do it|send it|ship it|please do|sounds good|approved?|confirm(ed|ing)?|"
+    r"affirmative|permission granted|green ?light)\b",
+    re.IGNORECASE,
+)
+
+
+def _reads_as_denial(text: str) -> bool:
+    """True if `text` reads like Sean saying no rather than yes."""
+    return bool(_DENIAL_PATTERN.search(text))
+
+
+def _reads_as_approval(text: str) -> bool:
+    """
+    True only if `text` contains a recognizable yes.
+
+    Denial wins ties: "I don't think yes is right here" contains an
+    affirmation keyword and is obviously not consent, so callers check
+    _reads_as_denial first and this never has to adjudicate it.
+    """
+    return bool(_AFFIRMATION_PATTERN.search(text))
 
 
 def _summarize(tool_name: str, arguments: dict | None) -> str:
@@ -205,7 +248,8 @@ class Gate:
         # The self-approval defense. A genuine human turn — content is a
         # string, not a list of tool_result blocks — must have arrived after
         # the action was parked.
-        if last_human_turn_index(history) < action["history_index"]:
+        human_index = last_human_turn_index(history)
+        if human_index < action["history_index"]:
             self.repo.log(
                 storage.EVENT_SELF_APPROVAL_REFUSED,
                 tool_name=action["tool_name"],
@@ -216,6 +260,42 @@ class Gate:
                 "Sean has not said anything since this action was parked. Ask "
                 "him, out loud, in your reply, and wait for his answer. His "
                 "next message is what unlocks this."
+            )
+
+        # A genuine human turn arriving is necessary but not sufficient: "no,
+        # don't do that" is a real turn too, and a model that calls
+        # confirm_action over it anyway (mistakenly or otherwise) must not
+        # get the frozen action executed. This is a keyword net, not NLP —
+        # it catches the common ways of saying no, not every phrasing.
+        human_turn = history[human_index]["content"]
+        if _reads_as_denial(human_turn):
+            self.repo.log(
+                storage.EVENT_DENIAL_OVERRIDE_REFUSED,
+                tool_name=action["tool_name"],
+                action_id=action_id,
+            )
+            return (
+                f"[REFUSED — action #{action_id} was not approved.]\n"
+                "Sean's last message reads like a refusal, not a yes. Do not "
+                "call confirm_action again for this id unless he actually "
+                "agrees."
+            )
+
+        # Not-a-no is not a yes. Without this, every turn that misses the
+        # denial keywords counts as consent — "not yet", "why is that
+        # necessary?", "I haven't decided" would all execute the action. This
+        # gate promises an explicit yes, so it requires one.
+        if not _reads_as_approval(human_turn):
+            self.repo.log(
+                storage.EVENT_UNCLEAR_CONSENT_REFUSED,
+                tool_name=action["tool_name"],
+                action_id=action_id,
+            )
+            return (
+                f"[REFUSED — action #{action_id} has no clear approval.]\n"
+                "Sean's last message is neither a yes nor a no. Don't read it "
+                "as permission. Ask him again, plainly, and wait for an actual "
+                "yes before calling confirm_action for this id."
             )
 
         # Pausing after the ask but before the approval still blocks: this is

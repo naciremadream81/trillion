@@ -381,9 +381,11 @@ Paste this into the chat:
 
 > "We're building Trillion. Read README.md for what's built, AGENT.md for the
 > product and safety spec, and HANDOFF.md for how we got here. All six tiers,
-> self-knowledge, and cosmic-orb UI tiers 4-6 are done. Remaining work: streaming
-> STT (for better endpointing), acoustic barge-in, and server-side request cancellation.
-> Cold-start latency is fixed (Piper warmed at startup). Hands-free VAD ships with
-> a single 1200ms silence threshold.
-> Don't swap any provider (model, STT, TTS) without asking me first, and don't merge
-> anything without my say-so."
+> self-knowledge, cosmic-orb UI tiers 4-6, and smooth-voice_2 Tiers 1-6 are done,
+> measured and verified against the deployed Pi itself. Remaining voice work:
+> streaming STT (which would give end-of-turn detection a real recognizer signal
+> instead of audio energy), acoustic barge-in, and server-side cancellation on
+> client abort. Hands-free is opt-in and ships with a single 1200ms silence
+> threshold — the layered fast/slow version was built, measured, and removed.
+> Don't swap any provider (model, STT, TTS) without asking me first, and don't
+> merge anything without my say-so."
