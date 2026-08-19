@@ -74,14 +74,36 @@ class Settings:
     factory_autonomous_themes: list[str] = field(default_factory=list)
     factory_autonomous_interval_hours: float = 24.0
 
-    # Voice V1: Deepgram STT (cloud) + Piper TTS (local, offline, free).
-    # ElevenLabs' free tier blocks all API voice access — premade voices AND
-    # custom/cloned ones both require a paid plan — so TTS runs on-device
-    # instead. Empty deepgram key = STT not configured; missing Piper model
-    # file = TTS not configured. Both endpoints then 400 with a clear
-    # message instead of crashing.
+    # Voice V1: Deepgram STT (cloud) + a selectable TTS provider.
+    # TTS_PROVIDER picks between "piper" (local, offline, free — the default,
+    # and what every existing deployment keeps using unless this is set
+    # explicitly) and "elevenlabs" (cloud, paid plan required — ElevenLabs'
+    # free tier blocks all API voice access, premade and custom/cloned voices
+    # alike). Both are real options now that Sean has a paid ElevenLabs plan;
+    # see docs/superpowers/specs/2026-08-17-elevenlabs-tts-provider-design.md
+    # for why Piper stays the default (never swap the active voice provider
+    # without asking first — playbooks/smooth-voice_2.md, line 19).
+    # An unrecognized TTS_PROVIDER value (a typo, e.g. "elevenlab") is not
+    # rejected — it silently falls through to the Piper path in serve.py's
+    # synthesize_speech(), same as unset. That's deliberate per the design
+    # spec, but it means a typo won't announce itself; it'll just look like
+    # ElevenLabs was never turned on. Double-check this value if TTS seems to
+    # be ignoring an ElevenLabs config that looks otherwise correct.
+    # Empty deepgram key = STT not configured; missing Piper model file (or,
+    # on the elevenlabs path, empty elevenlabs_api_key) = TTS not configured.
+    # Every one of those cases 400s with a clear message instead of crashing.
     deepgram_api_key: str = ""
     piper_voice_path: str = "voices/en_US-amy-medium.onnx"
+    tts_provider: str = "piper"
+    elevenlabs_api_key: str = ""
+    # ElevenLabs' standard premade "Rachel" voice — a concrete default so the
+    # elevenlabs path does something out of the box. Not a design commitment
+    # to this specific voice; override once a real choice is picked.
+    elevenlabs_voice_id: str = "21m00Tcm4TlvDq8ikWAM"
+    # Flash: ElevenLabs' lowest-latency model, built for real-time
+    # conversational use, at a modest quality trade-off vs. Multilingual v2 —
+    # chosen because this branch is actively tuning voice latency on the Pi.
+    elevenlabs_model_id: str = "eleven_flash_v2_5"
 
     # Provider-agnostic web search — the model calls it, Trillion makes the
     # HTTP request, so it works the same regardless of which LLM provider is
@@ -191,6 +213,10 @@ def get_settings() -> Settings:
         factory_autonomous_interval_hours=_env_float("TRILLION_FACTORY_AUTONOMOUS_INTERVAL_HOURS", 24.0),
         deepgram_api_key=os.getenv("DEEPGRAM_API_KEY", ""),
         piper_voice_path=os.getenv("PIPER_VOICE_PATH", "voices/en_US-amy-medium.onnx"),
+        tts_provider=os.getenv("TTS_PROVIDER", "piper"),
+        elevenlabs_api_key=os.getenv("ELEVENLABS_API_KEY", ""),
+        elevenlabs_voice_id=os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),
+        elevenlabs_model_id=os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5"),
         brave_search_api_key=os.getenv("BRAVE_SEARCH_API_KEY", ""),
         firecrawl_api_key=os.getenv("FIRECRAWL_API_KEY", ""),
         search_provider=os.getenv("TRILLION_SEARCH_PROVIDER", ""),

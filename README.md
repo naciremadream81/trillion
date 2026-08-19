@@ -4,9 +4,9 @@
 
 Trillion is a **single-user** Python agent: chat in the terminal or browser, swap model providers with one env var, track spend in SQLite, spawn specialist sub-agents (with approval), and run Software Factory builds into `generated-projects/`. Product intent and safety rules live in [`AGENT.md`](AGENT.md). Session resume notes are in [`HANDOFF.md`](HANDOFF.md) (may lag the code — trust this README and the tree for what runs today).
 
-**Working today:** text brain (CLI + web chat), provider seam, tool registry, cost dashboard, Agent Factory, Software Factory, voice V1 (Deepgram STT + local Piper TTS, wired to `POST /api/transcribe` and `POST /api/tts`), Tier 6 safety rails (confirmation gate, audit log, `/pause` kill switch), durable cross-session memory (`agent/memory.py` + `remember_fact`/`forget_fact`), the heartbeat scheduler with quiet hours and the Code Sentinel, the `search_notes` and `draft_email` tools, untrusted-content sanitization on every tool result, and the security shield (`GET /api/security/status`).
+**Working today:** text brain (CLI + web chat), provider seam, tool registry, cost dashboard, Agent Factory, Software Factory, voice V1 (Deepgram STT + selectable TTS: local Piper by default or ElevenLabs via `TTS_PROVIDER=elevenlabs`, wired to `POST /api/transcribe` and `POST /api/tts`), hands-free voice mode (optional; push-to-talk remains default), Tier 6 safety rails (confirmation gate, audit log, `/pause` kill switch), durable cross-session memory (`agent/memory.py` + `remember_fact`/`forget_fact`), the heartbeat scheduler with quiet hours and the Code Sentinel, the `search_notes` and `draft_email` tools, untrusted-content sanitization on every tool result, and the security shield (`GET /api/security/status`).
 
-**Not done yet:** nothing outstanding from smooth-voice_2 — Tiers 1-6 are measured, acted on, and (Tier 4) verified live against the deployed Pi. A provider swap (model, STT, TTS) is still off the table without asking Sean first.
+**Not done yet:** streaming STT (which would let end-of-turn detection lean on the recognizer's own endpoint signal instead of audio energy alone), acoustic barge-in (talking over Trillion mid-reply — deliberately not implemented, since on an open-speaker Pi its own output re-enters the mic and can self-trigger an endpoint), and server-side cancellation when a client aborts (today an aborted `/api/chat` keeps generating until a write hits the dropped connection, so the tail of an interrupted reply is still billed). A provider swap (model, STT, TTS) still needs Sean's say-so first.
 
 Self-knowledge (`agent/selfknowledge/`, generating `context/self/trillion.md`) and cosmic-orb UI tiers 4-6 (sub-agent constellation, dispatch beams/rings, performance mode, `prefers-reduced-motion`) are built — the orb UI change couldn't be visually verified against a real WebGL context in this session's sandboxed preview browser (no GPU there), so treat it as code-reviewed and unit-tested but not yet eyeballed running; check it in a real browser before relying on it.
 
@@ -16,16 +16,63 @@ Voice latency instrumentation (smooth-voice_2 Tier 1, measure-only) is built int
 |---|---|
 | STT (Deepgram nova-2) | ~670ms–1.2s, scales with clip length (verified via a real TTS→STT round trip, transcript matched the source text) |
 | Model (Claude, first token) | ~1.2–1.4s for a short reply |
-| TTS (Piper, local) | ~180–620ms/sentence once warm, scales with sentence length, but **~3.5s extra on the very first synthesis after the process starts** while the ~63MB voice model loads — `agent/voice/piper_tts.py` caches the loaded model in a module-level global for the rest of that process's lifetime, so this is a one-time-per-process cost, not a per-idle-period one |
+| TTS (Piper, local) | ~180–620ms/sentence once warm, scales with sentence length. There used to be **~3.5s extra on the very first synthesis after the process starts** while the ~63MB voice model loaded; that cost is now paid at server startup instead — see below |
 
-Straight add of the three "first token/byte" legs is ~2.05–3.22s before the first sound plays once the process is warm (STT + model + TTS-warm ranges above). On a fresh process — right after `trillion-orb.service` starts or restarts — add the ~3.5s TTS cold-start tax on top: **~5.55–6.72s** before the first sound plays, once.
+Straight add of the three "first token/byte" legs is ~2.05–3.22s before the first sound plays once the process is warm (STT + model + TTS-warm ranges above).
+
+### The cold-start tax is gone (measured before/after)
+
+`serve.py`'s `_warm_tts` startup hook synthesizes one short word in a background
+thread as the server comes up, so the ONNX session init and first-inference
+allocation are already done before anyone speaks. It is best-effort and never
+blocks startup — a missing voice model prints one line and the server continues.
+
+Measured with `scripts/voice_bench.py` on the Pi, same machine, same load, on the
+first `/api/tts` request of a fresh process:
+
+| | first-byte |
+|---|---|
+| before (cold) | **4822ms** |
+| after (warmed at startup) | **1158ms** |
+
+**~3.7s removed from the first voice turn after any restart or deploy.** The
+1158ms figure is marginally *faster* than the same build's warm reading, i.e. the
+first request now behaves as a warm one — the tax is eliminated, not reduced.
+A fresh process is therefore ~2.05–3.22s to first sound, the same as a warm one,
+rather than the ~5.55–6.72s it used to be.
+
+> **Caveat on the per-sentence numbers above.** The ~180–620ms/sentence figures
+> are the earlier idle-machine measurements and are deliberately left as-is. A
+> re-run during this work reported 1338–4839ms/sentence, but the Pi was saturated
+> at the time (load average 4.18 on 4 cores, mostly from the coding session doing
+> the work), so those readings are not comparable and were not published. The
+> cold-start delta above *is* safe to publish from the same loaded run, because a
+> before/after comparison on one machine cancels the load out — an absolute
+> per-sentence number does not. **The per-sentence row still wants an idle
+> re-measure.**
+
+### `scripts/voice_bench.py`
+
+Read-only benchmark of the **server** legs only — `/api/tts`, `/api/chat`, and an
+`/api/transcribe` round trip that synthesizes a known sentence and transcribes it
+back. It cannot measure mic capture, end-of-turn detection, or browser playback;
+those live in the browser and are what `window.trillionVoiceLatency` reports. Use
+the script to tell whether a slowdown is server-side, and the browser breakdown
+for the number a waiting person actually feels. It spends real Deepgram and model
+credits on every run.
+
+```bash
+python scripts/voice_bench.py
+```
 
 **Tiers 2-6, acted on against those numbers:**
 
-- **Tier 2 (end-of-turn detection) — N/A, by design.** The playbook assumes a silence-timeout endpointer worth tuning. Trillion's voice is push-to-talk: the stop-tap *is* the end-of-turn signal (`stopListening()` starts the latency turn synchronously), so there's no silence window, no fast/slow threshold, and no fixed sleep to replace. Recorded here rather than silently skipped — if voice ever goes hands-free, this tier comes back.
-- **Tier 3 (prompt-caching hygiene) — audited, found already correct, now guarded.** The classic failure (caching on, but something that changes every turn sits inside the cached prefix) isn't present: the system prompt is byte-identical build to build, and `append_voice_cue()` runs strictly *after* `apply_prompt_caching()`, so the per-turn cue lands after every breakpoint. Working code left alone; `tests/test_caching.py::TestCachedPrefixStaysStable` now locks the property in so it can't silently regress.
-- **Tier 4 (the biggest measured number) — Piper's ~3.5s cold start moved off the critical path, verified live on the Pi.** `warm_up()` loads the voice model *and* runs one throwaway inference (loading and first-inference are separate costs); `serve.py` schedules it as a background startup task, so it doesn't block the server binding. Confirmed by running a real instance on the deployed hardware: the `Running on http://...` bind line prints, then `Piper voice model warm.` prints after — the listener is accepting connections before the model finishes loading, not after. `trillion-orb.service` starts on boot, which is why this tax used to land on the first thing Sean said each day. A missing model logs and stays cold — `/api/tts` still returns its own clear error.
-- **Tier 6 (polish/protect) — barge-in actually interrupts now.** Four real bugs, found by reading the promise chain rather than reported: the in-flight `/api/chat` stream kept running after an interrupt (fixed with an `AbortController`, treating `AbortError` as intentional); resetting the speech queue didn't cancel the *already-running* chain, so the next sentence played over the new turn (fixed with a generation counter checked at every await boundary); `audio.pause()` fires neither `ended` nor `error`, so the awaited promise never settled and the object URL leaked (fixed with `audio.onpause = resolve`); and stale `.finally()` handlers drove the pending-speech counter negative, leaving the orb stuck on `processing` for the rest of the session.
+- **Tier 2 (end-of-turn detection) — hands-free VAD, opt-in.** An earlier pass recorded this tier as N/A because voice was push-to-talk: the stop-tap *was* the end-of-turn signal. That note also said "if voice ever goes hands-free, this tier comes back" — it has. A header toggle (default off) opens a browser-side `AnalyserNode` detector at 20Hz that ends the turn on silence; push-to-talk is untouched when it's off, and a tap still works when it's on. It uses **one** silence threshold (1200ms), not the layered fast/slow endpointing the playbook describes. Tier 2 assumes you can lean on the recognizer's own end-of-utterance signal for confidence, and `/api/transcribe` is batch Deepgram, so there isn't one. A layered version was built and measured: its confidence signal — a long final speech burst — turned out to mean "they said a lot", not "they finished", and it cut people off mid-sentence. Removed in favour of one honest number. Tunables live on `window.trillionVoiceVad` and are read every tick, so they can be adjusted mid-conversation from the console.
+- **Tier 3 (prompt-caching hygiene) — audited, found already correct, now guarded.** The classic failure (caching on, but something that changes every turn sits inside the cached prefix) isn't present: the system prompt is byte-identical build to build, and `append_voice_cue()` runs strictly *after* `apply_prompt_caching()`, so the per-turn cue lands after every breakpoint. Working code left alone; `tests/test_caching.py::TestCachedPrefixStaysStable` locks the property in so it can't silently regress.
+- **Tier 4 (the biggest measured number) — Piper's cold start moved off the critical path.** `warm_up()` loads the voice model *and* runs one throwaway inference (loading and first-inference are separate costs); `serve.py` schedules it as a background startup task, so it never blocks the server binding — confirmed live on the Pi, where the bind line prints *before* `Piper voice model warm.` A missing model logs and stays cold, and `/api/tts` still returns its own clear error. The before/after numbers are above. `_load_voice` also takes a lock: `synthesize` runs on a multi-worker executor, so two concurrent first-requests could otherwise both load the ~63MB model.
+- **Tier 4 (provider choice) — ElevenLabs is selectable.** `TTS_PROVIDER=elevenlabs` (default stays `piper`), model `eleven_flash_v2_5`, requires a paid plan. Piper remains the default and its path is unchanged.
+- **Tier 6 (polish/protect) — barge-in actually interrupts, and sentences stop fragmenting.** Barge-in bugs: the in-flight `/api/chat` stream kept running after an interrupt (fixed with `AbortController`, treating `AbortError` as intentional); resetting the speech queue didn't cancel the already-running chain, so the next sentence played over the new turn (fixed with per-turn identity checked at every await boundary); `audio.pause()` fires neither `ended` nor `error`, so the awaited promise never settled and the object URL leaked (fixed with both an abort listener and `audio.onpause = resolve`); and stale `.finally()` handlers drove the pending-speech counter negative, leaving the orb stuck on `processing` for the rest of the session. Separately, the sentence splitter anchored its end-of-buffer match to the *partial* stream, so a chunk ending just after a `.` spoke a fragment — `"That costs $1."`, then `"5 million."` — now fixed with abbreviation guards and a final-flush pass. Both new pure functions ship console self-tests (`window.trillionSplitSentencesSelfTest()`, `window.trillionVadSelfTest()`); there is no JS test runner in this repo, so those are the executable record.
+
 
 ---
 

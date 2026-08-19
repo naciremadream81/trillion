@@ -158,6 +158,90 @@ class TestNotesIndexPath(unittest.TestCase):
         self.assertEqual(settings.notes_index_path, "/tmp/custom-index.db")
 
 
+class TestTtsProvider(unittest.TestCase):
+    def setUp(self):
+        self._prev = os.environ.get("TTS_PROVIDER")
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("TTS_PROVIDER", None)
+        else:
+            os.environ["TTS_PROVIDER"] = self._prev
+
+    def test_defaults_to_piper(self):
+        os.environ.pop("TTS_PROVIDER", None)
+        settings = get_settings()
+        self.assertEqual(settings.tts_provider, "piper")
+
+    def test_reads_from_env(self):
+        os.environ["TTS_PROVIDER"] = "elevenlabs"
+        settings = get_settings()
+        self.assertEqual(settings.tts_provider, "elevenlabs")
+
+
+class TestElevenLabsApiKey(unittest.TestCase):
+    def setUp(self):
+        self._prev = os.environ.get("ELEVENLABS_API_KEY")
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("ELEVENLABS_API_KEY", None)
+        else:
+            os.environ["ELEVENLABS_API_KEY"] = self._prev
+
+    def test_defaults_to_empty_string(self):
+        os.environ.pop("ELEVENLABS_API_KEY", None)
+        settings = get_settings()
+        self.assertEqual(settings.elevenlabs_api_key, "")
+
+    def test_reads_from_env(self):
+        os.environ["ELEVENLABS_API_KEY"] = "el-test-key-123"
+        settings = get_settings()
+        self.assertEqual(settings.elevenlabs_api_key, "el-test-key-123")
+
+
+class TestElevenLabsVoiceId(unittest.TestCase):
+    def setUp(self):
+        self._prev = os.environ.get("ELEVENLABS_VOICE_ID")
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("ELEVENLABS_VOICE_ID", None)
+        else:
+            os.environ["ELEVENLABS_VOICE_ID"] = self._prev
+
+    def test_defaults_to_rachel(self):
+        os.environ.pop("ELEVENLABS_VOICE_ID", None)
+        settings = get_settings()
+        self.assertEqual(settings.elevenlabs_voice_id, "21m00Tcm4TlvDq8ikWAM")
+
+    def test_reads_from_env(self):
+        os.environ["ELEVENLABS_VOICE_ID"] = "custom-voice-id"
+        settings = get_settings()
+        self.assertEqual(settings.elevenlabs_voice_id, "custom-voice-id")
+
+
+class TestElevenLabsModelId(unittest.TestCase):
+    def setUp(self):
+        self._prev = os.environ.get("ELEVENLABS_MODEL_ID")
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("ELEVENLABS_MODEL_ID", None)
+        else:
+            os.environ["ELEVENLABS_MODEL_ID"] = self._prev
+
+    def test_defaults_to_flash_v2_5(self):
+        os.environ.pop("ELEVENLABS_MODEL_ID", None)
+        settings = get_settings()
+        self.assertEqual(settings.elevenlabs_model_id, "eleven_flash_v2_5")
+
+    def test_reads_from_env(self):
+        os.environ["ELEVENLABS_MODEL_ID"] = "eleven_multilingual_v2"
+        settings = get_settings()
+        self.assertEqual(settings.elevenlabs_model_id, "eleven_multilingual_v2")
+
+
 class TestWebHost(unittest.TestCase):
     def setUp(self):
         self._prev = os.environ.get("TRILLION_WEB_HOST")

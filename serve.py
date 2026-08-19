@@ -366,6 +366,14 @@ async def _warm_piper_voice(app: web.Application) -> None:
     """
     app["piper_warmup_task"] = None
     try:
+        # Nothing to warm when Piper isn't the configured provider: with
+        # TTS_PROVIDER=elevenlabs, /api/tts never touches the ONNX model, so
+        # loading 63MB and burning a core for seconds at every boot would buy
+        # exactly nothing. (This guard postdates the warm-up itself —
+        # ElevenLabs became selectable later; see agent/config.py.)
+        if get_settings().tts_provider == "elevenlabs":
+            return
+
         from agent.voice.piper_tts import warm_up
 
         model_path = _piper_model_path()
@@ -534,13 +542,13 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
         return web.json_response({"text": text})
 
     async def synthesize_speech(request: web.Request) -> web.Response:
-        # Voice V1 TTS: one sentence in, one WAV clip out. Called once per
+        # Voice V1 TTS: one sentence in, one audio clip out. Called once per
         # sentence as the agent's reply streams, so playback can start early.
-        # Piper runs on-device and is CPU-bound/blocking, so it's offloaded
-        # to a thread rather than awaited directly on the event loop.
-        from agent.voice.piper_tts import SynthesisError, synthesize
-
-        model_path = _piper_model_path()
+        # Provider is a deploy-time choice (settings.tts_provider /
+        # TTS_PROVIDER), not a per-request one — see docs/superpowers/specs/
+        # 2026-08-17-elevenlabs-tts-provider-design.md. text is parsed first,
+        # before either provider branch, since both need it and neither needs
+        # the other's setup.
         try:
             data = await request.json()
         except Exception:
@@ -548,6 +556,31 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
         text = (data.get("text") or "").strip()
         if not text:
             return web.Response(status=400, text="missing text")
+
+        settings = get_settings()
+        if settings.tts_provider == "elevenlabs":
+            # Cloud call: I/O-bound, so it's awaited directly rather than
+            # offloaded to a thread — see elevenlabs_tts.py's docstring.
+            from agent.voice.elevenlabs_tts import SynthesisError, synthesize
+
+            try:
+                audio = await synthesize(
+                    text,
+                    settings.elevenlabs_api_key,
+                    settings.elevenlabs_voice_id,
+                    settings.elevenlabs_model_id,
+                )
+            except SynthesisError as e:
+                return web.Response(status=400, text=str(e))
+            return web.Response(body=audio, content_type="audio/mpeg")
+
+        # Default (including unset or an unrecognized TTS_PROVIDER value —
+        # see the comment above tts_provider in agent/config.py): Piper,
+        # on-device. CPU-bound and blocking, so it's offloaded to a thread
+        # rather than awaited directly on the event loop.
+        from agent.voice.piper_tts import SynthesisError, synthesize
+
+        model_path = _piper_model_path()
         loop = asyncio.get_running_loop()
         try:
             audio = await loop.run_in_executor(None, synthesize, text, model_path)

@@ -75,7 +75,11 @@
     .tr-agent-labels { display: none; }
   }
 
-  /* ========================= PERF MODE TOGGLE ========================= */
+  /* ============ ICON-BUTTON "ON" STATE (perf mode + hands-free voice) ==
+     Shared accent style for any header icon-button toggle, not just perf
+     mode (the name stuck from when perf mode was the only one). Reused
+     as-is for tr-handsfree (smooth-voice_2 Tier 2/6) rather than adding a
+     near-duplicate rule. ======================================== */
   .tr-icon-btn.perf-on { color: var(--accent); }
 
   /* ============================ HEADER ============================ */
@@ -527,6 +531,14 @@
           <path d="M12 3v2M21 12h-2M12 21v-2M3 12h2"/>
         </svg>
       </button>
+      <button class="tr-icon-btn" id="tr-handsfree" title="Hands-free voice" aria-label="Toggle hands-free voice mode" aria-pressed="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 13a8 8 0 0 1 16 0"/>
+          <path d="M4 13v4a2 2 0 0 0 2 2h1v-6H5a1 1 0 0 0-1 1z"/>
+          <path d="M20 13v4a2 2 0 0 1-2 2h-1v-6h1a1 1 0 0 1 1 1z"/>
+          <path d="M14 19a2 2 0 0 1-4 0"/>
+        </svg>
+      </button>
       <button class="tr-icon-btn" title="Settings" aria-label="Settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"/>
@@ -669,7 +681,13 @@
         <rect x="6.5" y="6.5" width="11" height="11" rx="2.5"/>
       </svg>
     </button>
-    <div class="tr-mic-hint">Tap or say &ldquo;Hey Trillion&rdquo;</div>
+    <!-- Static pre-JS fallback text only — the voice IIFE below overwrites
+         this via idleHintText() on load and on every mode change. Used to
+         say 'Tap or say "Hey Trillion"', advertising a wake word that has
+         never existed anywhere in this codebase (smooth-voice_2 Tier 2/6
+         fix). Matches IDLE_HINT; hands-free's own wording only applies
+         once JS has read the localStorage flag. -->
+    <div class="tr-mic-hint">Tap to speak</div>
   </div>
 
   <!-- Three.js + post-processing, vendored locally (see vendor/three/) so the
@@ -1782,7 +1800,101 @@
     // for why this needs to be an explicit id, not a re-read of shared state.
     let recordingStopTurnId = null;
 
+    // ================= Hands-free voice mode toggle (smooth-voice_2 Tier 2/6) =================
+    // OPT-IN, default OFF. Mirrors the tr-perf header toggle's exact shape —
+    // localStorage-backed state, a reflect() that syncs the button's visual
+    // + aria-pressed state, a window.set*() console hook, and a
+    // CustomEvent — see reflectPerfButton/window.setOrbPerfMode further up
+    // this file for the pattern this copies. It lives in THIS closure
+    // (rather than next to tr-perf's own IIFE) because every piece of state
+    // it actually gates — startListening, stopListening, the mic hint — is
+    // private to this closure too; reaching across IIFEs for one boolean
+    // would be worse than the button's markup living in a different visual
+    // group in the header than its logic does.
+    let handsFree = localStorage.getItem('trillion-voice-handsfree') === '1';
+    const handsFreeBtn = document.getElementById('tr-handsfree');
+    function reflectHandsFreeButton() {
+      if (!handsFreeBtn) return;
+      handsFreeBtn.classList.toggle('perf-on', handsFree); // shared "on" accent — see its CSS comment
+      handsFreeBtn.setAttribute('aria-pressed', String(handsFree));
+    }
+    window.setVoiceHandsFree = (on) => {
+      handsFree = !!on;
+      localStorage.setItem('trillion-voice-handsfree', handsFree ? '1' : '0');
+      if (handsFree) {
+        emptyTurns = 0; // fresh start whenever hands-free is (re)enabled
+      } else {
+        // Turning it off mid-listen shouldn't yank the mic away — tap is
+        // still the one guaranteed way to stop — but the auto-endpointer
+        // itself should stand down immediately rather than sneak in one
+        // more auto-stop after the user just told it not to.
+        stopVad();
+        // Finding 5: stopVad() just removed the ONLY things that were
+        // capping this recording (the endpointer, its 30s max-utterance
+        // cap, and its 8s no-speech timeout) — but if a recording is
+        // actually in flight right now, the mic stays open and the hint
+        // still reads "auto-stop, or tap to stop". Install a bare
+        // max-utterance timer, independent of hands-free/VAD state, so an
+        // unbounded recording is never possible even mid-toggle. Full
+        // window from now, not "whatever time was left" — simpler, still
+        // a hard cap, and the cost risk is the same order of magnitude.
+        if (listening) {
+          clearBareMaxUtteranceTimer();
+          bareMaxUtteranceTimer = setTimeout(() => {
+            bareMaxUtteranceTimer = null;
+            if (listening) stopListening();
+          }, window.trillionVoiceVad.maxUtteranceMs);
+        }
+      }
+      reflectHandsFreeButton();
+      if (!listening) setHint(idleHintText());
+      document.dispatchEvent(new CustomEvent('trillion:handsfree', { detail: { on: handsFree } }));
+    };
+    if (handsFreeBtn) handsFreeBtn.addEventListener('click', () => window.setVoiceHandsFree(!handsFree));
+    reflectHandsFreeButton();
+
+    // Consecutive turns in hands-free that produced nothing usable (no
+    // speech detected, empty transcript, sub-500-byte blob, transcription
+    // error, or — see Finding 1 — an /api/chat stream that errored out).
+    // Resets to 0 the moment a turn actually produces speech or a clean
+    // sign-off. At the configured max (window.trillionVoiceVad.
+    // maxConsecutiveEmptyTurns), hands-free disables itself rather than
+    // let a noisy room loop paid Deepgram POSTs forever.
+    let emptyTurns = 0;
+
+    // Finding 4: the re-arm setTimeout handle (armed at the bottom of
+    // handsFreeAdvance below) was previously never stored, so it could
+    // never be cancelled. Reproduced scenario: turn N completes and arms
+    // this timer; the user double-taps the mic within the delay window
+    // (a natural start/stop gesture), beginning turn M — listening is now
+    // false again and a transcribe POST is in flight. The old timer then
+    // fires, startListening() runs, cancelSpeech() aborts turn M mid-flight,
+    // and turn M's transcription — already paid for — is silently
+    // discarded with nothing surfaced to the user. Cleared in
+    // stopListening() and beginTurn(), i.e. the instant any new turn
+    // actually starts.
+    let rearmTimer = null;
+    function clearRearmTimer() { if (rearmTimer) { clearTimeout(rearmTimer); rearmTimer = null; } }
+
+    // Finding 5: setVoiceHandsFree(false) calls stopVad(), which removes
+    // the endpointer AND its 30s maxUtteranceMs cap AND its 8s
+    // noSpeechTimeoutMs — but if the mic was open mid-utterance when
+    // hands-free got toggled off, the recorder itself doesn't stop, and
+    // the hint still promises "auto-stop, or tap to stop". Without a
+    // replacement cap, the recording is now unbounded — a real cost risk
+    // (whatever finally gets tapped-stop is POSTed to Deepgram as one
+    // blob). This bare timer is that replacement: independent of
+    // hands-free/VAD state entirely, so toggling off never removes the
+    // one guarantee that matters — the recording WILL eventually stop on
+    // its own, even if nothing else does.
+    let bareMaxUtteranceTimer = null;
+    function clearBareMaxUtteranceTimer() { if (bareMaxUtteranceTimer) { clearTimeout(bareMaxUtteranceTimer); bareMaxUtteranceTimer = null; } }
+
     function setHint(t) { if (hint) hint.textContent = t; }
+    function idleHintText() {
+      if (!canRecord) return 'Voice input unsupported here — use the terminal';
+      return handsFree ? 'Hands-free — just talk' : IDLE_HINT;
+    }
     function setMic(on) {
       listening = on;
       mic.classList.toggle('listening', on);
@@ -1791,8 +1903,76 @@
       document.dispatchEvent(new CustomEvent('trillion:mic-toggle', { detail: { listening: on } }));
     }
 
-    if (!canRecord) setHint('Voice input unsupported here — use the terminal');
-    else setHint(IDLE_HINT);
+    setHint(idleHintText());
+
+    // ================= Hands-free turn-advance policy =================
+    // The single place that decides whether the mic should reopen after a
+    // turn ends. Called from every place a turn can end without ever
+    // reaching sendToAgent's normal completion (a too-short blob, an empty
+    // transcript, a transcription error, the VAD's own no-speech timeout)
+    // as well as from maybeFinishTurn's normal completion path — see each
+    // call site for why maybeFinishTurn alone doesn't cover the early-exit
+    // cases (turnStreamComplete never becomes true for a turn that never
+    // reached sendToAgent).
+    //   'spoke'  — the turn produced at least one sentence of real audio.
+    //   'silent' — the turn completed with NO audio at all while the model
+    //              stream still ran to completion. That shape is exactly
+    //              what agent/turn_taking.py's is_signoff suppression looks
+    //              like from here: /api/chat streams an empty body, so
+    //              nothing is ever enqueued to speak() and pendingSpeech
+    //              never leaves 0. Tier 5's entire point is a graceful,
+    //              non-needy ending, so hands-free must NOT re-arm here —
+    //              doing so would have the mic pop back open immediately
+    //              after the user said goodbye, i.e. exactly the "always
+    //              takes the last word" behavior Tier 5 exists to kill.
+    //   'empty'  — nothing usable was captured at all (no speech heard, an
+    //              empty transcript, a transcription/network error, OR —
+    //              see Finding 1 — an /api/chat stream that itself errored
+    //              (server down, 500 with a null body, dropped connection,
+    //              res.body.getReader() throwing). That last case used to
+    //              be indistinguishable from 'silent' here — both leave
+    //              pendingSpeech at 0 with turnStreamComplete true — which
+    //              meant a real failure silently died with hands-free
+    //              claiming to still be listening and NEVER re-arming.
+    //              sendToAgent/maybeFinishTurn now tell the two apart via
+    //              turnStreamOk (true only on the non-error exit path) and
+    //              route an error here as 'empty' specifically so it BOTH
+    //              re-arms AND counts toward the circuit breaker below,
+    //              same as any other unproductive turn.
+    function handsFreeAdvance(kind) {
+      if (!handsFree) return; // manual mode: never auto-anything — do-not-break requirement
+      if (kind === 'silent') {
+        emptyTurns = 0;
+        setHint(idleHintText());
+        return;
+      }
+      if (kind === 'empty') {
+        emptyTurns++;
+        if (emptyTurns >= window.trillionVoiceVad.maxConsecutiveEmptyTurns) {
+          emptyTurns = 0;
+          window.setVoiceHandsFree(false); // also fires trillion:handsfree so any UI listening for it updates
+          setHint('Paused — tap to resume');
+          return;
+        }
+      } else {
+        emptyTurns = 0; // a turn that actually produced speech clears the noisy-room counter
+      }
+      // Re-arm delay: lets the speaker (and the room) settle before the mic
+      // reopens, rather than snapping straight from "audio just stopped" to
+      // "recording again" with no breathing room.
+      //
+      // Finding 4: the timer handle is stored and cleared in
+      // stopListening()/beginTurn() — see clearRearmTimer's declaration —
+      // so a turn that starts (mic tap or auto-detected end of turn) during
+      // this delay can never have its in-flight transcription silently
+      // discarded by a stale timer reopening the mic out from under it.
+      clearRearmTimer(); // defensive: a re-arm timer should never stack with a still-pending one
+      rearmTimer = setTimeout(() => {
+        rearmTimer = null;
+        if (!handsFree || listening) return; // toggled off, or a manual tap already started a new turn, during the delay
+        startListening();
+      }, window.trillionVoiceVad.rearmDelayMs);
+    }
 
     // ============= Voice latency instrumentation (smooth-voice_2 Tier 1) =============
     // Measures, doesn't fix: breaks one real turn into the checkpoints the
@@ -1841,11 +2021,579 @@
       voiceLatency = null; // one report per turn; the next tap starts fresh
     }
 
+    // ================= Turn lifecycle & barge-in (smooth-voice_2 Tier 6) =================
+    // A "turn" is one listen -> think -> speak cycle. Before this block, the
+    // only thing barge-in did was pause the current <audio> and reset the
+    // local speech queue (see cancelSpeech below) — it never touched the
+    // in-flight /api/chat or /api/tts fetches, so an interrupted reply's
+    // read loop kept right on running and re-enqueuing speak() calls onto
+    // the (now-empty) queue. The user-visible result: an interrupted reply
+    // would resume talking a second later, as if nothing had happened.
+    //
+    // activeTurnId names which turn, if any, is currently allowed to speak.
+    // turnAbort is the AbortController wired into THAT turn's /api/chat and
+    // /api/tts fetches. cancelSpeech() sets activeTurnId back to 0 (the
+    // sentinel isCurrent() always rejects) and aborts turnAbort, which is
+    // what actually stops an interrupted reply rather than just muting it.
+    //
+    // Deliberately kept separate from vlStartTurn: that function is only
+    // ever about measurement (see the instrumentation block above), so
+    // beginTurn() calls it for the id rather than duplicating turn-id
+    // allocation or giving vlStartTurn a second job.
+    //
+    // Important limit: aborting the client fetch does NOT stop the
+    // server's model call. /api/chat's handler keeps generating until a
+    // resp.write() hits the dropped connection and unwinds through its own
+    // except Exception — the tokens for the tail of an interrupted reply
+    // are still generated and paid for. True server-side cancellation
+    // (e.g. threading the abort through to the model call) is out of
+    // scope here.
+    let activeTurnId = 0;   // 0 = no turn may speak; vlStartTurn ids start at 1
+    let turnAbort = null;
+    let turnStreamComplete = false; // set true when sendToAgent's read loop exits; see maybeFinishTurn below
+    // Tier 2/6 hands-free: did THIS turn ever actually enqueue a sentence
+    // to speak()? maybeFinishTurn uses this to tell a normal completed
+    // reply apart from a silent sign-off (agent/turn_taking.py's
+    // is_signoff suppressed the reply, so /api/chat streamed an empty body
+    // and nothing was ever spoken) — see handsFreeAdvance for why that
+    // distinction controls whether the mic is allowed to re-arm.
+    let turnSpokeAny = false;
+    // Blocker 1 fix: did sendToAgent's try block reach its end WITHOUT
+    // throwing? This is the piece turnSpokeAny alone can't provide — it
+    // tells a genuine empty-body sign-off (turnStreamOk true, turnSpokeAny
+    // false) apart from a stream that errored out (turnStreamOk false) —
+    // server down, a 500 with a null body, a dropped connection,
+    // res.body.getReader() throwing. Previously BOTH shapes looked
+    // identical from maybeFinishTurn's point of view (turnStreamComplete
+    // true, pendingSpeech 0, turnSpokeAny false), so a real failure was
+    // misread as a graceful sign-off: hands-free silently stopped
+    // re-arming, AND the "Connection error" hint set microseconds earlier
+    // in the catch block was immediately clobbered by the idle hint — see
+    // maybeFinishTurn and handsFreeAdvance's 'empty' kind below for the
+    // rest of the fix.
+    let turnStreamOk = false;
+    function beginTurn() {
+      const id = vlStartTurn();
+      activeTurnId = id;
+      turnAbort = new AbortController();
+      turnStreamComplete = false;
+      turnSpokeAny = false;
+      turnStreamOk = false;
+      // Finding 4: cancel any pending hands-free re-arm the moment a new
+      // turn actually starts — see clearRearmTimer's declaration above.
+      clearRearmTimer();
+      return id;
+    }
+    function isCurrent(id) { return id !== 0 && id === activeTurnId; }
+
+    // ================= Hands-free silence detection (smooth-voice_2 Tier 2) =================
+    // WHY THIS SHAPE: the playbook's Tier 2 says "lean on the recognizer's
+    // end-of-utterance signal" when you have one. We don't. /api/transcribe
+    // is batch Deepgram — the browser records the WHOLE clip with
+    // MediaRecorder and POSTs it only after the recording stops (see
+    // agent/voice/deepgram_stt.py's module docstring, which says this
+    // explicitly). There is no partial-result stream and no `endpointing`/
+    // `utterance_end_ms` signal arriving mid-recording, because nothing is
+    // sent to Deepgram until the recording is already over. So "confidence
+    // that the person is done" has to be derived entirely from audio
+    // structure on the client — RMS level over time — not from any
+    // recognizer signal. THE UPGRADE PATH: Deepgram's streaming WebSocket
+    // API supports `endpointing` + `utterance_end_ms`, which would give the
+    // real signal the playbook assumes. That needs a server-side WS proxy
+    // (browsers can't hit Deepgram's streaming endpoint directly with a
+    // secret API key) and streaming-shaped changes on both ends. That is
+    // separate, larger work — not a tweak to this tier.
+    //
+    // All tunables live in ONE object on window, read fresh on every single
+    // tick (never captured into a local at setup time), specifically so
+    // they can be adjusted from the browser console mid-conversation
+    // without an edit-reload cycle — the same console-hook convention as
+    // window.trillionOrb / window.setOrbPerfMode elsewhere in this file.
+    // EXCEPTION: VAD_POLL_MS (the setInterval period itself, declared with
+    // the stateful driver below) deliberately lives OUTSIDE this object.
+    // Unlike every field below, it can't actually be live-adjusted from the
+    // console — changing it wouldn't restart the already-running
+    // setInterval — so putting it here would be a lie about what "live"
+    // means for that one value specifically.
+    //
+    // VAD_DEFAULTS (below) is the single source of truth for both the
+    // starting values AND the fallback values used when a tunable has been
+    // poisoned (deleted, replaced with a non-finite value, or the whole
+    // object clobbered from the console) — see safeVad()/numOr() and the
+    // try/catch around the tick body further down for why that matters.
+    const VAD_DEFAULTS = Object.freeze({
+      calibrationMs: 400,             // window after mic-open used to sample the room's noise floor
+      calibrationClampMinDb: -70,     // calibration below this reads as "unrealistically silent" for a live mic -> distrust it
+      calibrationClampMaxDb: -40,     // calibration above this most likely means the user was ALREADY TALKING during calibration -> distrust it. Was -30 — see Finding 8: -35 dBFS (a moderate speaking level) was being ACCEPTED as a valid noise floor, which then set that user's own speech threshold ABOVE their normal speaking level. Hands-free re-arms only 250ms after the previous reply, so answering promptly means routinely still talking when calibration starts — this is the common path, not an edge case. Tightened to -40; does NOT fully fix the ~1-LSB-dither-calibrates-to-42.1dBFS case noted below — see calibrationMaxStdDb.
+      calibrationMaxStdDb: 6,         // calibration window's sample standard deviation above this reads as speech-like variability (a steady noise floor is far more consistent tick-to-tick than speech) -> distrust it even if the median itself falls inside the clamp band. Cheap extra signal Finding 8 asked for "only if clean" — this is the clean version: one pass over samples already collected for the median.
+      fixedSpeechDb: -45,             // fallback speech level, used only when calibration is untrustworthy
+      fixedSilenceDb: -48,            // fallback silence/noise-floor level, used only when calibration is untrustworthy
+      speechThresholdOffsetDb: 9,     // speechThreshold = max(noiseFloorDb + this, speechThresholdMinDb) — 9dB over the floor reads as a clear voice, not HVAC hum
+      speechThresholdMinDb: -58,      // FLOOR, not a ceiling — was misnamed speechThresholdCeilingDb (see Finding 3). max() can only ever RAISE the threshold toward this value, never lower it, so it binds in QUIET rooms and makes the detector LESS sensitive there; it does nothing in loud rooms (floor+9 already exceeds it). Was -50, which meant a quiet room + far-field mic (noiseFloorDb -65, speech -52) or a quiet room + soft voice (noiseFloorDb -68, speech -55) both produced a speech threshold of -50 that the user's actual speech never crossed -> onset never fires -> 8s timeout -> "empty" turn, and two of those trips hands-free. Lowered to -58 so both examples now clear the threshold (-56 and -58 respectively) while still guarding against a pathologically-low calibration pushing the threshold into pure noise-floor territory.
+      silenceThresholdOffsetDb: 6,    // silenceThreshold = noiseFloorDb + this. NOT reliably "3dB below the speech threshold" — that arithmetic (9 - 6 = 3) only holds when speechThresholdMinDb's max() isn't binding, i.e. when noiseFloorDb is above about -67dBFS (speechThresholdMinDb - speechThresholdOffsetDb). Below that, speechThreshold is pinned at speechThresholdMinDb while silenceThreshold keeps falling with the floor, so the gap widens past 3dB the quieter the room gets. The gap is hysteresis either way — it exists so level noise right at the boundary doesn't chatter the endpointer between speech/silence every tick — it just isn't a fixed 3dB in every room.
+      onsetFrames: 3,                 // consecutive above-threshold frames (150ms at 20Hz) required to confirm speech onset — a single loud transient (door slam, keyboard clack) must not arm the endpointer
+      // ONE silence threshold, deliberately. This started as a layered
+      // fast/slow pair (700ms when "confident", 1500ms otherwise) straight
+      // out of smooth-voice_2's Tier 2, and it was removed after measurement,
+      // not after argument. The history is worth keeping, because the
+      // layered design is genuinely the right idea when you can support it:
+      //
+      //   1. The fast path's gate (substantial total speech AND a substantial
+      //      final burst) turned out to be satisfied by roughly ANY ordinary
+      //      2s utterance, so the aggressive 700ms cut was the DEFAULT, not
+      //      the confident-only case. A 2.5s utterance with a 1200ms
+      //      mid-thought pause ended the turn and spliced the speaker's
+      //      second clause into nothing.
+      //   2. Widening the gate (final burst 400 -> 800ms) and the window
+      //      (700 -> 1000ms) fixed the trailing-"um" shape but NOT the
+      //      original case: a long final burst still cleared the wider gate,
+      //      so a long clause followed by a 1000-1499ms pause was still cut.
+      //   3. That is when the real problem became clear. `lastBurstMs` was
+      //      standing in for "this person has finished a sentence", and it
+      //      does not mean that. It means "this person said a lot". Someone
+      //      mid-flow through a long clause is if anything MORE likely to
+      //      continue, so the signal is arguably inverted.
+      //
+      // Tier 2 assumes you can lean on the recognizer's own end-of-utterance
+      // signal for confidence. We can't: /api/transcribe is BATCH Deepgram
+      // (see the comment above startVad). With audio energy alone there is no
+      // trustworthy "they're done" signal to branch on, so branching on a
+      // fake one only cut people off faster. One honest number beats two
+      // numbers selected by a coin flip wearing a lab coat.
+      //
+      // 1200ms: comfortably above typical intra-sentence pauses (200-600ms)
+      // and above the ~1s mid-thought pause a slow talker takes, while still
+      // 300ms snappier on EVERY turn than the old slow path everyone
+      // effectively fell back to. If a streaming-STT endpoint signal ever
+      // lands here (Deepgram WS `utterance_end_ms` — see startVad's comment),
+      // THAT is the confidence signal a fast path should branch on, and the
+      // layered design becomes worth revisiting on a real basis.
+      silenceMs: 1200,
+      noisyFloorDb: -45,              // retained as a diagnostic: a calibrated floor above this means the RMS signal is unreliable. No longer changes the endpoint decision (there is only one threshold now), but it is logged on every decision and is the first thing to look at when a room endpoints badly.
+      maxUtteranceMs: 30000,          // hard stop regardless of VAD state — also caps the blob size POSTed to Deepgram
+      noSpeechTimeoutMs: 8000,        // mic open this long with no confirmed speech onset at all -> give up WITHOUT posting anything
+      rearmDelayMs: 250,              // pause after a turn finishes speaking before the mic reopens, so the mic doesn't reopen mid-decay of Trillion's own last word
+      maxConsecutiveEmptyTurns: 2,    // consecutive unproductive hands-free turns before giving up and dropping back to push-to-talk
+    });
+    // Live, console-adjustable copy. Spread (not a reference) so runtime
+    // edits from the console — including deleting fields or replacing the
+    // whole object — can never mutate VAD_DEFAULTS itself; that object has
+    // to stay trustworthy as the fallback for exactly that scenario.
+    window.trillionVoiceVad = { ...VAD_DEFAULTS };
+
+    // Finding 6: a poisoned tunable (NaN, a deleted field, or the whole
+    // object replaced/deleted from the console — reproduced under node:
+    // `fastSilenceMs = NaN` and `window.trillionVoiceVad = {}` both left
+    // the endpointer silently non-functional; `delete window.trillionVoiceVad`
+    // threw a TypeError on every tick, forever, with the 20Hz interval
+    // still running and the mic stuck open) must never take down the
+    // detector. numOr()/safeVad() coerce every tunable through Number() +
+    // Number.isFinite() on every read, falling back field-by-field to
+    // VAD_DEFAULTS rather than either propagating NaN silently or throwing.
+    function numOr(v, fallback) {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : fallback;
+    }
+    function safeVad() {
+      const raw = window.trillionVoiceVad || {}; // tolerate the object itself being deleted/replaced
+      const out = {};
+      for (const key in VAD_DEFAULTS) out[key] = numOr(raw[key], VAD_DEFAULTS[key]);
+      return out;
+    }
+
+    // PURE decision function — no DOM, no timers, no globals besides the
+    // live-read tunables above. Exposed as window.trillionVadDecide,
+    // mirroring window.trillionSplitSentences: a pure core wrapped by a
+    // stateful driver (startVad below), independently testable under plain
+    // Node with no browser APIs stubbed. See window.trillionVadSelfTest's
+    // case table further down for the exact behavior this locks in.
+    function shouldEndTurn(input) {
+      const speechMs = input.speechMs, lastBurstMs = input.lastBurstMs,
+            silenceMs = input.silenceMs, noiseFloorDb = input.noiseFloorDb;
+      // Finding 6: coerced/defaulted rather than a raw read of
+      // window.trillionVoiceVad — see numOr()/safeVad() above. Poisoning
+      // any field (or the whole object) now silently self-heals to
+      // VAD_DEFAULTS instead of throwing or comparing against NaN.
+      const vad = safeVad();
+      // ONE threshold. There used to be a layered fast/slow pair here, and
+      // removing it was a deliberate decision — see the comment block above
+      // VAD_DEFAULTS for the measurements that killed it. In short: the
+      // "confidence" signal the fast path branched on (a long final speech
+      // burst) does not actually indicate that someone has finished. It only
+      // indicates they said a lot, and a speaker mid-flow through a long
+      // clause is if anything MORE likely to keep going. Branching a shorter,
+      // more aggressive cut off a signal that doesn't mean what it claimed
+      // just cut people off faster in exactly the case it was supposed to
+      // protect.
+      //
+      // `speechMs`, `lastBurstMs` and `noiseFloorDb` are still accepted and
+      // still reported, because the driver logs them on every decision and
+      // they are what a future endpointer would be tuned against — but they
+      // no longer change the outcome. Deliberate: an input that is recorded
+      // but not acted on is honest; a heuristic that acts on a meaningless
+      // signal is not.
+      const thresholdMs = vad.silenceMs;
+      return {
+        end: silenceMs >= thresholdMs,
+        thresholdMs,
+        // Echoed purely for the diagnostic log — see startVad's tick.
+        speechMs, lastBurstMs, noiseFloorDb,
+      };
+    }
+    window.trillionVadDecide = shouldEndTurn; // console-hook convention — see window.trillionSplitSentences
+
+    // Case table for the self-test below, mirroring SENTENCE_SPLIT_CASES'
+    // shape. These are the cases that killed the layered fast/slow design
+    // (see the long comment on VAD_DEFAULTS.silenceMs) and now lock in the
+    // single-threshold behaviour that replaced it. The three marked MUST-NOT-CUT
+    // are the ones that matter most: ending a turn while someone is still
+    // mid-sentence is the worst outcome this whole feature can produce, and
+    // each of those three was OBSERVED cutting under an earlier revision.
+    const VAD_DECISION_CASES = [
+      {
+        name: 'clean 2s utterance, full 1200ms silence -> turn ends',
+        input: { speechMs: 2000, lastBurstMs: 2000, silenceMs: 1200, noiseFloorDb: -55 },
+        expectEnd: true,
+      },
+      {
+        name: 'clean 2s utterance, only 500ms silence -> nowhere near done',
+        input: { speechMs: 2000, lastBurstMs: 2000, silenceMs: 500, noiseFloorDb: -55 },
+        expectEnd: false,
+      },
+      {
+        name: 'boundary: 1199ms silence just misses',
+        input: { speechMs: 2000, lastBurstMs: 2000, silenceMs: 1199, noiseFloorDb: -55 },
+        expectEnd: false,
+      },
+      {
+        name: 'boundary: 1200ms silence exactly meets the threshold',
+        input: { speechMs: 2000, lastBurstMs: 2000, silenceMs: 1200, noiseFloorDb: -55 },
+        expectEnd: true,
+      },
+      // ---- MUST-NOT-CUT: every one of these was observed ending a turn
+      // ---- mid-sentence under the old layered fast/slow design.
+      {
+        // The case that killed the fast path, at 1199ms. Note the honest
+        // limit of a single threshold: it protects every pause SHORTER than
+        // silenceMs and nothing at or beyond it. The original reproduction
+        // used a 1200ms pause, which now sits exactly ON the threshold and
+        // therefore DOES end the turn (see the next case). What 1200ms buys
+        // is protection of the ~1s mid-thought pause smooth-voice_2 actually
+        // warns about, with ~200ms of margin — not protection of arbitrarily
+        // long pauses, which no silence-based endpointer can offer without
+        // making every turn feel sluggish.
+        name: 'MUST-NOT-CUT: long final clause (1500ms burst) + 1199ms mid-thought pause — the shape that killed the fast path',
+        input: { speechMs: 2500, lastBurstMs: 1500, silenceMs: 1199, noiseFloorDb: -60 },
+        expectEnd: false,
+      },
+      {
+        name: 'the same clause at exactly 1200ms DOES end — documenting the boundary honestly, not hiding it',
+        input: { speechMs: 2500, lastBurstMs: 1500, silenceMs: 1200, noiseFloorDb: -60 },
+        expectEnd: true,
+      },
+      {
+        name: 'MUST-NOT-CUT: same long clause + 1000ms pause (old fast window)',
+        input: { speechMs: 2500, lastBurstMs: 1500, silenceMs: 1000, noiseFloorDb: -60 },
+        expectEnd: false,
+      },
+      {
+        name: 'MUST-NOT-CUT: slow talker, 650ms trailing burst + 1150ms pause',
+        input: { speechMs: 1900, lastBurstMs: 650, silenceMs: 1150, noiseFloorDb: -58 },
+        expectEnd: false,
+      },
+      {
+        name: 'short 600ms utterance + 700ms silence -> not done (700ms was the old fast window)',
+        input: { speechMs: 600, lastBurstMs: 600, silenceMs: 700, noiseFloorDb: -55 },
+        expectEnd: false,
+      },
+      {
+        name: 'trailing "um" (200ms final burst) + 1200ms silence -> ends; burst length no longer gates anything',
+        input: { speechMs: 2000, lastBurstMs: 200, silenceMs: 1200, noiseFloorDb: -55 },
+        expectEnd: true,
+      },
+      {
+        name: 'noisy room (-40dB floor) gets the same threshold as a quiet one — noisyFloorDb is diagnostic only now',
+        input: { speechMs: 2000, lastBurstMs: 2000, silenceMs: 1200, noiseFloorDb: -40 },
+        expectEnd: true,
+      },
+      {
+        name: 'noisy room, 700ms silence -> still not done',
+        input: { speechMs: 2000, lastBurstMs: 2000, silenceMs: 700, noiseFloorDb: -40 },
+        expectEnd: false,
+      },
+      {
+        name: 'poisoned tunables self-heal to defaults rather than going inert (Finding 6)',
+        input: { speechMs: 2000, lastBurstMs: 2000, silenceMs: 1200, noiseFloorDb: -55 },
+        expectEnd: true,
+        poison: {},
+      },
+    ];
+
+    window.trillionVadSelfTest = function trillionVadSelfTest() {
+      let pass = 0, fail = 0;
+      for (const c of VAD_DECISION_CASES) {
+        const result = shouldEndTurn(c.input);
+        let ok = true;
+        const notes = [];
+        if (result.end !== c.expectEnd) { ok = false; notes.push(`end mismatch: got ${result.end}, want ${c.expectEnd}`); }
+        if (c.poison) {
+          // Finding 6: prove the decision survives a clobbered tunables
+          // object rather than silently going inert. Swap it, re-decide,
+          // restore — the result must be identical to the healthy run.
+          const saved = window.trillionVoiceVad;
+          window.trillionVoiceVad = c.poison;
+          let poisoned;
+          try { poisoned = shouldEndTurn(c.input); } finally { window.trillionVoiceVad = saved; }
+          if (poisoned.end !== c.expectEnd) { ok = false; notes.push(`poisoned-tunables mismatch: got ${poisoned.end}, want ${c.expectEnd}`); }
+        }
+        if (ok) { pass++; console.log(`[trillion voice] VAD self-test PASS: ${c.name}`); }
+        else { fail++; console.log(`[trillion voice] VAD self-test FAIL: ${c.name}`, notes); }
+      }
+      console.log(`[trillion voice] VAD self-test: ${pass} passed, ${fail} failed (of ${VAD_DECISION_CASES.length})`);
+      return { pass, fail, total: VAD_DECISION_CASES.length };
+    };
+
+    // ---------------- The stateful driver: Web Audio graph + tick loop ----------------
+    let vadAudioCtx = null;       // ONE AudioContext for the page's whole lifetime, not per-turn
+    let vadSourceNode = null;     // per-turn: created in startVad, disconnected in stopVad
+    let vadAnalyser = null;       // per-turn
+    let vadByteData = null;       // per-turn scratch buffer for getByteTimeDomainData
+    let vadPollTimer = null;      // setInterval handle; null when the detector isn't running
+    let vadNoSpeechAbort = false; // set just before mediaRecorder.stop() by the 8s no-speech timeout, so onRecordingStopped knows to skip the /api/transcribe POST entirely
+    const VAD_POLL_MS = 50;       // 20Hz. Deliberately setInterval, NOT requestAnimationFrame: rAF is tied to compositing, so it would fight the WebGL orb's own render loop and stall whenever perf mode's every-other-frame path is active (see the "PERF MODE TOGGLE" section above) — an unrelated visual feature would then silently throttle how fast the mic can hear silence.
+
+    function vadDbfs() {
+      vadAnalyser.getByteTimeDomainData(vadByteData);
+      let sumSquares = 0;
+      for (let i = 0; i < vadByteData.length; i++) {
+        const norm = (vadByteData[i] - 128) / 128;
+        sumSquares += norm * norm;
+      }
+      const rms = Math.sqrt(sumSquares / vadByteData.length);
+      return rms > 0 ? 20 * Math.log10(rms) : -100; // -100 is a floor guard against log10(0) = -Infinity on true digital silence
+    }
+
+    function stopVad() {
+      if (vadPollTimer) { clearInterval(vadPollTimer); vadPollTimer = null; }
+      if (vadSourceNode) { try { vadSourceNode.disconnect(); } catch (e) {} vadSourceNode = null; }
+      vadAnalyser = null;
+      vadByteData = null;
+      // vadAudioCtx is deliberately NOT closed/nulled here — see startVad.
+    }
+
+    function startVad(stream) {
+      stopVad(); // defensive: clear any leftover state from an unclean previous turn
+      try {
+        // Built ONCE and reused across every hands-free turn for the life
+        // of the page. Chrome caps a page at ~6 AudioContexts; creating a
+        // fresh one per turn would exhaust that budget within minutes of
+        // an ordinary hands-free conversation and start throwing.
+        vadAudioCtx = vadAudioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        // A backgrounded tab can suspend the shared AudioContext between
+        // hands-free turns. Left unchecked, getByteTimeDomainData() then
+        // returns a constant 128 (silence), vadDbfs() returns the -100
+        // floor guard, speech onset never fires, and the turn dies via the
+        // 8s no-speech timeout — indistinguishable from an actually-silent
+        // room. Resume defensively on every reuse; .resume() on an
+        // already-running context is a documented no-op.
+        if (vadAudioCtx.state === 'suspended') { vadAudioCtx.resume().catch(() => {}); }
+        const src = vadAudioCtx.createMediaStreamSource(stream);
+        const analyser = vadAudioCtx.createAnalyser();
+        analyser.fftSize = 1024;
+        analyser.smoothingTimeConstant = 0.6;
+        src.connect(analyser); // NEVER src.connect(vadAudioCtx.destination) — that would route the live mic straight to the speaker and echo the user back at themselves
+        vadSourceNode = src;
+        vadAnalyser = analyser;
+        vadByteData = new Uint8Array(analyser.fftSize);
+      } catch (err) {
+        console.log('[trillion voice] hands-free VAD setup failed — this turn falls back to manual tap-to-stop:', err);
+        vadAnalyser = null;
+        return; // no auto-endpoint this turn; the mic just stays open until the user taps it, never silently stranding them
+      }
+
+      const t0 = performance.now();
+      let lastTickAt = t0;
+      let noiseFloorDb = null;
+      const calibSamples = [];
+      let onsetStreak = 0;
+      let speechEverOnset = false;
+      let speechMs = 0, silenceMs = 0, burstMs = 0, lastBurstMs = 0;
+
+      vadPollTimer = setInterval(() => {
+        // Finding 6: the normal endpoint, the max-utterance cap, AND the
+        // no-speech timeout all live in this one tick body, so an
+        // uncaught exception anywhere in here — a poisoned tunable, a
+        // getByteTimeDomainData() failure, anything — used to silently
+        // remove all three exit paths at once while the 20Hz interval kept
+        // right on firing forever (reproduced under node: `delete
+        // window.trillionVoiceVad` threw a TypeError every tick, forever).
+        // shouldEndTurn()/safeVad() already self-heal poisoned tunables
+        // (see numOr() above), but this try/catch is the backstop for
+        // anything else that goes wrong: on ANY throw, stop the detector
+        // rather than leave the mic open indefinitely with a dead tick.
+        try {
+          const now = performance.now();
+          const dt = now - lastTickAt;
+          lastTickAt = now;
+          const elapsed = now - t0;
+          const vad = safeVad(); // coerced + defaulted every tick — see numOr()/safeVad() above
+          const dbfs = vadDbfs();
+
+          // ---- Calibration: median RMS over the first calibrationMs ----
+          if (noiseFloorDb === null) {
+            calibSamples.push(dbfs);
+            if (elapsed < vad.calibrationMs) return;
+            calibSamples.sort((a, b) => a - b);
+            const median = calibSamples[Math.floor(calibSamples.length / 2)];
+            // Finding 8: variance check, in addition to the median clamp.
+            // Speech has high sample-to-sample variance; a steady noise
+            // floor does not. A median can land inside the trusted band
+            // while still being speech-corrupted if enough loud AND quiet
+            // frames balance out around it — the stdDev check catches that
+            // the median alone would miss.
+            const mean = calibSamples.reduce((a, b) => a + b, 0) / calibSamples.length;
+            const variance = calibSamples.reduce((a, b) => a + (b - mean) * (b - mean), 0) / calibSamples.length;
+            const stdDev = Math.sqrt(variance);
+            const medianTrusted = median >= vad.calibrationClampMinDb && median <= vad.calibrationClampMaxDb;
+            const varianceTrusted = stdDev <= vad.calibrationMaxStdDb;
+            if (medianTrusted && varianceTrusted) {
+              noiseFloorDb = median;
+            } else {
+              // Outside the trustworthy band — most likely the user started
+              // talking during calibration itself (median too high, or high
+              // variance even with an in-band median), or the read is
+              // implausibly quiet for a live mic (median too low). Either
+              // way, don't trust it: fall back to the fixed default.
+              noiseFloorDb = vad.fixedSilenceDb;
+            }
+            console.log('[trillion voice] hands-free VAD calibrated: noiseFloorDb=' + noiseFloorDb.toFixed(1) + 'dBFS' +
+              (noiseFloorDb === median ? '' : ' (fallback — raw median was ' + median.toFixed(1) + 'dBFS, stdDev ' + stdDev.toFixed(1) +
+                'dB; trusted band [' + vad.calibrationClampMinDb + ',' + vad.calibrationClampMaxDb + '], max stdDev ' + vad.calibrationMaxStdDb + ')'));
+            return;
+          }
+
+          // speechThresholdMinDb is a FLOOR (renamed from the misleading
+          // speechThresholdCeilingDb — see Finding 3 and the tunable's own
+          // comment above): max() only ever raises the threshold toward it,
+          // so it binds in quiet rooms, never in loud ones.
+          const speechThresh = Math.max(noiseFloorDb + vad.speechThresholdOffsetDb, vad.speechThresholdMinDb);
+          const silenceThresh = noiseFloorDb + vad.silenceThresholdOffsetDb;
+          const aboveSpeech = dbfs >= speechThresh;
+          const belowSilence = dbfs <= silenceThresh;
+
+          if (!speechEverOnset) {
+            // Gate the very first arm behind onsetFrames consecutive frames
+            // above the speech threshold, so one loud transient (door slam,
+            // keyboard clack) can't arm the endpointer on its own.
+            if (aboveSpeech) {
+              onsetStreak++;
+              if (onsetStreak >= vad.onsetFrames) {
+                speechEverOnset = true;
+                burstMs = onsetStreak * VAD_POLL_MS;
+                speechMs = burstMs;
+              }
+            } else {
+              onsetStreak = 0;
+            }
+            if (!speechEverOnset && elapsed >= vad.noSpeechTimeoutMs) {
+              stopVad();
+              abortListeningNoSpeech();
+              return;
+            }
+            // Defense-in-depth only: unreachable with the documented
+            // defaults (noSpeechTimeoutMs 8000 always fires first in this
+            // pre-onset branch, since it's smaller than maxUtteranceMs
+            // 30000), but stays as a hard backstop in case either tunable
+            // is ever reconfigured such that it isn't.
+            if (elapsed >= vad.maxUtteranceMs) { stopVad(); stopListening(); return; }
+            return;
+          }
+
+          // Speech has fired at least once this turn — track total speech
+          // time, trailing silence, and the length of the most recently
+          // COMPLETED speech burst (the fast-path gate's tell for "a full
+          // utterance" vs. "trailing off on a fragment").
+          if (aboveSpeech) {
+            speechMs += dt; burstMs += dt; silenceMs = 0;
+          } else if (belowSilence) {
+            if (burstMs > 0) { lastBurstMs = burstMs; burstMs = 0; }
+            silenceMs += dt;
+          } else {
+            // Inside the hysteresis band between the two thresholds: hold
+            // whatever state we were already in rather than flip-flop —
+            // that gap is exactly what it's there to prevent.
+            if (burstMs > 0) { speechMs += dt; burstMs += dt; } else { silenceMs += dt; }
+          }
+
+          const inputs = { speechMs, lastBurstMs: burstMs > 0 ? burstMs : lastBurstMs, silenceMs, noiseFloorDb };
+          const decision = shouldEndTurn(inputs);
+          if (decision.end) {
+            // Log every REAL endpoint decision (not every tick — that would
+            // be 20 lines/sec of noise) with the inputs that produced it, so
+            // a bad cut is diagnosable after the fact instead of by
+            // re-enactment.
+            console.log('[trillion voice] hands-free VAD endpoint fired:', {
+              ...inputs, thresholdMs: decision.thresholdMs,
+              dbfs: +dbfs.toFixed(1), speechThresh: +speechThresh.toFixed(1), silenceThresh: +silenceThresh.toFixed(1),
+            });
+            stopVad();
+            stopListening(); // the exact tap-to-stop path — see beginTurn's comment block: turn logic is never forked
+            return;
+          }
+          if (elapsed >= vad.maxUtteranceMs) {
+            console.log('[trillion voice] hands-free VAD hit the 30s max-utterance cap, forcing stop:', inputs);
+            stopVad();
+            stopListening();
+          }
+        } catch (err) {
+          console.log('[trillion voice] hands-free VAD tick threw — stopping the detector rather than leaving the mic open with a dead tick:', err);
+          stopVad();
+        }
+      }, VAD_POLL_MS);
+    }
+
+    function abortListeningNoSpeech() {
+      // 8s of open mic with no confirmed speech onset at all. Deliberately
+      // NOT the same path as a normal endpoint: there is nothing worth
+      // transcribing, so this closes the recorder WITHOUT ever POSTing to
+      // /api/transcribe — Deepgram bills per request, and a silent room in
+      // hands-free mode would otherwise generate one paid, useless request
+      // every 8 seconds, forever.
+      //
+      // vadNoSpeechAbort is set only once we know onRecordingStopped will
+      // actually run (mediaRecorder.stop() was called on a recorder that
+      // wasn't already dead). If the recorder had already died on its own
+      // (e.g. a USB mic yanked mid-turn on a Pi), 'stop' never fires, the
+      // flag was never cleared by onRecordingStopped, and the NEXT turn's
+      // real recording would be silently discarded as "Didn't catch that".
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        vadNoSpeechAbort = true;
+        mediaRecorder.stop();
+      }
+      setMic(false);
+      // No beginTurn() here, on purpose: nothing was captured worth a turn
+      // id, and allocating one would leave maybeFinishTurn's
+      // turnStreamComplete bookkeeping waiting on a sendToAgent() call that
+      // (since nothing gets POSTed) will never happen.
+    }
+
     async function startListening() {
       if (!canRecord) return;
       cancelSpeech(); // barge-in: stop any speech playing
       try {
-        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // autoGainControl:false is load-bearing for hands-free: AGC
+        // actively normalizes the input level UPWARD during quiet
+        // stretches, which is precisely the noise-floor signal the
+        // endpointer calibrates against and watches for silence — with AGC
+        // on, "silence" keeps getting amplified back toward the speech
+        // threshold, so endpoints fire late or never. This getUserMedia
+        // call is shared by push-to-talk (there is only one recording
+        // path in this file), so this also changes push-to-talk's audio;
+        // STT transcription accuracy there is worth re-checking after this
+        // change lands.
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false },
+        });
       } catch (err) {
         setHint('Mic permission denied — check browser settings');
         return;
@@ -1859,16 +2607,53 @@
       mediaRecorder.onstop = onRecordingStopped;
       mediaRecorder.start();
       setMic(true);
-      setHint('Listening… tap to stop');
+      if (handsFree) {
+        // EXPLICITLY OUT OF SCOPE, on purpose: the mic stays CLOSED while
+        // Trillion is speaking (see cancelSpeech/synthesizeAndPlay — there
+        // is no "listen while playing" path anywhere in this file, and
+        // this hands-free feature does not add one). On a Pi with an open
+        // speaker, Piper's own output would re-enter the mic, re-train the
+        // noise floor, and could self-trigger an endpoint — the assistant
+        // interrupting itself, which reads as badly broken. Browser
+        // echoCancellation is tuned for WebRTC conference audio and does
+        // not reliably cancel local <audio> playback through an external
+        // speaker. Tap-to-interrupt (Step 4) already solves barge-in
+        // properly; nobody should "helpfully" reopen this by wiring the
+        // VAD to run during playback too.
+        setHint('Listening… (auto-stop, or tap to stop)');
+        startVad(mediaStream);
+      } else {
+        setHint('Listening… tap to stop');
+      }
     }
 
     function stopListening() {
+      stopVad(); // no-op if hands-free never wired it up for this turn (mode is off, or setup failed and fell back to manual)
+      // Finding 4 / Finding 5: a turn is actually starting/ending here, so
+      // any stale re-arm timer from a PREVIOUS turn (Finding 4) and any
+      // bare max-utterance fallback timer installed on hands-free toggle-off
+      // (Finding 5) are both now moot — clear them rather than let either
+      // fire later and act on state that's already moved on.
+      clearRearmTimer();
+      clearBareMaxUtteranceTimer();
       if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
       setMic(false);
       // smooth-voice_2 Tier 1: push-to-talk means "tap to stop" IS "stopped
       // speaking". Set synchronously, before the 'stop' event (which fires
       // onRecordingStopped) — see recordingStopTurnId's declaration.
-      recordingStopTurnId = vlStartTurn();
+      //
+      // Tier 6 barge-in: this is also where a new turn officially begins,
+      // so we go through beginTurn() rather than calling vlStartTurn()
+      // directly. beginTurn() allocates the same latency-tracking id AND
+      // arms this turn's AbortController — see the turn-lifecycle block
+      // above startListening for why those two things are kept in one
+      // place instead of vlStartTurn growing a second responsibility.
+      //
+      // Tier 2 hands-free: this is ALSO the exact function the VAD's
+      // endpoint decision calls (see startVad above) — a mic tap and an
+      // auto-detected end of turn are, from this line down, the identical
+      // code path. Turn logic is never forked between the two.
+      recordingStopTurnId = beginTurn();
     }
 
     async function onRecordingStopped() {
@@ -1876,7 +2661,16 @@
       if (mediaStream) { mediaStream.getTracks().forEach((t) => t.stop()); mediaStream = null; }
       const blob = new Blob(chunks, { type: (mediaRecorder && mediaRecorder.mimeType) || 'audio/webm' });
       chunks = [];
-      if (blob.size < 500) { setHint(IDLE_HINT); return; } // tap-tap with no speech = cancel
+      if (vadNoSpeechAbort) {
+        // The 8s no-speech timeout fired (see abortListeningNoSpeech) —
+        // skip transcription entirely, there is nothing worth sending.
+        vadNoSpeechAbort = false;
+        window.setStatus('idle');
+        setHint("Didn't catch that");
+        handsFreeAdvance('empty');
+        return;
+      }
+      if (blob.size < 500) { setHint(idleHintText()); handsFreeAdvance('empty'); return; } // tap-tap with no speech = cancel
       window.setStatus('processing');
       setHint('Transcribing…');
       try {
@@ -1887,108 +2681,488 @@
         });
         const data = await res.json();
         vlMark(turnId, 'transcriptFinal');
-        if (!res.ok) { setHint(data.error || 'Transcription error — tap to retry'); window.setStatus('idle'); return; }
+        if (!res.ok) { setHint(data.error || 'Transcription error — tap to retry'); window.setStatus('idle'); handsFreeAdvance('empty'); return; }
         const text = (data.text || '').trim();
         if (text) { setHint('“' + text + '”'); sendToAgent(text, turnId); }
-        else { window.setStatus('idle'); setHint('Didn’t catch that — tap to retry'); }
+        else { window.setStatus('idle'); setHint('Didn’t catch that — tap to retry'); handsFreeAdvance('empty'); }
       } catch (err) {
         window.setStatus('idle');
         setHint('Connection error — is the server running?');
+        handsFreeAdvance('empty');
       }
     }
 
     mic.addEventListener('click', () => { listening ? stopListening() : startListening(); });
 
-    // Aborted by cancelSpeech() on barge-in. Without this, tapping the mic
-    // mid-reply left the old turn's /api/chat stream running: it kept
-    // arriving, kept getting split into sentences, and kept queueing speech
-    // for a turn the person had already talked over.
-    let chatAbort = null;
+    // ================= Sentence splitter (smooth-voice_2 Tier 3/4) =================
+    // The old splitter was `/[^.!?]+[.!?]+(\s|$)/`, applied to whatever had
+    // accumulated in the streaming buffer so far. Two real bugs in that:
+    //
+    //   (a) The `$` alternative anchors to the end of the PARTIAL buffer —
+    //       i.e. wherever the network happened to chunk the response, not
+    //       wherever the sentence actually ends. If a chunk boundary lands
+    //       right after a '.', the regex matches and a fragment gets sent
+    //       to /api/tts on its own, split awkwardly from the rest of the
+    //       sentence. Real example: the buffer holds "That costs $1." while
+    //       "5 million." is still in flight over the wire -> "That costs
+    //       $1." gets spoken, then "5 million." gets spoken separately.
+    //       Same failure for "Dr.", "e.g.", "U.S." — any abbreviation whose
+    //       dot happens to land at a chunk boundary.
+    //   (b) `m.index` was never checked before `buf.slice(m[0].length)`.
+    //       `[^.!?]+` can't match a leading terminator, so on a buffer that
+    //       starts mid-sentence the match can begin at a nonzero offset,
+    //       and slicing from `m[0].length` instead of `m.index + m[0].length`
+    //       discards the wrong prefix of the buffer.
+    //
+    // Fixed with two regexes instead of one:
+    //
+    //   SENTENCE_STREAM_RE requires whitespace we have ACTUALLY RECEIVED
+    //   after the terminator — `(?=\s)`, not `(?=\s|$)`. End-of-buffer is
+    //   never treated as a boundary here, because end-of-buffer just means
+    //   "no more bytes have arrived yet," not "the sentence is over."
+    //
+    //   SENTENCE_FINAL_RE allows end-of-buffer too (`(?=\s|$)`), and is
+    //   safe to use ONLY once, in the final flush after the stream reader
+    //   has closed and no more text can ever arrive to disprove the
+    //   boundary. Using it mid-stream would reintroduce bug (a).
+    //
+    // Both alternate with `\n+` on purpose: models emit bullet lists and
+    // paragraph breaks with no terminal punctuation at all, and without
+    // this a bulleted reply would buffer all the way to the end of the
+    // turn and defeat the whole point of streaming speech.
+    //
+    // A matched terminator is then run through a small set of guards, but
+    // ONLY when the terminator run is a single '.' — '!', '?', and runs
+    // like '...' always split, no guards, no exceptions. A candidate '.'
+    // is rejected (search continues from the next character in the SAME
+    // buffer, nothing is discarded) when:
+    //   1. the preceding word is a common abbreviation (mr/dr/etc/vs/...)
+    //   2. the preceding word is a single letter ("J. R. R. Tolkien")
+    //   3. the preceding word contains an internal dot — a generic rule
+    //      that covers e.g./i.e./U.S./a.m. without enumerating every case
+    //   4. the character immediately before the '.' is a digit (list
+    //      markers like "1. " and decimals that arrive with a space after)
+    //
+    // Rule 4 has a known false positive: a sentence that genuinely ends in
+    // a digit ("It costs 5.") won't split there. That's ACCEPTABLE and
+    // intentional, per the playbook's "conservative on anything that can
+    // misfire" — the failure mode is MERGING (that text gets spoken
+    // together with whatever follows, or by the final flush), never
+    // DROPPING. Losing text is the one failure mode this file guards
+    // against everywhere else; merging two sentences into one utterance is
+    // just a minor quality hit.
+    //
+    // The guards apply on BOTH passes, with exactly one exception: a
+    // boundary sitting at the very end of the buffer during the final flush
+    // is never guarded. That exception is what lets a trailing "...see Dr."
+    // with nothing after it still get spoken, rather than held forever
+    // waiting for text that will never come.
+    //
+    // An earlier revision skipped the guards on the whole final pass, on the
+    // reasoning that "at end of stream there's nothing left to merge into."
+    // That reasoning is wrong, and it silently relocated the exact fragment
+    // bug this splitter exists to kill: "Dr. Smith called." arrives with no
+    // trailing whitespace, so no streaming boundary ever fires, the entire
+    // sentence reaches the final flush, and an unguarded final pass split it
+    // into "Dr." + "Smith called." — two utterances, the first meaningless.
+    // Same for "We ship to the U.S. and Canada." Mid-buffer there is always
+    // something to merge into, so the guards must stay on; only the terminal
+    // boundary is special.
+    //
+    // Also bounds worst-case latency: MAX_SENTENCE_CHARS caps how long the
+    // splitter will wait for a boundary before cutting anyway (at the last
+    // space before the cap, or a hard cut if there's no space), so a
+    // run-on reply with no punctuation can't buffer forever and blow out
+    // time-to-first-audio.
+    const SENTENCE_STREAM_RE = /[.!?]+["'”’)\]]*(?=\s)|\n+/g;
+    const SENTENCE_FINAL_RE  = /[.!?]+["'”’)\]]*(?=\s|$)|\n+/g;
+    const MAX_SENTENCE_CHARS = 300;
+    const SENTENCE_ABBREVIATIONS = new Set([
+      'mr', 'mrs', 'ms', 'dr', 'prof', 'sr', 'jr', 'st', 'vs',
+      'etc', 'approx', 'fig', 'inc', 'ltd', 'co', 'no',
+    ]);
+
+    // Returns true if the '.' found at `matchIndex` in `text` should NOT
+    // be treated as a sentence boundary yet (see the guard list above).
+    // Only ever called for single-'.' terminator runs on the streaming
+    // pass — see the comment block above for why the final flush skips
+    // this entirely.
+    function isGuardedPeriod(text, matchIndex) {
+      const before = text.slice(0, matchIndex);
+      if (/[0-9]/.test(before.slice(-1))) return true; // rule 4: digit right before the dot
+      const word = (before.match(/[A-Za-z0-9.]+$/) || [''])[0];
+      if (!word) return false;
+      if (word.length === 1) return true; // rule 2: single letter
+      if (word.indexOf('.') !== -1) return true; // rule 3: internal dot (e.g./i.e./U.S/a.m, generically)
+      if (SENTENCE_ABBREVIATIONS.has(word.toLowerCase())) return true; // rule 1
+      return false;
+    }
+
+    // Pure: takes the current buffer and whether the stream is closed,
+    // returns every complete sentence found plus whatever's left over.
+    // Never mutates its input, never touches DOM/network/queue state — the
+    // caller (sendToAgent) owns deciding what happens to what comes back.
+    function trillionSplitSentences(buf, opts) {
+      const final = !!(opts && opts.final);
+      const re = final ? SENTENCE_FINAL_RE : SENTENCE_STREAM_RE;
+      const sentences = [];
+      let rest = buf;
+      for (;;) {
+        re.lastIndex = 0;
+        let m = null;
+        let boundaryEnd = -1;
+        while ((m = re.exec(rest))) {
+          const isNewlineBoundary = m[0].charCodeAt(0) === 10; // '\n' — never guarded
+          const termRun = isNewlineBoundary ? '' : m[0].match(/^[.!?]+/)[0];
+          // A boundary at the very end of the buffer is only reachable on the
+          // final pass (SENTENCE_STREAM_RE needs real trailing whitespace),
+          // and it is the one place a guard must NOT fire — there is genuinely
+          // nothing after it to merge into. Everywhere else, guards apply on
+          // both passes; see the comment block above for what happened when
+          // the final pass skipped them wholesale.
+          const atBufferEnd = m.index + m[0].length >= rest.length;
+          const guarded = !isNewlineBoundary && !atBufferEnd && termRun === '.' && isGuardedPeriod(rest, m.index);
+          if (!guarded) { boundaryEnd = m.index + m[0].length; break; }
+          re.lastIndex = m.index + 1; // rejected: keep scanning from the next character, nothing discarded
+        }
+        if (boundaryEnd === -1) {
+          // No punctuation/newline boundary anywhere left in the buffer.
+          if (rest.length > MAX_SENTENCE_CHARS) {
+            const spaceIdx = rest.lastIndexOf(' ', MAX_SENTENCE_CHARS);
+            boundaryEnd = spaceIdx > 0 ? spaceIdx + 1 : MAX_SENTENCE_CHARS; // hard cut if no space to break on
+          } else {
+            break; // buffer isn't resolvable yet — hand it back as `rest` and wait for more text
+          }
+        }
+        const sentence = rest.slice(0, boundaryEnd).trim();
+        rest = rest.slice(boundaryEnd);
+        if (sentence) sentences.push(sentence);
+      }
+      return { sentences, rest };
+    }
+    window.trillionSplitSentences = trillionSplitSentences; // console-hook convention — see window.trillionOrb / setOrbPerfMode / trillionVoiceLatency
+
+    // Case table for the self-test below. Each case feeds `chunks` through
+    // the splitter one at a time in streaming mode (exercising exactly the
+    // chunk-boundary bug this rewrite fixes), then runs one final-mode
+    // flush on whatever's left, mirroring sendToAgent's real usage.
+    //   expectAfterChunks (optional): exact sentences expected to have
+    //     been emitted from the streaming chunks alone, BEFORE the final
+    //     flush. Omit when the exact split is a documented edge case (see
+    //     the comment block above) — those cases still get the universal
+    //     no-text-lost check below.
+    //   expectFinalExact (optional): exact sentences expected once the
+    //     final flush (and its trailing-tail handling) has also run.
+    // Every case, exact-match or not, is also checked for the one thing
+    // that must never happen: text silently disappearing. That check
+    // compares non-whitespace characters in, versus non-whitespace
+    // characters across every emitted sentence plus any never-emitted
+    // remainder — they must be equal.
+    const SENTENCE_SPLIT_CASES = [
+      {
+        name: 'currency split mid-decimal across chunks (DEFECT 1a regression)',
+        chunks: ['That costs $1.', '5 million.'],
+        expectAfterChunks: [], // the '.' after "$1" lands at the chunk boundary — must NOT fire early
+        expectFinalExact: ['That costs $1.5 million.'],
+      },
+      {
+        name: 'title abbreviation ("Dr.")',
+        chunks: ['Dr. Smith called. '],
+        expectAfterChunks: ['Dr. Smith called.'],
+        expectFinalExact: ['Dr. Smith called.'],
+      },
+      {
+        name: 'country abbreviation with internal dot ("U.S.")',
+        chunks: ['We ship to the U.S. and Canada. '],
+        expectAfterChunks: ['We ship to the U.S. and Canada.'],
+        expectFinalExact: ['We ship to the U.S. and Canada.'],
+      },
+      {
+        name: 'lowercase "e.g." abbreviation',
+        chunks: ['e.g. this one. '],
+        expectAfterChunks: ['e.g. this one.'],
+        expectFinalExact: ['e.g. this one.'],
+      },
+      {
+        name: 'numbered list splits on newline, not the "N." marker',
+        chunks: ['1. First item\n2. Second item'],
+        expectAfterChunks: ['1. First item'], // "2. Second item" has no trailing boundary yet — stays buffered
+      },
+      {
+        name: 'final-flush-only sentence (no trailing whitespace)',
+        chunks: ['Done.'],
+        expectAfterChunks: [], // no whitespace after the '.' yet — stream mode must not fire
+        expectFinalExact: ['Done.'],
+      },
+      {
+        name: 'interrobang and short follow-up always split (no guards on ! or ?)',
+        chunks: ['Really?! Okay. '],
+        expectAfterChunks: ['Really?!', 'Okay.'],
+        expectFinalExact: ['Really?!', 'Okay.'],
+      },
+      {
+        name: '400-character run-on with no punctuation hits MAX_SENTENCE_CHARS',
+        chunks: [new Array(67).fill('lorem ipsum').join(' ')], // ~803 chars, zero terminators
+        checkMaxLen: true,
+      },
+      // The next three are regressions for a real bug: an earlier revision
+      // skipped the abbreviation guards on the ENTIRE final pass, which
+      // relocated the fragment bug instead of fixing it. A reply ending in
+      // an abbreviation never produces a streaming boundary (no trailing
+      // whitespace), so it all reaches the final flush — and an unguarded
+      // final pass chopped "Dr." off the front as its own utterance.
+      {
+        name: 'REGRESSION: abbreviation survives the final flush intact',
+        chunks: ['Dr. Smith called.'],
+        expectAfterChunks: [],
+        expectFinalExact: ['Dr. Smith called.'],
+      },
+      {
+        name: 'REGRESSION: internal-dot abbreviation survives the final flush',
+        chunks: ['We ship to the U.S. and Canada.'],
+        expectAfterChunks: [],
+        expectFinalExact: ['We ship to the U.S. and Canada.'],
+      },
+      {
+        // The flip side: a guard must NOT swallow a reply that genuinely
+        // ends on an abbreviation, or it would be held forever waiting for
+        // text that will never arrive. This is why the terminal boundary is
+        // exempt from the guards on the final pass.
+        name: 'REGRESSION: reply ending ON an abbreviation is still spoken',
+        chunks: ['Please call Dr.'],
+        expectAfterChunks: [],
+        expectFinalExact: ['Please call Dr.'],
+      },
+    ];
+
+    window.trillionSplitSentencesSelfTest = function trillionSplitSentencesSelfTest() {
+      let pass = 0, fail = 0;
+      for (const c of SENTENCE_SPLIT_CASES) {
+        const emitted = [];
+        let buf = '';
+        for (const chunk of c.chunks) {
+          buf += chunk;
+          const { sentences, rest } = trillionSplitSentences(buf, { final: false });
+          emitted.push(...sentences);
+          buf = rest;
+        }
+        const afterChunks = emitted.slice();
+        let ok = true;
+        const notes = [];
+        if (c.expectAfterChunks && JSON.stringify(afterChunks) !== JSON.stringify(c.expectAfterChunks)) {
+          ok = false; notes.push(`after-chunks mismatch: got ${JSON.stringify(afterChunks)}, want ${JSON.stringify(c.expectAfterChunks)}`);
+        }
+        const { sentences: finalSentences, rest: leftover } = trillionSplitSentences(buf, { final: true });
+        emitted.push(...finalSentences);
+        const tail = leftover.trim();
+        if (tail) emitted.push(tail); // mirrors sendToAgent: an unmatched final remainder is still spoken, never dropped
+        if (c.expectFinalExact && JSON.stringify(emitted) !== JSON.stringify(c.expectFinalExact)) {
+          ok = false; notes.push(`final mismatch: got ${JSON.stringify(emitted)}, want ${JSON.stringify(c.expectFinalExact)}`);
+        }
+        if (c.checkMaxLen && !emitted.every((s) => s.length <= MAX_SENTENCE_CHARS)) {
+          ok = false; notes.push(`a sentence exceeded MAX_SENTENCE_CHARS (${MAX_SENTENCE_CHARS}): ${JSON.stringify(emitted.map((s) => s.length))}`);
+        }
+        // Universal no-text-lost check: every non-whitespace char that went
+        // in must come back out somewhere (order-preserving concatenation).
+        const originalChars = c.chunks.join('').replace(/\s+/g, '');
+        const emittedChars = emitted.join('').replace(/\s+/g, '');
+        if (emittedChars !== originalChars) {
+          ok = false; notes.push(`TEXT LOST OR ALTERED: in=${JSON.stringify(originalChars)} out=${JSON.stringify(emittedChars)}`);
+        }
+        if (ok) { pass++; console.log(`[trillion voice] splitter self-test PASS: ${c.name}`); }
+        else { fail++; console.log(`[trillion voice] splitter self-test FAIL: ${c.name}`, notes); }
+      }
+      console.log(`[trillion voice] splitter self-test: ${pass} passed, ${fail} failed (of ${SENTENCE_SPLIT_CASES.length})`);
+      return { pass, fail, total: SENTENCE_SPLIT_CASES.length };
+    };
 
     async function sendToAgent(text, turnId) {
       window.setStatus('processing');
       setHint('Thinking…');
-      let spoke = false;
-      chatAbort = new AbortController();
-      const signal = chatAbort.signal;
       try {
         const res = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ message: text }),
-          signal,
+          signal: turnAbort.signal,
         });
         const reader = res.body.getReader();
         const dec = new TextDecoder();
         let buf = '';
         for (;;) {
           const { value, done } = await reader.read();
+          // DEFECT 4 (barge-in): re-check after every await, not just once
+          // up front. A speak() enqueued microseconds before an abort
+          // would otherwise slip through — cancelling the reader here is
+          // belt and braces alongside turnAbort's own signal aborting the
+          // fetch itself.
+          if (!isCurrent(turnId)) { try { reader.cancel(); } catch (e) {} return; }
           if (done) break;
           if (value && value.length) vlMark(turnId, 'firstModelToken');
           buf += dec.decode(value, { stream: true });
-          let m;
-          // Speak complete sentences as they stream in.
-          while ((m = buf.match(/[^.!?]+[.!?]+(\s|$)/))) {
-            const sentence = m[0].trim();
-            buf = buf.slice(m[0].length);
-            if (sentence) { speak(sentence, turnId); spoke = true; }
-          }
+          // Speak complete sentences as they stream in. SENTENCE_STREAM_RE
+          // only fires on whitespace we've actually received — see the
+          // splitter's comment block above for why that matters.
+          const { sentences, rest } = trillionSplitSentences(buf, { final: false });
+          for (const s of sentences) enqueueSentence(s, turnId);
+          buf = rest;
         }
-        const tail = buf.trim();
-        if (tail) { speak(tail, turnId); spoke = true; }
+        // Final flush: SENTENCE_FINAL_RE runs exactly once, here, after the
+        // reader has closed and no more text can arrive to disprove a
+        // boundary that only end-of-buffer (not real whitespace) confirms.
+        const { sentences: finalSentences, rest: leftover } = trillionSplitSentences(buf, { final: true });
+        for (const s of finalSentences) enqueueSentence(s, turnId);
+        // Hold-one-ahead's tail (DEFECT 3): if we're holding a sentence
+        // back and what's left over is a short "runt" (a trailing
+        // "Thanks!" or similar), fold it into the held sentence instead of
+        // paying for an extra /api/tts round trip and leaving an audible
+        // seam. A longer leftover is spoken as its own final utterance.
+        let tail = leftover.trim();
+        const RUNT_TAIL_CHARS = 25;
+        if (held !== null) {
+          if (tail && tail.length < RUNT_TAIL_CHARS) { held = held + ' ' + tail; tail = ''; }
+          const h = held; held = null;
+          speak(h, turnId, !tail); // final unless a real (non-runt) tail still has to follow it
+        }
+        if (tail) speak(tail, turnId, true);
+        // Blocker 1 fix: reached the end of the try block without
+        // throwing — the stream completed normally, whether or not it
+        // actually said anything. This is what turnStreamOk means: it is
+        // NOT "the turn spoke" (that's turnSpokeAny), it's "nothing went
+        // wrong finding that out". See maybeFinishTurn below for how the
+        // two combine.
+        if (isCurrent(turnId)) turnStreamOk = true;
       } catch (err) {
-        // A barge-in abort is the person interrupting on purpose, not a
-        // failure — the new turn already owns the UI, so say nothing.
-        if (err && err.name === 'AbortError') return;
-        setHint('Connection error — is the server running?');
-      }
-      if (!spoke) {                  // sign-off / empty reply → stay silent
-        window.setStatus('idle');
-        setHint(canRecord ? IDLE_HINT : 'Voice input unsupported here — use the terminal');
+        // An intentional barge-in (cancelSpeech -> turnAbort.abort()) must
+        // never surface as "Connection error" — see cancelSpeech's comment
+        // for why this fetch carries a signal at all. turnStreamOk is
+        // deliberately left false here (its beginTurn()-reset default) for
+        // every other error path — server down, a 500 with a null body, a
+        // dropped connection, res.body.getReader() throwing — so
+        // maybeFinishTurn can tell this apart from a genuine empty-body
+        // sign-off instead of misreading a real failure as a graceful one.
+        if (!(err && err.name === 'AbortError')) setHint('Connection error — is the server running?');
+      } finally {
+        // DEFECT 2: the model stream itself is over regardless of how we
+        // got here (normal completion, abort, or network error). Only the
+        // still-current turn may act on that — a stale turn's finally must
+        // not flip the flag out from under whatever turn has started since
+        // (same guard pattern as speak()'s finally below).
+        if (isCurrent(turnId)) {
+          turnStreamComplete = true;
+          maybeFinishTurn(turnId); // also covers the silent sign-off case: if nothing was ever spoken, pendingSpeech is already 0
+        }
       }
     }
 
+    // ============= Speech queue, hold-one-ahead, turn completion =============
     // Sentences are spoken through a queue so playback stays in order even
     // if /api/tts responses for different sentences resolve out of order.
-    //
-    // Every queued sentence carries the generation it was queued in
-    // (smooth-voice_2 Tier 6). Barge-in bumps the generation, which is what
-    // actually makes an interruption stick: resetting speechQueue alone
-    // doesn't cancel the *old* chain, it just stops new work from queueing
-    // behind it — so the sentence after the one being spoken would still
-    // synthesize and play, right over the top of the new turn. The stale
-    // generation check drops those, and keeps their .finally() handlers from
-    // decrementing a pendingSpeech counter that barge-in already zeroed
-    // (which drove it negative, so it never hit 0 again and the orb stayed
-    // stuck on 'processing' for the rest of the session).
     let speechQueue = Promise.resolve();
     let pendingSpeech = 0;
     let currentAudio = null;
-    let speechGeneration = 0;
+    let held = null; // hold-one-ahead buffer (DEFECT 3) — at most one sentence, gated on queue busy-ness
 
-    function speak(sentence, turnId) {
-      const gen = speechGeneration;
+    // DEFECT 2: pendingSpeech hitting 0 used to double as "the reply is
+    // over," but it also hits 0 any time the speech queue drains faster
+    // than the model streams — a slow model between sentence 1 and
+    // sentence 2 flipped the orb to idle and the hint back to "Tap to
+    // speak" mid-reply. Idle now requires BOTH the model stream having
+    // actually finished (turnStreamComplete) AND the queue being empty.
+    function maybeFinishTurn(turnId) {
+      if (!turnStreamComplete || pendingSpeech !== 0) return;
+      if (!isCurrent(turnId)) return; // a stale turn's completion must never touch the live UI
+      window.setVoiceBright && window.setVoiceBright(0.0);
+      window.setStatus('idle');
+      // Blocker 1 fix: only overwrite the hint with the idle default when
+      // the stream actually completed WITHOUT error (turnStreamOk). An
+      // /api/chat failure set a "Connection error" hint in sendToAgent's
+      // catch block microseconds before this runs — turnStreamOk being
+      // false is how this function knows not to immediately clobber that
+      // with "Hands-free — just talk" (or "Tap to speak"), which is what
+      // used to make a server-down/network failure look, from the user's
+      // seat, exactly like hands-free calmly waiting for them to talk.
+      if (turnStreamOk) setHint(idleHintText());
+      // Tier 2/6 hands-free: the ONLY place a normal (non-early-exit) turn
+      // decides whether to re-arm the mic, and only after the 250ms settle
+      // delay inside handsFreeAdvance — never mid-reply, since this only
+      // runs once turnStreamComplete && pendingSpeech === 0 both hold.
+      // turnSpokeAny tells a real reply apart from a silent sign-off; when
+      // NEITHER spoke nor completed cleanly, turnStreamOk being false is
+      // what routes this to 'empty' instead of 'silent' — see
+      // handsFreeAdvance's 'empty'-kind comment for why that distinction
+      // (re-arm + count toward the noisy-room circuit breaker, vs.
+      // Tier 5's deliberate non-re-arm on a real sign-off) matters.
+      const kind = turnSpokeAny ? 'spoke' : (turnStreamOk ? 'silent' : 'empty');
+      handsFreeAdvance(kind);
+    }
+
+    // DEFECT 3 (hold-one-ahead, smooth-voice_2 Tier 4): GATED on the queue
+    // being busy. Unconditionally holding the newest sentence is wrong and
+    // deliberately not done here — it would delay sentence N's synthesis
+    // until sentence N+1 has fully streamed in (roughly 0.5-1.5s on this
+    // stack), converting a lookahead buffer into first-audio latency,
+    // which is exactly the dead air Tier 4 exists to remove.
+    function enqueueSentence(sentence, turnId) {
+      if (pendingSpeech > 0) {
+        // Something's already playing or synthesizing, so holding this one
+        // costs nothing. Release whatever was held before (if anything),
+        // then hold the new one.
+        if (held !== null) speak(held, turnId, false);
+        held = sentence;
+      } else {
+        // Speaker's idle — dispatch immediately. Holding here would stall
+        // the very first sentence of the turn for no benefit.
+        speak(sentence, turnId, false);
+      }
+    }
+
+    function speak(sentence, turnId, isFinal) {
       pendingSpeech++;
-      speechQueue = speechQueue.then(() => synthesizeAndPlay(sentence, turnId, gen)).catch((err) => {
+      // Tier 2/6 hands-free: only the still-current turn's speech counts as
+      // "this turn actually spoke" — same isCurrent guard as the .finally
+      // below, for the same reason (a stale turn must never affect the
+      // live turn's bookkeeping).
+      if (isCurrent(turnId)) turnSpokeAny = true;
+      speechQueue = speechQueue.then(() => synthesizeAndPlay(sentence, turnId, isFinal)).catch((err) => {
+        if (err && err.name === 'AbortError') return; // barge-in: expected, not a real tts error
         console.log('[trillion voice] tts error:', err);
       }).finally(() => {
-        if (gen !== speechGeneration) return; // interrupted; the counter isn't ours anymore
+        // DEFECT 5: only the still-current turn may decrement the shared
+        // counter. cancelSpeech() zeroes pendingSpeech synchronously on
+        // abort; a late .finally from that turn's now-orphaned promise
+        // must not touch it again, or the counter goes negative and
+        // pendingSpeech === 0 never fires correctly again for the life of
+        // the page (see synthesizeAndPlay's abort-settles-the-promise fix
+        // below for the other half of this bug).
+        if (!isCurrent(turnId)) return;
         pendingSpeech--;
-        if (pendingSpeech === 0) {
-          window.setVoiceBright && window.setVoiceBright(0.0);
-          window.setStatus('idle');
-          setHint(IDLE_HINT);
+        // Safety valve for hold-one-ahead: if the queue just drained while
+        // a sentence was being held back, dispatch it immediately. Without
+        // this, a queue that empties mid-hold produces exactly the dead
+        // air Tier 4 was supposed to remove.
+        if (pendingSpeech === 0 && held !== null) {
+          const h = held; held = null;
+          speak(h, turnId, true);
         }
+        maybeFinishTurn(turnId);
       });
     }
 
-    async function synthesizeAndPlay(sentence, turnId, gen) {
-      if (gen !== speechGeneration) return; // interrupted while waiting its turn in the queue
+    async function synthesizeAndPlay(sentence, turnId, isFinal) {
+      // DEFECT 4: bail before touching the network at all if a barge-in
+      // already superseded this turn. Nothing above this point awaits, so
+      // the module-level turnAbort provably still belongs to THIS turn by
+      // the time the fetch below actually fires.
+      if (!isCurrent(turnId)) return;
+      const signal = turnAbort.signal;
       const res = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: sentence }),
+        signal,
       });
+      if (!isCurrent(turnId)) return; // aborted while the fetch itself was in flight
       if (!res.ok) { console.log('[trillion voice] tts http', res.status); return; }
       // Read the body via a stream reader (like sendToAgent's model-token
       // read above) rather than res.arrayBuffer(), so "first audio byte"
@@ -1999,6 +3173,7 @@
       const chunks = [];
       for (;;) {
         const { value, done } = await reader.read();
+        if (!isCurrent(turnId)) { try { reader.cancel(); } catch (e) {} return; } // belt and braces alongside the signal above
         if (done) break;
         // vlMark no-ops after the first call each turn, so calling this on
         // every chunk of every sentence is fine: only the turn's actual
@@ -2006,34 +3181,60 @@
         if (value && value.length) vlMark(turnId, 'firstAudioByte');
         chunks.push(value);
       }
-      if (gen !== speechGeneration) return; // interrupted while synthesizing — don't start playing
       const url = URL.createObjectURL(new Blob(chunks, { type: contentType }));
       const audio = new Audio(url);
       currentAudio = audio;
       window.setVoiceBright && window.setVoiceBright(0.9);
       window.setStatus('processing');
+      // DEFECT 5: this promise must settle on abort too. Before this fix,
+      // cancelSpeech()'s currentAudio.pause() fired neither 'ended' nor
+      // 'error', so on a barge-in this await hung forever — the orphaned
+      // promise's .finally() then either never ran, or ran later and
+      // decremented pendingSpeech past the point cancelSpeech had already
+      // zeroed it, driving the counter negative and permanently breaking
+      // every future pendingSpeech === 0 check for the life of the page.
       await new Promise((resolve) => {
+        signal.addEventListener('abort', resolve, { once: true });
         audio.onplaying = () => { vlMark(turnId, 'firstSoundPlaying'); vlReport(turnId); };
         audio.onended = resolve;
         audio.onerror = resolve;
-        // Barge-in pauses this element mid-sentence, which fires neither
-        // 'ended' nor 'error' — without this the promise never settles, the
-        // object URL leaks, and the abandoned chain hangs forever.
+        // Also carried over from main's parallel fix (PR #19). The abort
+        // listener above already covers barge-in, but onpause settles the
+        // promise for ANY pause — including one this code didn't initiate —
+        // so the object URL can't leak and the chain can't hang.
         audio.onpause = resolve;
         audio.play().catch(resolve);
       });
       URL.revokeObjectURL(url);
       if (currentAudio === audio) currentAudio = null;
+      // isFinal doesn't change playback here today — it threads through as
+      // a marker for "this is the last utterance of the turn" so a future
+      // tier (e.g. a "wrapping up" UI cue) can key off it directly instead
+      // of re-deriving hold-one-ahead state after the fact.
     }
 
     function cancelSpeech() {
-      // Bump first: everything already queued or in flight reads this and
-      // bails, rather than playing over whatever comes next.
-      speechGeneration++;
+      // DEFECT 4 (THE user-visible bug): this used to only pause playback
+      // and reset the local queue bookkeeping — it never touched the
+      // in-flight /api/chat or /api/tts fetches, so sendToAgent's read
+      // loop kept running and kept re-enqueuing speak() onto the
+      // (just-reset) queue. An interrupted reply would resume speaking a
+      // moment later. Aborting turnAbort, and zeroing activeTurnId so
+      // every isCurrent() check downstream starts failing, is what
+      // actually stops it — see the turn-lifecycle comment block above
+      // startListening for the full picture, including the note that this
+      // does NOT stop the server's model call.
+      if (turnAbort) { try { turnAbort.abort(); } catch (e) {} }
+      activeTurnId = 0; // sentinel: isCurrent() now fails for every in-flight turn
       if (currentAudio) { try { currentAudio.pause(); } catch (e) {} currentAudio = null; }
-      if (chatAbort) { try { chatAbort.abort(); } catch (e) {} chatAbort = null; }
       speechQueue = Promise.resolve();
       pendingSpeech = 0;
+      held = null;
+      turnStreamComplete = false;
+      // Carried over from the parallel barge-in fix that landed on main
+      // (PR #19): drop the orb's voice brightness here too. Without it an
+      // interruption leaves the orb lit as though Trillion were still
+      // speaking, until something else happens to reset it.
       window.setVoiceBright && window.setVoiceBright(0.0);
     }
   })();

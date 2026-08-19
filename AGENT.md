@@ -91,10 +91,11 @@ Swapping providers = changing one env var (`TRILLION_PROVIDER=claude|openai|olla
 | Later | Wake-word open mic | Same |
 
 STT: Deepgram (fast, streaming, accurate) via `POST /api/transcribe`.
-TTS: **Piper**, running locally and offline via `POST /api/tts` — not ElevenLabs.
-ElevenLabs' free tier blocks all API voice access (premade *and* cloned voices
-both require a paid plan), so TTS moved on-device. Voice model defaults to
-`voices/en_US-amy-medium.onnx`, overridable with `PIPER_VOICE_PATH`.
+TTS: **Piper** by default (running locally and offline via `POST /api/tts`), or
+**ElevenLabs** if `TTS_PROVIDER=elevenlabs` is set (requires a paid ElevenLabs plan).
+Piper model defaults to `voices/en_US-amy-medium.onnx`, overridable with `PIPER_VOICE_PATH`.
+Piper is warmed at server startup to eliminate the ~3.5s model-load cost on the very first
+voice turn after a restart.
 
 Tier 3 shipped as tap-to-toggle rather than hold-a-key: tap the mic to start,
 tap again to stop and send. The browser speaks each complete sentence as it
@@ -181,9 +182,9 @@ All six tiers are built. Remaining work is tracked in [`README.md`](README.md)'s
 - **Tier 2:** Web research shipped as a general `web_search` tool (Brave or Firecrawl behind
   one seam) rather than a narrower lead tracker. Still open whether a dedicated
   opportunity/lead surface is worth building on top.
-- **Tier 3:** Moot — ElevenLabs' free tier blocks API voice access entirely, so TTS runs
-  locally on Piper (`en_US-amy-medium` by default). A different Piper voice is a one-env-var
-  change.
+- **Tier 3:** TTS runs locally on Piper (`en_US-amy-medium` by default, one-env-var change to swap voices).
+  ElevenLabs is available as an optional selectable provider via `TTS_PROVIDER=elevenlabs`
+  for users with a paid plan. Piper is warmed at server startup to eliminate cold-start latency.
 - **Tier 4:** Notes live in the Aires Ai Brain vault (`~/AiresAiBrain`, rclone-mounted Google
   Drive), indexed into SQLite FTS5 for `search_notes`.
 

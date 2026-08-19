@@ -43,8 +43,21 @@ class TestPiperWarmUpWiring(AioHTTPTestCase):
         # anyone downloads the voice file.
         self._prev_env = {
             k: os.environ.get(k)
-            for k in ("PIPER_VOICE_PATH", "TRILLION_NOTES_VAULT_PATH", "TRILLION_NOTES_INDEX_PATH")
+            for k in (
+                "PIPER_VOICE_PATH",
+                "TRILLION_NOTES_VAULT_PATH",
+                "TRILLION_NOTES_INDEX_PATH",
+                "TTS_PROVIDER",
+            )
         }
+        # Pin TTS_PROVIDER, not just the model path. _warm_piper_voice now
+        # returns early when Piper isn't the configured provider (ElevenLabs
+        # became selectable after this test was written), so an inherited
+        # TTS_PROVIDER=elevenlabs would make every assertion here vacuous —
+        # no warm-up task, no degraded path, nothing to assert on.
+        # tests/__init__.py calls load_dotenv(), so "inherited" includes
+        # whatever .env happens to say. Same env-leak class as e84f7ae.
+        os.environ["TTS_PROVIDER"] = "piper"
         os.environ["PIPER_VOICE_PATH"] = os.path.join(self.tmp, "missing-voice.onnx")
         os.environ["TRILLION_NOTES_VAULT_PATH"] = os.path.join(self.tmp, "vault")
         os.environ["TRILLION_NOTES_INDEX_PATH"] = os.path.join(self.tmp, "notes_index.db")

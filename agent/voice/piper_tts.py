@@ -24,12 +24,20 @@ from __future__ import annotations
 
 import io
 import os
+import threading
 import wave
 
 from piper.voice import PiperVoice
 
-_voice: PiperVoice | None = None
-_voice_model_path: str | None = None
+# The loaded voice and the path it came from are published as ONE tuple in a
+# single global, rather than as two. That keeps the pair atomic for the
+# unlocked fast-path read in _load_voice: two separate writes would let a
+# reader land between them and see (new voice, old path), handing a caller
+# asking for the OLD path the NEW voice object. Unreachable today
+# (PIPER_VOICE_PATH doesn't change mid-process, and this starts as None so the
+# first load is safe either way), but one tuple closes it permanently.
+_loaded: tuple[str, PiperVoice] | None = None
+_voice_lock = threading.Lock()
 
 # Short, cheap, and never heard by anyone — just enough audio to force the
 # first ONNX inference during warm_up(). Loading the model and *running* it
@@ -42,17 +50,31 @@ class SynthesisError(RuntimeError):
 
 
 def _load_voice(model_path: str) -> PiperVoice:
-    global _voice, _voice_model_path
-    if _voice is not None and _voice_model_path == model_path:
-        return _voice
-    if not os.path.isfile(model_path):
-        raise SynthesisError(f"Piper voice model not found at {model_path}.")
-    config_path = model_path + ".json"
-    if not os.path.isfile(config_path):
-        raise SynthesisError(f"Piper voice config not found at {config_path}.")
-    _voice = PiperVoice.load(model_path, config_path=config_path)
-    _voice_model_path = model_path
-    return _voice
+    global _loaded
+    # Fast path: no lock once a voice is loaded and matches. This runs on every
+    # synthesis call, and locking unconditionally would serialize otherwise
+    # independent requests on the common case. One tuple read is atomic, so it
+    # can never observe a half-published pair.
+    loaded = _loaded
+    if loaded is not None and loaded[0] == model_path:
+        return loaded[1]
+    with _voice_lock:
+        # Re-check under the lock: another thread may have loaded this exact
+        # model while we waited. Without this, serve.py's default multi-worker
+        # executor lets two concurrent first-requests — two browser tabs, or
+        # the startup warm-up racing a real user turn — both see None and both
+        # load the ~63MB model, leaving one copy unreachable.
+        loaded = _loaded
+        if loaded is not None and loaded[0] == model_path:
+            return loaded[1]
+        if not os.path.isfile(model_path):
+            raise SynthesisError(f"Piper voice model not found at {model_path}.")
+        config_path = model_path + ".json"
+        if not os.path.isfile(config_path):
+            raise SynthesisError(f"Piper voice config not found at {config_path}.")
+        voice = PiperVoice.load(model_path, config_path=config_path)
+        _loaded = (model_path, voice)
+        return voice
 
 
 def synthesize(text: str, model_path: str) -> bytes:
@@ -65,7 +87,8 @@ def synthesize(text: str, model_path: str) -> bytes:
 
 def is_warm(model_path: str) -> bool:
     """Whether synthesize() would skip the model load for this path."""
-    return _voice is not None and _voice_model_path == model_path
+    loaded = _loaded
+    return loaded is not None and loaded[0] == model_path
 
 
 def warm_up(model_path: str) -> None:
