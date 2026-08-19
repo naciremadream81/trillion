@@ -4,9 +4,9 @@
 
 Trillion is a **single-user** Python agent: chat in the terminal or browser, swap model providers with one env var, track spend in SQLite, spawn specialist sub-agents (with approval), and run Software Factory builds into `generated-projects/`. Product intent and safety rules live in [`AGENT.md`](AGENT.md). Session resume notes are in [`HANDOFF.md`](HANDOFF.md) (may lag the code — trust this README and the tree for what runs today).
 
-**Working today:** text brain (CLI + web chat), provider seam, tool registry, cost dashboard, Agent Factory, Software Factory, voice V1 (Deepgram STT + local Piper TTS, wired to `POST /api/transcribe` and `POST /api/tts`), Tier 6 safety rails (confirmation gate, audit log, `/pause` kill switch), durable cross-session memory (`agent/memory.py` + `remember_fact`/`forget_fact`), the heartbeat scheduler with quiet hours and the Code Sentinel, the `search_notes` and `draft_email` tools, untrusted-content sanitization on every tool result, and the security shield (`GET /api/security/status`).
+**Working today:** text brain (CLI + web chat), provider seam, tool registry, cost dashboard, Agent Factory, Software Factory, voice V1 (Deepgram STT + selectable TTS: local Piper by default or ElevenLabs via `TTS_PROVIDER=elevenlabs`, wired to `POST /api/transcribe` and `POST /api/tts`), hands-free voice mode (optional; push-to-talk remains default), Tier 6 safety rails (confirmation gate, audit log, `/pause` kill switch), durable cross-session memory (`agent/memory.py` + `remember_fact`/`forget_fact`), the heartbeat scheduler with quiet hours and the Code Sentinel, the `search_notes` and `draft_email` tools, untrusted-content sanitization on every tool result, and the security shield (`GET /api/security/status`).
 
-**Not done yet:** acting on the voice latency numbers below (smooth-voice_2 Tiers 2-6) — end-of-turn detection tuning, prompt-caching hygiene, and any provider change are all still open, and a provider swap requires asking Sean first regardless.
+**Not done yet:** streaming STT (which would enable layered end-of-turn endpointing), acoustic barge-in (talking over Trillion while it speaks — not implemented to avoid self-interruption on an open-speaker Pi), and server-side request cancellation when a client aborts (today an aborted `/api/chat` keeps generating server-side until a write hits the dropped connection, wasting tokens). Cold-start TTS latency has been addressed by warming the Piper model at server startup (~3.7s removed from first voice turn after any restart). Hands-free VAD uses one honest silence threshold (1200ms) rather than layered endpointing; a streaming STT signal (e.g., Deepgram WebSocket `utterance_end_ms`) would make a faster variant worth revisiting.
 
 Self-knowledge (`agent/selfknowledge/`, generating `context/self/trillion.md`) and cosmic-orb UI tiers 4-6 (sub-agent constellation, dispatch beams/rings, performance mode, `prefers-reduced-motion`) are built — the orb UI change couldn't be visually verified against a real WebGL context in this session's sandboxed preview browser (no GPU there), so treat it as code-reviewed and unit-tested but not yet eyeballed running; check it in a real browser before relying on it.
 
@@ -16,9 +16,54 @@ Voice latency instrumentation (smooth-voice_2 Tier 1, measure-only) is built int
 |---|---|
 | STT (Deepgram nova-2) | ~670ms–1.2s, scales with clip length (verified via a real TTS→STT round trip, transcript matched the source text) |
 | Model (Claude, first token) | ~1.2–1.4s for a short reply |
-| TTS (Piper, local) | ~180–620ms/sentence once warm, scales with sentence length, but **~3.5s extra on the very first synthesis after the process starts** while the ~63MB voice model loads — `agent/voice/piper_tts.py` caches the loaded model in a module-level global for the rest of that process's lifetime, so this is a one-time-per-process cost, not a per-idle-period one |
+| TTS (Piper, local) | ~180–620ms/sentence once warm, scales with sentence length. There used to be **~3.5s extra on the very first synthesis after the process starts** while the ~63MB voice model loaded; that cost is now paid at server startup instead — see below |
 
-Straight add of the three "first token/byte" legs is ~2.05–3.22s before the first sound plays once the process is warm (STT + model + TTS-warm ranges above). On a fresh process — right after `trillion-orb.service` starts or restarts — add the ~3.5s TTS cold-start tax on top: **~5.55–6.72s** before the first sound plays, once. That one-time cost and the STT leg (previously unmeasured — `DEEPGRAM_API_KEY` wasn't set in `.env` at the time) are both now real, current numbers worth weighing before picking a Tier 2+ target.
+Straight add of the three "first token/byte" legs is ~2.05–3.22s before the first sound plays once the process is warm (STT + model + TTS-warm ranges above).
+
+### The cold-start tax is gone (measured before/after)
+
+`serve.py`'s `_warm_tts` startup hook synthesizes one short word in a background
+thread as the server comes up, so the ONNX session init and first-inference
+allocation are already done before anyone speaks. It is best-effort and never
+blocks startup — a missing voice model prints one line and the server continues.
+
+Measured with `scripts/voice_bench.py` on the Pi, same machine, same load, on the
+first `/api/tts` request of a fresh process:
+
+| | first-byte |
+|---|---|
+| before (cold) | **4822ms** |
+| after (warmed at startup) | **1158ms** |
+
+**~3.7s removed from the first voice turn after any restart or deploy.** The
+1158ms figure is marginally *faster* than the same build's warm reading, i.e. the
+first request now behaves as a warm one — the tax is eliminated, not reduced.
+A fresh process is therefore ~2.05–3.22s to first sound, the same as a warm one,
+rather than the ~5.55–6.72s it used to be.
+
+> **Caveat on the per-sentence numbers above.** The ~180–620ms/sentence figures
+> are the earlier idle-machine measurements and are deliberately left as-is. A
+> re-run during this work reported 1338–4839ms/sentence, but the Pi was saturated
+> at the time (load average 4.18 on 4 cores, mostly from the coding session doing
+> the work), so those readings are not comparable and were not published. The
+> cold-start delta above *is* safe to publish from the same loaded run, because a
+> before/after comparison on one machine cancels the load out — an absolute
+> per-sentence number does not. **The per-sentence row still wants an idle
+> re-measure.**
+
+### `scripts/voice_bench.py`
+
+Read-only benchmark of the **server** legs only — `/api/tts`, `/api/chat`, and an
+`/api/transcribe` round trip that synthesizes a known sentence and transcribes it
+back. It cannot measure mic capture, end-of-turn detection, or browser playback;
+those live in the browser and are what `window.trillionVoiceLatency` reports. Use
+the script to tell whether a slowdown is server-side, and the browser breakdown
+for the number a waiting person actually feels. It spends real Deepgram and model
+credits on every run.
+
+```bash
+python scripts/voice_bench.py
+```
 
 ---
 

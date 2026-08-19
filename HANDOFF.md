@@ -193,6 +193,49 @@ Slash commands inside the CLI: `/reset`, `/history`, `/model`, `/help`, `/quit`.
      calls returning real playable WAV audio at ~0.2-0.35x realtime, and via
      the full pipeline in the user's actual browser.
 
+### Browser console testing
+
+There is no JavaScript test runner in this repo, so the following are the only
+executable records of voice and sentence-splitting behavior:
+
+```javascript
+// Sentence splitter: tests regex-based sentence boundary detection
+// including fragments, abbreviations, and edge cases (11 test cases, all passing)
+window.trillionSplitSentencesSelfTest()
+
+// Hands-free VAD (Voice Activity Detector): tests silence detection logic
+// including leading/trailing silence, mid-thought pauses, etc. (13 test cases, all passing)
+window.trillionVadSelfTest()
+```
+
+Run these from the browser console on the served page (port 8123). The VAD tunables
+can be inspected and adjusted live:
+
+```javascript
+// Read current settings
+console.log(window.trillionVoiceVad)
+
+// How long a pause must last before the turn ends, in ms (default 1200)
+window.trillionVoiceVad.silenceMs = 1400
+```
+
+Read on every tick, so changes take effect mid-conversation without reloading —
+that is the point of them being on `window`: endpointing has to be tuned against
+a real room and a real speaking pace, not guessed at in an editor.
+
+Two things to know before turning `silenceMs` down. It is the **only** silence
+threshold: a layered fast/slow pair was built, measured, and deliberately removed
+(the "confidence" signal it branched on — a long final speech burst — turned out
+to mean "they said a lot", not "they finished", so it cut people off mid-sentence;
+the full history is commented above `VAD_DEFAULTS` in `index.html`). And it
+protects pauses strictly *shorter* than its value — 1200ms leaves roughly 200ms of
+margin over the ~1s mid-thought pause `playbooks/smooth-voice_2.md` warns about.
+Lowering it trades directly against getting cut off while thinking.
+
+Poisoned values self-heal: a non-finite or missing tunable falls back to the
+documented default rather than throwing, and the whole object can be clobbered
+without breaking the detector.
+
 ### Known issue — voice provider history (resolved, kept for context)
 
 Voice went through three iterations before landing. Documented here so a
@@ -259,7 +302,7 @@ voice quality turns out to be unacceptable in daily use, or if
 | Voice end-state | Push-to-talk → wake word | Text-first always, voice is a layer |
 | Voice V0 | Browser-native SpeechRecognition + speechSynthesis | Free, zero setup — **hit a permanent Pi/Chromium key-entitlement limitation** |
 | Voice STT | Deepgram (cloud, paid) | Free browser STT was a hardware dead end on this Pi's Chromium |
-| Voice TTS | Piper (local, free, offline) | ElevenLabs' free tier blocks **all** API voice access, premade or self-cloned — confirmed live; Piper avoids both the cost and the vendor gate |
+| Voice TTS | Piper (local, free, offline) by default | Piper is the default and free. ElevenLabs is available as a selectable provider (`TTS_PROVIDER=elevenlabs`) for users with a paid plan; the free tier does block API access. Model defaults to `voices/en_US-amy-medium.onnx`, overridable via `PIPER_VOICE_PATH`. Piper model is warmed at server startup to eliminate the ~3.5s cold-start tax on first voice turn. |
 | Safety gate | Per-action confirmation | Never send/spend/delete/change without explicit yes |
 | Proactive | Yes, quiet by default | Earns interruptions, doesn't assume them |
 | DB access | Read-only `trillion_analytics` role via Supabase Shared Pooler | Free tier, IPv4, defense in depth (role + SQL validator) |
@@ -338,6 +381,9 @@ Paste this into the chat:
 
 > "We're building Trillion. Read README.md for what's built, AGENT.md for the
 > product and safety spec, and HANDOFF.md for how we got here. All six tiers,
-> self-knowledge, and cosmic-orb UI tiers 4-6 are done; remaining work is
-> voice latency instrumentation. Don't swap any provider (model, STT, TTS)
-> without asking me first, and don't merge anything without my say-so."
+> self-knowledge, and cosmic-orb UI tiers 4-6 are done. Remaining work: streaming
+> STT (for better endpointing), acoustic barge-in, and server-side request cancellation.
+> Cold-start latency is fixed (Piper warmed at startup). Hands-free VAD ships with
+> a single 1200ms silence threshold.
+> Don't swap any provider (model, STT, TTS) without asking me first, and don't merge
+> anything without my say-so."

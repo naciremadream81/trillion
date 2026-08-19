@@ -292,6 +292,83 @@ async def _build_notes_index(_app: web.Application) -> None:
         print(f"Notes index unavailable ({e}); continuing with stale/no index.")
 
 
+async def _warm_tts(app: web.Application) -> None:
+    """
+    Best-effort Piper warm-up, same posture as _build_notes_index above.
+
+    README.md records ~3.5s of extra latency on the *first* Piper synthesis
+    after process start: loading the ~63MB ONNX model plus first-inference
+    allocation, neither of which happens again once the voice is cached (see
+    piper_tts.py). Left alone, that 3.5s tax lands on whichever user happens
+    to speak first after a deploy or restart. Paying it here at startup
+    instead means it's gone before anyone's listening.
+
+    This is launched as a background task (app["tts_warm_task"]), NOT
+    awaited inline, and that's the whole point: blocking on_startup on this
+    would just move the 3.5s from "first user turn" to "server refuses
+    connections for 3.5s after every restart" — trading one bad latency
+    number for a worse one. Mirrors _start_heartbeat_scheduler's pattern of
+    stashing a task on `app` for on_cleanup to cancel via _stop_task.
+
+    Skipped when settings.tts_provider != "piper": there is nothing to warm
+    on the ElevenLabs path (no local model, no first-inference cost — it's a
+    network call every time), so starting this thread would just burn a
+    little startup CPU for no latency win.
+
+    Warms with "Ready." rather than a bare "." on purpose: a bare period can
+    phonemize to nothing and short-circuit before the actual inference path
+    runs, which would pay for ONNX session init but skip the first-inference
+    allocation this warm-up exists to pre-pay. A short real word forces the
+    full synthesize() path Piper actually runs on a live request.
+    """
+    app["tts_warm_task"] = None
+    try:
+        settings = get_settings()
+        if settings.tts_provider != "piper":
+            return
+        from agent.voice.piper_tts import synthesize
+
+        model_path = settings.piper_voice_path
+        if not os.path.isabs(model_path):
+            model_path = os.path.join(PROJECT_ROOT, model_path)
+        app["tts_warm_task"] = asyncio.create_task(
+            asyncio.to_thread(synthesize, "Ready.", model_path)
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"Piper warm-up unavailable ({e}); continuing.")
+
+
+async def _stop_tts_warm(app: web.Application) -> None:
+    """
+    Dedicated cleanup for tts_warm_task — deliberately NOT routed through
+    _stop_task (used by the three other background tasks on this app).
+    _stop_task's `await task` sits inside `contextlib.suppress(asyncio.
+    CancelledError)` only, which is correct for those three: they're
+    run_forever() loops that never end except by cancellation. tts_warm_task
+    is the one task on this app that is both finite (it completes on its own,
+    seconds after startup — see _warm_tts) AND fallible (it raises
+    SynthesisError whenever voices/en_US-amy-medium.onnx hasn't been
+    downloaded yet, e.g. a fresh clone or a deploy that hasn't run that
+    README-documented step). By the time on_cleanup runs, the task is
+    typically already finished: task.cancel() on a completed task is a
+    no-op, and `await task` then re-raises whatever it finished with. A
+    stored SynthesisError is not a CancelledError, so _stop_task's
+    suppress() would NOT catch it — it would escape runner.cleanup() and
+    blow up every `systemctl stop`/restart of trillion-orb.service. The
+    failure itself is already handled where it happened (_warm_tts's own
+    try/except logs it); cleanup's only job is making sure it doesn't
+    surface a second time here. So Exception is suppressed broadly, and
+    CancelledError is suppressed alongside it (it's a BaseException, not an
+    Exception, so it needs listing explicitly) in case the task was instead
+    still running at shutdown and cancel() actually did something.
+    """
+    task = app.get("tts_warm_task")
+    if task is not None:
+        task.cancel()
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            await task
+
+
 async def _stop_factory_watcher(app: web.Application) -> None:
     task = app.get("factory_watcher_task")
     if task is not None:
@@ -483,16 +560,13 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
         return web.json_response({"text": text})
 
     async def synthesize_speech(request: web.Request) -> web.Response:
-        # Voice V1 TTS: one sentence in, one WAV clip out. Called once per
+        # Voice V1 TTS: one sentence in, one audio clip out. Called once per
         # sentence as the agent's reply streams, so playback can start early.
-        # Piper runs on-device and is CPU-bound/blocking, so it's offloaded
-        # to a thread rather than awaited directly on the event loop.
-        from agent.voice.piper_tts import SynthesisError, synthesize
-
-        settings = get_settings()
-        model_path = settings.piper_voice_path
-        if not os.path.isabs(model_path):
-            model_path = os.path.join(PROJECT_ROOT, model_path)
+        # Provider is a deploy-time choice (settings.tts_provider /
+        # TTS_PROVIDER), not a per-request one — see docs/superpowers/specs/
+        # 2026-08-17-elevenlabs-tts-provider-design.md. text is parsed first,
+        # before either provider branch, since both need it and neither needs
+        # the other's setup.
         try:
             data = await request.json()
         except Exception:
@@ -500,6 +574,33 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
         text = (data.get("text") or "").strip()
         if not text:
             return web.Response(status=400, text="missing text")
+
+        settings = get_settings()
+        if settings.tts_provider == "elevenlabs":
+            # Cloud call: I/O-bound, so it's awaited directly rather than
+            # offloaded to a thread — see elevenlabs_tts.py's docstring.
+            from agent.voice.elevenlabs_tts import SynthesisError, synthesize
+
+            try:
+                audio = await synthesize(
+                    text,
+                    settings.elevenlabs_api_key,
+                    settings.elevenlabs_voice_id,
+                    settings.elevenlabs_model_id,
+                )
+            except SynthesisError as e:
+                return web.Response(status=400, text=str(e))
+            return web.Response(body=audio, content_type="audio/mpeg")
+
+        # Default (including unset or an unrecognized TTS_PROVIDER value —
+        # see the comment above tts_provider in agent/config.py): Piper,
+        # on-device. CPU-bound and blocking, so it's offloaded to a thread
+        # rather than awaited directly on the event loop.
+        from agent.voice.piper_tts import SynthesisError, synthesize
+
+        model_path = settings.piper_voice_path
+        if not os.path.isabs(model_path):
+            model_path = os.path.join(PROJECT_ROOT, model_path)
         loop = asyncio.get_running_loop()
         try:
             audio = await loop.run_in_executor(None, synthesize, text, model_path)
@@ -645,9 +746,11 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
     app.on_startup.append(_build_notes_index)
     app.on_startup.append(_start_software_factory)
     app.on_startup.append(_start_heartbeat_scheduler)
+    app.on_startup.append(_warm_tts)
     app.on_cleanup.append(_stop_factory_watcher)
     app.on_cleanup.append(_stop_software_factory)
     app.on_cleanup.append(_stop_heartbeat_scheduler)
+    app.on_cleanup.append(_stop_tts_warm)
     return app
 
 
