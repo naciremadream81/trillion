@@ -508,6 +508,24 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
     async def index(_request: web.Request) -> web.FileResponse:
         return web.FileResponse(os.path.join(PROJECT_ROOT, "index.html"))
 
+    def _client_gone(request: web.Request) -> bool:
+        """
+        Whether the browser has dropped this request.
+
+        smooth-voice_2 Tier 6 / README's "not done yet": an aborted /api/chat
+        used to keep generating until a write happened to hit the dropped
+        connection. aiohttp buffers, so that can be the whole rest of the
+        reply — every token of it billed, for a turn nobody will ever read.
+        Barge-in aborts the fetch on the client (index.html's turnAbort), so
+        this is not a rare path; it fires every time Sean talks over Trillion.
+
+        transport.is_closing() is the earliest honest signal available here.
+        A write raising ConnectionResetError is the backstop, not the primary
+        check — by the time it raises, the buffer has already drained.
+        """
+        transport = request.transport
+        return transport is None or transport.is_closing()
+
     async def chat(request: web.Request) -> web.StreamResponse:
         # Browser voice: receives transcribed text, streams the agent's reply
         # text back chunk-by-chunk. STT/TTS happen in the browser (V0).
@@ -530,13 +548,36 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
             resp.set_cookie(_SESSION_COOKIE, session_id, httponly=True, samesite="Strict")
         await resp.prepare(request)
         if message:
+            turn = None
             try:
                 agent = _get_agent(session_id)
-                async for piece in agent.turn(message):
-                    await resp.write(piece.encode("utf-8"))
+                turn = agent.turn(message)
+                async for piece in turn:
+                    if _client_gone(request):
+                        # Stop generating — and stop paying — for a reply
+                        # nobody is listening to. Breaking here closes the
+                        # generator in the finally below, which unwinds into
+                        # the provider stream and ends the API call.
+                        break
+                    try:
+                        await resp.write(piece.encode("utf-8"))
+                    except (ConnectionResetError, ConnectionAbortedError):
+                        break
             except Exception as e:  # surface the real error to the client
-                await resp.write(f"\n[agent error: {type(e).__name__}: {e}]".encode("utf-8"))
-        await resp.write_eof()
+                try:
+                    await resp.write(f"\n[agent error: {type(e).__name__}: {e}]".encode("utf-8"))
+                except (ConnectionResetError, ConnectionAbortedError):
+                    pass
+            finally:
+                # Explicit rather than left to garbage collection: the point
+                # is to end the upstream API call *now*, and GC timing is not
+                # a billing policy.
+                if turn is not None:
+                    await turn.aclose()
+        try:
+            await resp.write_eof()
+        except (ConnectionResetError, ConnectionAbortedError):
+            pass
         return resp
 
     async def transcribe_audio(request: web.Request) -> web.Response:
