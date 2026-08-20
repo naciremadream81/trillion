@@ -18,7 +18,7 @@ from .base import BaseProvider, TextChunk, ToolCall, ProviderResponse, TokenUsag
 
 
 class OpenAIProvider(BaseProvider):
-    def __init__(self) -> None:
+    def __init__(self, model: str | None = None) -> None:
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             raise EnvironmentError(
@@ -27,7 +27,7 @@ class OpenAIProvider(BaseProvider):
             )
         base_url = os.environ.get("OPENAI_BASE_URL")  # None = default OpenAI endpoint
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-        self._model = os.getenv("OPENAI_MODEL", "gpt-4o")
+        self._model = model or os.getenv("OPENAI_MODEL", "gpt-4o")
 
     @property
     def model_name(self) -> str:

@@ -363,6 +363,28 @@ class FactoryRepo:
             return FAILED
         return PENDING
 
+    def set_agent_model(self, slug: str, model: str | None) -> bool:
+        """
+        Declare (or clear) the model a spawned specialist runs on.
+
+        orchestration.md Tier 2 wants a model per agent so cheap work runs on
+        a cheap model. None/"" clears the override back to Trillion's own
+        model. Returns whether a row was actually updated, so a caller can
+        tell a typo'd slug from a successful change.
+
+        Deliberately not validated against a list of known model names: the
+        set of valid names is the provider's business and changes without
+        this code changing. agent/factory/dispatch.py falls back to the
+        default model and logs if the name turns out to be unusable, which
+        is the right place for that to surface.
+        """
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE spawned_agents SET model = ? WHERE slug = ?",
+                ((model or "").strip() or None, slug),
+            )
+            return bool(cur.rowcount)
+
     def list_active_agents(self) -> list[dict]:
         with self._connect() as conn:
             rows = conn.execute(

@@ -21,9 +21,9 @@ from .base import BaseProvider, TextChunk, ToolCall, ProviderResponse, TokenUsag
 
 
 class OllamaProvider(BaseProvider):
-    def __init__(self) -> None:
+    def __init__(self, model: str | None = None) -> None:
         self.base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
-        self._model = os.getenv("OLLAMA_MODEL", "llama3.2")
+        self._model = model or os.getenv("OLLAMA_MODEL", "llama3.2")
 
     @property
     def model_name(self) -> str:

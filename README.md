@@ -196,6 +196,7 @@ Type normally for a streaming turn. Slash commands:
 | `/pending` | List spawn tasks awaiting approval |
 | `/approve <id>` | Approve a draft and mint the agent |
 | `/reject <id> <feedback>` | Reject with feedback (revision loop) |
+| `/agent-model <slug> <model\|default>` | Set which model a specialist runs on; `default` clears it back to Trillion's |
 | `/build <description>` | Software Factory: start a background project build |
 | `/builds` | List recent builds and status |
 | `/pause` | Kill switch: stop gated actions, background dispatch, and builds (conversation and reads keep working) |

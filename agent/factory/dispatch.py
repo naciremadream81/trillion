@@ -137,6 +137,30 @@ class ConfigDrivenAgent:
         # it must not be able to approve one either, since its history isn't
         # Sean's conversation. Tier 6's untrusted-content pass belongs at the
         # registry for exactly this reason: that one *does* need to reach here.
+        # orchestration.md Tier 2, "a declared model per agent". NULL means
+        # "use Trillion's" — the overwhelmingly common case, and the reason
+        # this builds a second provider only when a model is actually
+        # declared rather than always. Falls back to the shared provider if
+        # the override can't be built (an unknown model name, a missing SDK):
+        # a specialist running on the default model is a far better failure
+        # than a specialist that won't run at all.
+        declared_model = (row.get("model") or "").strip()
+        if declared_model:
+            try:
+                # Same provider *family* as the main agent, different model.
+                # Rebuilt from the shared instance's own class rather than
+                # from TRILLION_PROVIDER, because main.py's --provider flag
+                # can override that env var — reading the env here would
+                # silently put a specialist on a different provider than the
+                # conversation that dispatched it.
+                provider = type(provider)(declared_model)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "specialist %s declares model %r but it could not be built (%s); "
+                    "falling back to the default model",
+                    self.slug, declared_model, e,
+                )
+
         self._agent = Agent(
             provider=provider,
             tool_registry=restricted_registry,
@@ -236,7 +260,20 @@ class RegistryWatcher:
 
         # Register new agents, or re-register ones whose prompt/tools changed.
         for slug, row in active_by_slug.items():
-            fingerprint = row["system_prompt"] + "|" + ",".join(row["tool_allowlist"])
+            # The fingerprint must cover everything DispatchTool bakes in at
+            # construction, or a change to that field silently never takes
+            # effect on the live tool. `model` is in here for exactly that
+            # reason: the provider instance is built once, in
+            # ConfigDrivenAgent.__init__, so a model change has to force a
+            # rebuild rather than relying on a caller remembering to
+            # invalidate.
+            fingerprint = "|".join(
+                (
+                    row["system_prompt"],
+                    ",".join(row["tool_allowlist"]),
+                    row.get("model") or "",
+                )
+            )
             if self._known.get(slug) == fingerprint:
                 continue
             tool = DispatchTool(

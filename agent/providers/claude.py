@@ -17,7 +17,7 @@ from ..personality import TONAL_CHECKPOINT, append_voice_cue
 
 
 class ClaudeProvider(BaseProvider):
-    def __init__(self) -> None:
+    def __init__(self, model: str | None = None) -> None:
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             raise EnvironmentError(
@@ -25,7 +25,7 @@ class ClaudeProvider(BaseProvider):
                 "Add it to your .env file — never paste it in source code."
             )
         self.client = AsyncAnthropic(api_key=api_key)
-        self._model = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+        self._model = model or os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 
     @property
     def model_name(self) -> str:
