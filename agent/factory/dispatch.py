@@ -101,12 +101,35 @@ def get_dispatch_activity() -> DispatchActivity:
 class ConfigDrivenAgent:
     """A spawned specialist, fully specified by a spawned_agents row."""
 
-    def __init__(self, row: dict, provider, base_registry) -> None:
+    def __init__(
+        self, row: dict, provider, base_registry, safety_repo=None, factory_repo=None
+    ) -> None:
         self.slug = row["slug"]
         self.name = row["name"]
         restricted_registry = (
             base_registry.subset(row["tool_allowlist"]) if base_registry else None
         )
+        # orchestration.md Tier 5. Granted outside the row's tool_allowlist on
+        # purpose: proposing a handoff executes nothing, and every specialist
+        # should be able to say "someone else should take this from here". It
+        # needs both repos — safety_repo to park the proposal, factory_repo to
+        # check the target is a real active agent — so an incomplete wiring
+        # (either repo missing) simply means no handoffs, never a half-working
+        # one that parks proposals nobody can approve.
+        if restricted_registry is not None and safety_repo is not None and factory_repo is not None:
+            from ..core import current_agent_history
+            from .handoff import ProposeHandoffTool
+
+            restricted_registry.register(
+                ProposeHandoffTool(
+                    safety_repo=safety_repo,
+                    history_provider=lambda: current_agent_history() or [],
+                    active_agents_provider=lambda: {
+                        r["slug"] for r in factory_repo.list_active_agents()
+                    },
+                    proposer_slug=self.slug,
+                )
+            )
         # No gate on a spawned specialist, by construction rather than by
         # oversight: its allowlist is intersected with factory_allowed at mint
         # time, and every tool that isn't read-only is factory_allowed = False.
@@ -146,7 +169,9 @@ class DispatchTool:
     risk = LOW
     requires_confirmation = None
 
-    def __init__(self, row: dict, provider, base_registry) -> None:
+    def __init__(
+        self, row: dict, provider, base_registry, safety_repo=None, factory_repo=None
+    ) -> None:
         self.name = dispatch_tool_name(row["slug"])
         self.description = (
             f"Delegate to the '{row['name']}' specialist agent. {row['system_prompt'][:200]}"
@@ -156,7 +181,9 @@ class DispatchTool:
             "properties": {"message": {"type": "string", "description": "What to ask the specialist."}},
             "required": ["message"],
         }
-        self._sub_agent = ConfigDrivenAgent(row, provider, base_registry)
+        self._sub_agent = ConfigDrivenAgent(
+            row, provider, base_registry, safety_repo=safety_repo, factory_repo=factory_repo
+        )
 
     def definition(self) -> dict:
         return {"name": self.name, "description": self.description, "input_schema": self.input_schema}
@@ -180,8 +207,15 @@ class RegistryWatcher:
     ones that were disabled or removed.
     """
 
-    def __init__(self, repo: FactoryRepo, provider, registry, base_registry=None) -> None:
+    def __init__(
+        self, repo: FactoryRepo, provider, registry, base_registry=None, safety_repo=None
+    ) -> None:
         self.repo = repo
+        # Passed through to every DispatchTool this builds, so a specialist can
+        # reach propose_handoff (orchestration.md Tier 5). None means handoffs
+        # are simply unavailable — the same best-effort posture serve.py takes
+        # with the gate itself.
+        self.safety_repo = safety_repo
         self.provider = provider
         self.registry = registry
         # The registry a spawned agent's own tools are drawn from — defaults
@@ -205,7 +239,13 @@ class RegistryWatcher:
             fingerprint = row["system_prompt"] + "|" + ",".join(row["tool_allowlist"])
             if self._known.get(slug) == fingerprint:
                 continue
-            tool = DispatchTool(row, self.provider, self.base_registry)
+            tool = DispatchTool(
+                row,
+                self.provider,
+                self.base_registry,
+                safety_repo=self.safety_repo,
+                factory_repo=self.repo,
+            )
             self.registry.register(tool)
             self._known[slug] = fingerprint
 

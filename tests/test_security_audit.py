@@ -303,6 +303,7 @@ class TestServeSecurityStatusEndpoint(AioHTTPTestCase):
                 "TRILLION_NOTES_VAULT_PATH",
                 "TRILLION_NOTES_INDEX_PATH",
                 "TRILLION_HEARTBEAT_DB",
+                "TRILLION_CSP_REPORT_DB",
                 "TRILLION_CVE_SCAN_DB",
                 "GITHUB_TOKEN",
                 "TRILLION_GITHUB_WATCHED_REPOS",
@@ -312,6 +313,7 @@ class TestServeSecurityStatusEndpoint(AioHTTPTestCase):
         os.environ["TRILLION_NOTES_VAULT_PATH"] = os.path.join(self.tmp, "vault")
         os.environ["TRILLION_NOTES_INDEX_PATH"] = os.path.join(self.tmp, "notes_index.db")
         os.environ["TRILLION_HEARTBEAT_DB"] = os.path.join(self.tmp, "heartbeat.db")
+        os.environ["TRILLION_CSP_REPORT_DB"] = os.path.join(self.tmp, "csp_reports.db")
         os.environ["TRILLION_CVE_SCAN_DB"] = os.path.join(self.tmp, "cve_scans.db")
         os.environ.pop("GITHUB_TOKEN", None)
         os.environ.pop("TRILLION_GITHUB_WATCHED_REPOS", None)

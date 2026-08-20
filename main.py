@@ -479,7 +479,17 @@ async def main() -> None:
         from agent.factory.storage import FactoryRepo
 
         repo = FactoryRepo()
-        watcher = RegistryWatcher(repo, provider, registry)
+        # Tier 5 handoffs — see serve.py's matching block for why this builds
+        # its own SafetyRepo rather than reordering the gate setup below.
+        try:
+            from agent.safety.storage import SafetyRepo as _SafetyRepo
+
+            handoff_safety_repo = _SafetyRepo()
+        except Exception:
+            handoff_safety_repo = None
+        watcher = RegistryWatcher(
+            repo, provider, registry, safety_repo=handoff_safety_repo
+        )
         watcher.sync_once()  # agents approved in a prior session are live immediately
         watcher_task = asyncio.create_task(watcher.run_forever())
         background_tasks.add(watcher_task)

@@ -53,3 +53,4 @@ generated-projects/
 # for the download command)
 voices/*.onnx
 voices/*.onnx.json
+csp_reports.db

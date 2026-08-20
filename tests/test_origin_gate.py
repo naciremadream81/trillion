@@ -289,6 +289,7 @@ class TestServeOriginGate(AioHTTPTestCase):
                 "TRILLION_NOTES_VAULT_PATH",
                 "TRILLION_NOTES_INDEX_PATH",
                 "TRILLION_HEARTBEAT_DB",
+                "TRILLION_CSP_REPORT_DB",
                 "GITHUB_TOKEN",
                 "TRILLION_GITHUB_WATCHED_REPOS",
                 "TRILLION_WEB_AUTH_TOKEN",
@@ -298,6 +299,7 @@ class TestServeOriginGate(AioHTTPTestCase):
         os.environ["TRILLION_NOTES_VAULT_PATH"] = os.path.join(self.tmp, "vault")
         os.environ["TRILLION_NOTES_INDEX_PATH"] = os.path.join(self.tmp, "notes_index.db")
         os.environ["TRILLION_HEARTBEAT_DB"] = os.path.join(self.tmp, "heartbeat.db")
+        os.environ["TRILLION_CSP_REPORT_DB"] = os.path.join(self.tmp, "csp_reports.db")
         os.environ.pop("GITHUB_TOKEN", None)
         os.environ.pop("TRILLION_GITHUB_WATCHED_REPOS", None)
         os.environ.pop("TRILLION_WEB_AUTH_TOKEN", None)
@@ -418,6 +420,7 @@ class TestCspReportBounded(AioHTTPTestCase):
                 "TRILLION_NOTES_VAULT_PATH",
                 "TRILLION_NOTES_INDEX_PATH",
                 "TRILLION_HEARTBEAT_DB",
+                "TRILLION_CSP_REPORT_DB",
                 "GITHUB_TOKEN",
                 "TRILLION_GITHUB_WATCHED_REPOS",
                 "TRILLION_WEB_AUTH_TOKEN",
@@ -427,6 +430,7 @@ class TestCspReportBounded(AioHTTPTestCase):
         os.environ["TRILLION_NOTES_VAULT_PATH"] = os.path.join(self.tmp, "vault")
         os.environ["TRILLION_NOTES_INDEX_PATH"] = os.path.join(self.tmp, "notes_index.db")
         os.environ["TRILLION_HEARTBEAT_DB"] = os.path.join(self.tmp, "heartbeat.db")
+        os.environ["TRILLION_CSP_REPORT_DB"] = os.path.join(self.tmp, "csp_reports.db")
         os.environ.pop("GITHUB_TOKEN", None)
         os.environ.pop("TRILLION_GITHUB_WATCHED_REPOS", None)
         os.environ.pop("TRILLION_WEB_AUTH_TOKEN", None)

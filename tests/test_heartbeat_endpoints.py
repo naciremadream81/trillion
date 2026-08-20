@@ -48,6 +48,7 @@ class TestHeartbeatEndpoints(AioHTTPTestCase):
                 "TRILLION_NOTES_VAULT_PATH",
                 "TRILLION_NOTES_INDEX_PATH",
                 "TRILLION_HEARTBEAT_DB",
+                "TRILLION_CSP_REPORT_DB",
                 "GITHUB_TOKEN",
                 "TRILLION_GITHUB_WATCHED_REPOS",
             )
@@ -57,6 +58,7 @@ class TestHeartbeatEndpoints(AioHTTPTestCase):
         os.environ["TRILLION_NOTES_INDEX_PATH"] = os.path.join(self.tmp, "notes_index.db")
         self.db_path = os.path.join(self.tmp, "heartbeat.db")
         os.environ["TRILLION_HEARTBEAT_DB"] = self.db_path
+        os.environ["TRILLION_CSP_REPORT_DB"] = os.path.join(self.tmp, "csp_reports.db")
         # No GitHub config -> Code Sentinel checks self-skip; the scheduler
         # still starts with zero checks registered.
         os.environ.pop("GITHUB_TOKEN", None)

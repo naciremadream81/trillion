@@ -13,12 +13,38 @@ Tier 6: the confirmation gate sits between tool selection and tool execution.
 The rule: one core, many adapters. Never fork the logic for voice vs text.
 """
 
+import contextvars
 from typing import AsyncIterator
 
 from .cost.recorder import record_usage
+
 from .providers.base import BaseProvider, TextChunk, ToolCall, ProviderResponse
 from .system_prompt import build_system_prompt
 from .turn_taking import is_signoff
+
+
+# The history of the Agent whose turn is currently executing a tool.
+#
+# Exists for one caller: agent/factory/handoff.py needs "how long was the
+# *main* conversation when this proposal was made", and it is running two
+# levels down — inside a specialist's turn, inside a dispatch tool, inside
+# the main Agent's turn. It cannot ask the specialist (that's a scratch
+# history) and it cannot be handed the right one at construction time,
+# because serve.py gives every browser session its own Agent over one shared
+# registry, so a tool built once cannot know which session will call it.
+#
+# Deliberately a read-only window: a tool can see how long the conversation
+# is and what kind of turns are in it, exactly like ConfirmActionTool's
+# history_provider, and cannot modify it. A contextvar rather than a global
+# because concurrent sessions each run their own turn.
+_current_history: contextvars.ContextVar = contextvars.ContextVar(
+    "trillion_current_history", default=None
+)
+
+
+def current_agent_history() -> list | None:
+    """The calling Agent's history, or None outside a tool call."""
+    return _current_history.get()
 
 
 class Agent:
@@ -249,9 +275,17 @@ class Agent:
                 )
             if verdict is not None:
                 return verdict
+        # Publish this Agent's history for the duration of the call, so a tool
+        # running underneath it (a dispatch -> specialist -> propose_handoff
+        # chain) can index against the conversation that will actually approve
+        # its proposal. Reset in a finally so a raising tool can't leak it into
+        # the next call on this task.
+        token = _current_history.set(self.history)
         try:
             return await self.tool_registry.run(tc)
         except Exception as e:  # noqa: BLE001
             # Return the error to the model — let it reason about the failure
             # and explain it to Sean rather than crashing.
             return f"[Tool '{tc.name}' failed: {e}]"
+        finally:
+            _current_history.reset(token)

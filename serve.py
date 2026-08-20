@@ -53,7 +53,8 @@ from agent.config import get_settings
 from agent.cost.aggregate import UsageDashboard
 from agent.cost.storage import UsageRepo
 from agent.security.auth import bearer_auth_middleware
-from agent.security.headers import security_headers_middleware
+from agent.security.csp_reports import CspReportRepo, record_report
+from agent.security.headers import security_headers_middleware_factory
 from agent.security.origin import origin_check_middleware
 
 # Load .env so the web server honors the same config as the CLI agent
@@ -265,7 +266,18 @@ async def _start_factory_watcher(app: web.Application) -> None:
         from agent.factory.storage import FactoryRepo
 
         repo = FactoryRepo()
-        watcher = RegistryWatcher(repo, _get_provider(), _get_registry())
+        # Tier 5 handoffs: specialists park proposals here. Best-effort — if
+        # safety.db is unreachable the watcher still runs, just without
+        # propose_handoff in any specialist's registry.
+        try:
+            from agent.safety.storage import SafetyRepo
+
+            handoff_safety_repo = SafetyRepo()
+        except Exception:
+            handoff_safety_repo = None
+        watcher = RegistryWatcher(
+            repo, _get_provider(), _get_registry(), safety_repo=handoff_safety_repo
+        )
         watcher.sync_once()
         app["factory_watcher_task"] = asyncio.create_task(watcher.run_forever())
     except Exception as e:  # noqa: BLE001
@@ -615,6 +627,33 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
         ]
         return web.json_response({"agents": agents})
 
+    async def pending_handoffs(_request: web.Request) -> web.Response:
+        # orchestration.md Tier 5, read side: proposals waiting on Sean.
+        # These are ordinary pending_actions rows whose tool is a dispatch —
+        # surfaced next to the heartbeat notices so an offer waiting for an
+        # answer is something he glances at, not something buried in a
+        # transcript he has scrolled past.
+        try:
+            from agent.factory.dispatch import DISPATCH_PREFIX
+            from agent.safety.storage import SafetyRepo
+
+            repo = SafetyRepo()
+            repo.expire_stale()
+            rows = [
+                {
+                    "id": row["id"],
+                    "target": row["tool_name"][len(DISPATCH_PREFIX):],
+                    "summary": row["summary"],
+                    "task": (row["arguments"] or {}).get("message", ""),
+                    "expires_at": row["expires_at"],
+                }
+                for row in repo.list_pending()
+                if row["tool_name"].startswith(DISPATCH_PREFIX)
+            ]
+            return web.json_response({"handoffs": rows})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"error": f"{type(e).__name__}: {e}"}, status=500)
+
     async def heartbeat_notices(_request: web.Request) -> web.Response:
         # Polled by the browser (see index.html's fetchHeartbeatNotices),
         # mirroring /api/usage's read-only, best-effort-cached shape.
@@ -689,7 +728,35 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
         # Collapse newlines so a crafted report can't forge extra log lines.
         line = " ".join(body.split())[:CSP_REPORT_MAX_BYTES]
         print(f"[csp-violation] {line}{' …[truncated]' if truncated else ''}")
+        # ...and persist it. The print above goes to stdout, which on a
+        # systemd unit with no persistent journal (this host) is /dev/null —
+        # so for the entire life of this endpoint the collection step of
+        # agent-security.md §2.2 produced nothing to read. record_report is
+        # best-effort and never raises: this route is unauthenticated, and a
+        # storage error must not become a 500 an attacker can trigger.
+        record_report(line)
         return web.Response(status=204)
+
+    async def csp_violations(request: web.Request) -> web.Response:
+        # The read side of the above — "what actually got blocked", grouped
+        # by directive and source. This is the evidence you widen the policy
+        # from before setting TRILLION_CSP_ENFORCE; see
+        # agent/security/headers.py for why the order matters.
+        try:
+            limit = min(200, max(1, int(request.query.get("limit", "50"))))
+        except ValueError:
+            limit = 50
+        try:
+            repo = CspReportRepo()
+            return web.json_response(
+                {
+                    "enforcing": get_settings().csp_enforce,
+                    "total": repo.count(),
+                    "directives": repo.directive_summary(limit),
+                }
+            )
+        except Exception as e:
+            return web.json_response({"error": f"{type(e).__name__}: {e}"}, status=500)
 
     # Middlewares wrap in reverse list order, so the first entry is outermost.
     # Headers go outside everything, which is what puts them on 403s and 401s
@@ -699,9 +766,9 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
     # check than a constant-time token compare.
     app = web.Application(
         middlewares=[
-            security_headers_middleware,
+            security_headers_middleware_factory(settings.csp_enforce),
             origin_check_middleware(settings.web_host),
-            bearer_auth_middleware(settings.web_auth_token),
+            bearer_auth_middleware(settings.web_auth_token, settings.web_auth_token_prev),
         ]
     )
     app.router.add_get("/api/usage", usage)
@@ -709,9 +776,11 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
     app.router.add_post("/api/chat", chat)
     app.router.add_post("/api/transcribe", transcribe_audio)
     app.router.add_post("/api/tts", synthesize_speech)
+    app.router.add_get("/api/handoffs", pending_handoffs)
     app.router.add_get("/api/heartbeat/notices", heartbeat_notices)
     app.router.add_post("/api/heartbeat/dismiss", dismiss_notice)
     app.router.add_post("/api/security/csp-report", csp_report)
+    app.router.add_get("/api/security/csp-violations", csp_violations)
     app.router.add_get("/api/security/cve-status", cve_status)
     app.router.add_post("/api/security/cve-scan", cve_scan)
     app.router.add_get("/api/security/status", security_status)
