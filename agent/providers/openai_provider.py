@@ -14,6 +14,7 @@ from typing import AsyncIterator
 
 from openai import AsyncOpenAI, APIConnectionError, APIStatusError, RateLimitError
 
+from ._openai_tools import ToolCallAccumulator, to_openai_messages, to_openai_tools
 from .base import BaseProvider, TextChunk, ToolCall, ProviderResponse, TokenUsage
 
 
@@ -44,8 +45,14 @@ class OpenAIProvider(BaseProvider):
 
         OpenAI puts the system prompt as the first message, not a separate
         field — we inject it here transparently.
+
+        The history also has to be translated, not just the tool schemas.
+        agent/core.py records tool rounds in Anthropic's shape (`tool_use`
+        blocks on the assistant turn, `tool_result` blocks batched into a
+        user turn); OpenAI wants `tool_calls` on the assistant message and
+        one `tool` message per result. See _openai_tools.to_openai_messages.
         """
-        openai_messages = [{"role": "system", "content": system}] + messages
+        openai_messages = [{"role": "system", "content": system}] + to_openai_messages(messages)
         collected_text = ""
 
         api_kwargs: dict = dict(
@@ -57,14 +64,14 @@ class OpenAIProvider(BaseProvider):
             # loop below must guard against that or it would IndexError.
             stream_options={"include_usage": True},
         )
-        # Tier 2: OpenAI tool format differs from Anthropic's.
-        # We'll handle the translation in the tool registry later.
-        if tools:
-            api_kwargs["tools"] = tools
+        openai_tools = to_openai_tools(tools)
+        if openai_tools:
+            api_kwargs["tools"] = openai_tools
 
         try:
             usage_obj = None
             returned_model = None
+            accumulator = ToolCallAccumulator()
             stream = await self.client.chat.completions.create(**api_kwargs)
             async for chunk in stream:
                 if getattr(chunk, "model", None):
@@ -75,8 +82,20 @@ class OpenAIProvider(BaseProvider):
                     if delta.content:
                         collected_text += delta.content
                         yield TextChunk(text=delta.content)
+                    # Tool calls arrive as fragments across many deltas —
+                    # buffered rather than yielded, because the arguments JSON
+                    # isn't parseable until the stream ends.
+                    if getattr(delta, "tool_calls", None):
+                        accumulator.add_delta(delta.tool_calls)
                 if getattr(chunk, "usage", None):
                     usage_obj = chunk.usage
+
+            tool_calls = [
+                ToolCall(id=call_id, name=name, arguments=arguments)
+                for call_id, name, arguments in accumulator.finish()
+            ]
+            for call in tool_calls:
+                yield call
 
             # Map OpenAI's usage onto the neutral shape. Note: OpenAI's
             # prompt_tokens is cache-INCLUSIVE, so subtract the cached portion
@@ -95,6 +114,8 @@ class OpenAIProvider(BaseProvider):
 
             yield ProviderResponse(
                 text=collected_text,
+                tool_calls=tool_calls,
+                stop_reason="tool_use" if tool_calls else "end_turn",
                 usage=usage,
                 model=returned_model,
             )

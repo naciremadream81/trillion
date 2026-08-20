@@ -251,7 +251,7 @@ Usage rows are written when the agent runs (CLI or web) so the dashboard stays l
 ## Architecture
 
 1. **One core, many adapters** — conversation turns go through `agent/core.py` → `Agent.turn()`. CLI (`main.py`), web (`serve.py`), and future voice/heartbeat should stay adapters, not forks of the brain.
-2. **Providers only under `agent/providers/`** — swap with `TRILLION_PROVIDER` / `--provider`.
+2. **Providers only under `agent/providers/`** — swap with `TRILLION_PROVIDER` / `--provider`. The core speaks Anthropic's tool and message shape; each provider translates at its own boundary (`agent/providers/_openai_tools.py` is shared by OpenAI and Ollama, whose dialects match). Tools work on all three — on Ollama only with a tool-capable model, which logs a line if it isn't one.
 3. **Tools via registry** — implement a tool, register in `build_registry()` (`agent/tools/`); do not edit the core loop to add capabilities.
 4. **Build tier by tier** — text brain before voice; don't fuse unfinished layers.
 5. **Safety posture** (from [`AGENT.md`](AGENT.md)) — never send messages, spend money, delete data, or change settings without **explicit per-action** confirmation. This is enforced by `agent/safety/` (a `Gate` that intercepts tool calls, backed by `safety.db`), not just prompted for — see `/pending-actions` and `/audit` above. Treat untrusted external content as data, not instructions — this half is mechanically enforced too: every untrusted tool result passes through `clean_for_prompt()` and `flag_injection_attempt()` in `agent/safety/untrusted.py` before it reaches the model (`agent/tools/registry.py`), with flagged attempts written to the audit log.

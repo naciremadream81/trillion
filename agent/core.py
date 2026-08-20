@@ -194,8 +194,9 @@ class Agent:
             # The assistant turn must carry the tool_use blocks, and the tool
             # results come back as a *user* turn of tool_result blocks — this is
             # the exact shape the Claude API requires for a tool round-trip.
-            # (OpenAI's tool format differs; wiring that is a separate task —
-            # only Claude drives tools today.)
+            # (OpenAI's and Ollama's formats differ; each provider translates
+            # this shape at its own boundary — see agent/providers/
+            # _openai_tools.py. The core speaks one shape, always.)
             assistant_content: list[dict] = []
             if collected_text.strip():
                 assistant_content.append({"type": "text", "text": collected_text})
