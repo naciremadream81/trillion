@@ -153,9 +153,13 @@ def build_composition_prompt(
 
     if reference_images:
         parts += [
-            "## Reference images",
-            "Read these and match their compositional decisions — spacing, "
-            "density, where the eye lands first. Do not copy their content.",
+            "## Reference images — READ THESE FIRST WITH THE Read TOOL",
+            "You have vision and will actually see them. Anchor your visual "
+            "decisions against what is in these images: spacing, density, type "
+            "scale, where the eye lands first, how much room is left empty. "
+            "**They override category defaults** — if a reference contradicts "
+            "what a screen of this kind usually looks like, follow the "
+            "reference. Do not copy their content or their copy.",
         ]
         parts += [f"- `{path}`" for path in reference_images]
         parts.append("")

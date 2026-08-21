@@ -142,6 +142,17 @@ class GenerateMockupTool(BaseTool):
             return f"[generate_mockup refused: {e}]"
 
         known, unknown = validate_component_names(kwargs.get("components_hint"))
+
+        # Tier 7 — the playbook's "single biggest quality lever". Missing
+        # references are reported, not fatal: composing without one and
+        # saying so beats failing a dispatch that would otherwise succeed.
+        # The usual cause is the directory name not matching the slug the
+        # agent chose, which is invisible unless it's said out loud.
+        from ..design.references import resolve_reference_images
+
+        reference_paths, reference_problems = resolve_reference_images(
+            project_root, feature_slug, kwargs.get("reference_images")
+        )
         prompt = build_composition_prompt(
             project_slug=project_slug,
             feature_slug=feature_slug,
@@ -151,7 +162,7 @@ class GenerateMockupTool(BaseTool):
             visual_direction=str(kwargs.get("visual_direction") or ""),
             quality=quality,
             components_hint=known,
-            reference_images=kwargs.get("reference_images"),
+            reference_images=reference_paths,
             first_dispatch=first_dispatch,
         )
 
@@ -217,6 +228,8 @@ class GenerateMockupTool(BaseTool):
                 lines.append(
                     f"Ignored components not in the palette: {', '.join(unknown)}."
                 )
+            if reference_problems:
+                lines.append("Reference images skipped: " + "; ".join(reference_problems))
             if result.result_text:
                 lines += ["", result.result_text[:1200]]
             return "\n".join(lines)
@@ -277,3 +290,84 @@ class ListDesignProjectsTool(BaseTool):
                 state += ", preview installed"
             lines.append(f"- {slug} ({state})")
         return "\n".join(lines)
+
+
+class GenerateImageTool(BaseTool):
+    """
+    Tier 5. Registered only when GEMINI_API_KEY and google-genai are both
+    present — an absent capability beats one that fails on every call.
+
+    Gated, because it spends money per image. Cheap money (~$0.04 standard,
+    ~$0.12 premium) but money, and a model that decides a screen needs six
+    backdrops should have to ask.
+    """
+
+    name = "generate_image"
+    description = (
+        "Generate a backdrop or illustration for a screen before composing it. "
+        "Call this BEFORE generate_mockup, once per image the screen needs, then "
+        "pass the returned URLs into generate_mockup's visual_direction verbatim. "
+        "Describe the image concretely and name the palette — vague prompts return "
+        "generic stock-looking output."
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "project_slug": {"type": "string"},
+            "feature_slug": {"type": "string"},
+            "image_slug": {"type": "string", "description": "Filename stem, kebab-case."},
+            "description": {"type": "string", "description": "What the image shows."},
+            "quality": {"type": "string", "enum": ["standard", "premium"]},
+            "aspect_ratio": {"type": "string", "description": "e.g. 16:9, 1:1, 3:2."},
+        },
+        "required": ["project_slug", "feature_slug", "image_slug", "description"],
+    }
+
+    factory_allowed = False
+    risk = CONSEQUENTIAL   # spends money per call
+    requires_confirmation = None
+    trusted_output = True
+
+    def __init__(self, settings=None) -> None:
+        self.settings = settings
+
+    async def run(self, **kwargs) -> str:
+        from ..design.design_tokens import TokenError, parse_tokens
+        from ..design.image_gen import ImageGenError, generate_image
+
+        try:
+            project_slug = validate_slug(kwargs.get("project_slug", ""), "project_slug")
+            feature_slug = validate_slug(kwargs.get("feature_slug", ""), "feature_slug")
+            image_slug = validate_slug(kwargs.get("image_slug", ""), "image_slug")
+            project_root = resolve_project_root(project_slug, self.settings)
+        except DesignDocError as e:
+            return f"[generate_image: {e}]"
+
+        description = str(kwargs.get("description") or "").strip()
+        if not description:
+            return "[generate_image: a description is required.]"
+
+        # Pull the palette out of design.md so the image serves the design
+        # system rather than fighting it — the playbook's named trap is that
+        # a bare style word returns violet and cyan from any model.
+        palette, forbidden = None, ["violet", "cyan", "magenta"]
+        try:
+            tokens = parse_tokens(read_project_file(project_root, DESIGN_DOC) or "")
+            palette = tokens.colors
+        except (TokenError, DesignDocError):
+            pass
+
+        try:
+            result = await generate_image(
+                project_root, project_slug, feature_slug, image_slug, description,
+                palette=palette, forbidden_colors=forbidden,
+                quality=str(kwargs.get("quality") or "standard"),
+                aspect_ratio=str(kwargs.get("aspect_ratio") or "16:9"),
+            )
+        except ImageGenError as e:
+            return f"[generate_image failed: {e}]"
+
+        return (
+            f"Generated {image_slug}.png for {feature_slug}.\n"
+            f"Pass this URL to generate_mockup verbatim, prefix included:\n{result['url']}"
+        )

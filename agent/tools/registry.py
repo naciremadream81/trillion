@@ -171,6 +171,15 @@ def build_registry(settings) -> ToolRegistry:
                 )
             )
             registry.register(ListDesignProjectsTool(settings))
+
+            # Tier 5 — only when it can actually run. Same posture as the
+            # design agent itself: absent beats registered-and-broken.
+            from ..design.image_gen import is_available as image_gen_available
+
+            if image_gen_available():
+                from .design import GenerateImageTool
+
+                registry.register(GenerateImageTool(settings))
         else:
             print(
                 "Design agent enabled but the `claude` CLI is not on PATH; "
