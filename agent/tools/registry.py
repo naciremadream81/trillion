@@ -144,6 +144,14 @@ def build_registry(settings) -> ToolRegistry:
     from .email import DraftEmailTool
     from .notes import SearchNotesTool
 
+    # Mining tracker — registered only when a wallet is configured, same
+    # posture as the analytics and search tools above.
+    if getattr(settings, "mining_wallet", ""):
+        from ..mining.storage import MiningRepo
+        from .mining import QueryMiningTool
+
+        registry.register(QueryMiningTool(MiningRepo(), settings.mining_wallet))
+
     registry.register(SearchNotesTool(settings.notes_index_path))
     registry.register(DraftEmailTool())
 

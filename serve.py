@@ -429,7 +429,13 @@ async def _start_heartbeat_scheduler(app: web.Application) -> None:
                 cve_check.name,
                 datetime.now(timezone.utc) + timedelta(seconds=cve_check.cadence_seconds),
             )
-        checks = build_code_sentinel_checks(settings) + [cve_check]
+        from agent.heartbeat.checks.mining import build_mining_checks
+
+        checks = (
+            build_code_sentinel_checks(settings)
+            + build_mining_checks(settings)  # empty unless TRILLION_MINING_WALLET is set
+            + [cve_check]
+        )
         scheduler = HeartbeatScheduler(
             checks, repo, settings, background_tasks=app["heartbeat_background_tasks"]
         )
@@ -760,6 +766,26 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
         ]
         return web.json_response({"agents": agents})
 
+    async def mining_status(_request: web.Request) -> web.Response:
+        # Read-only view of the last recorded poll. Like query_mining, this
+        # never calls the pool — the heartbeat owns that cadence, and a
+        # browser poll that fetched would add an unthrottled second caller.
+        settings = get_settings()
+        if not settings.mining_wallet:
+            return web.json_response({"configured": False})
+        try:
+            from agent.mining.storage import MiningRepo
+
+            summary = MiningRepo().summary(settings.mining_wallet).to_dict()
+            # The address is Sean's financial identity and the browser has no
+            # use for it — the widget shows hashrate and payouts, not which
+            # address they belong to.
+            summary.pop("address", None)
+            summary["configured"] = True
+            return web.json_response(summary)
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"error": f"{type(e).__name__}: {e}"}, status=500)
+
     async def pending_handoffs(_request: web.Request) -> web.Response:
         # orchestration.md Tier 5, read side: proposals waiting on Sean.
         # These are ordinary pending_actions rows whose tool is a dispatch —
@@ -910,6 +936,7 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
     app.router.add_post("/api/transcribe", transcribe_audio)
     app.router.add_get("/api/transcribe/stream", transcribe_stream)
     app.router.add_post("/api/tts", synthesize_speech)
+    app.router.add_get("/api/mining", mining_status)
     app.router.add_get("/api/handoffs", pending_handoffs)
     app.router.add_get("/api/heartbeat/notices", heartbeat_notices)
     app.router.add_post("/api/heartbeat/dismiss", dismiss_notice)

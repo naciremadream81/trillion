@@ -116,7 +116,11 @@ class TestProbeConfigGating(unittest.TestCase):
         # (e.g. a from-scratch doc render).
         gates = generators.probe_config_gating(build_registry_fn=build_registry)
         fields = {g.field for g in gates}
-        self.assertEqual(fields, {"supabase_analytics_url", "brave_search_api_key", "firecrawl_api_key"})
+        self.assertEqual(
+            fields,
+            {"supabase_analytics_url", "brave_search_api_key", "firecrawl_api_key",
+             "mining_wallet"},
+        )
 
     def test_against_real_settings_and_registry_matches_known_wiring(self):
         # agent.tools.registry.build_registry() only gates tool *registration*
@@ -125,7 +129,11 @@ class TestProbeConfigGating(unittest.TestCase):
         # that catches it silently changing.
         gates = generators.probe_config_gating(baseline=Settings(), build_registry_fn=build_registry)
         fields = {g.field for g in gates}
-        self.assertEqual(fields, {"supabase_analytics_url", "brave_search_api_key", "firecrawl_api_key"})
+        self.assertEqual(
+            fields,
+            {"supabase_analytics_url", "brave_search_api_key", "firecrawl_api_key",
+             "mining_wallet"},
+        )
 
     def test_already_satisfied_gate_is_excluded_from_real_baseline(self):
         # Codex review finding: probing from a blank Settings() reports

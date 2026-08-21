@@ -24,12 +24,13 @@ them on" from the source, not from memory. Everything between a block's
 <!-- AUTO-START: config-gating -->
 - `supabase_analytics_url` — enables `query_analytics`
 - `search_provider` — disables `web_search`
+- `mining_wallet` — enables `query_mining`
 <!-- AUTO-END: config-gating -->
 
 ## Summary (injected into every system prompt)
 
 <!-- SLIM-START -->
 Tools currently available: `confirm_action`, `draft_email`, `forget_fact`, `remember_fact`, `search_notes`, `web_search`.
-Unset config that would add more: `supabase_analytics_url`→query_analytics.
+Unset config that would add more: `supabase_analytics_url`→query_analytics; `mining_wallet`→query_mining.
 Full detail: context/self/trillion.md.
 <!-- SLIM-END -->

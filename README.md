@@ -215,6 +215,8 @@ All of these are wired — the commented entries in `.env.example` are real over
 | `TRILLION_WEB_HOST` / `TRILLION_WEB_AUTH_TOKEN` | Bind host, and the bearer token enforced per-request on `/api/` by `agent/security/auth.py`. Ten failed attempts from one address in 5 min locks it out for 15 min (`429` + `Retry-After`) |
 | `TRILLION_WEB_AUTH_TOKEN_PREV` | The outgoing token during a rotation. Both values authenticate while it's set; clear it to finish the rotation — see [`docs/incident-runbook.md`](docs/incident-runbook.md) |
 | `TRILLION_CVE_SCAN_DB` | Where `pip-audit` scan history is written |
+| `TRILLION_MINING_WALLET` | Ocean payout address. Empty disables the mining tracker entirely |
+| `TRILLION_MINING_RETENTION_DAYS` / `TRILLION_MINING_DB` | Snapshot retention (default 30 days) and where history is written |
 | `TRILLION_CSP_ENFORCE` | Off by default (report-only). See "Flipping CSP to enforcing" below — don't set it on a guess |
 | `TRILLION_CSP_REPORT_DB` | Where CSP violation reports are persisted (default `csp_reports.db`) |
 
@@ -254,6 +256,7 @@ Type normally for a streaming turn. Slash commands:
 - `POST /api/transcribe` — audio in, transcript out (Deepgram; needs `DEEPGRAM_API_KEY`)
 - `GET /api/transcribe/stream` — WebSocket relay to Deepgram streaming; interim transcripts and the end-of-utterance signal (opt-in, see above)
 - `POST /api/tts` — text in, WAV out (local Piper; no key needed)
+- `GET /api/mining` — mining status from the last poll (empty `{configured: false}` without a wallet)
 - `GET /api/handoffs` — specialist handoff proposals waiting on your yes
 - `GET /api/heartbeat/notices` — active (undismissed) heartbeat notices
 - `POST /api/heartbeat/dismiss` — dismiss a notice by id
@@ -331,7 +334,8 @@ trillion/
 │   ├── cost/               # Pricing, SQLite usage, aggregates
 │   ├── safety/             # Confirmation gate, risk tiers, untrusted-content sanitizer
 │   ├── security/           # Headers/CSP, bearer auth, startup guard, CVE scan, self-audit
-│   ├── heartbeat/          # Scheduler, quiet hours, notice store, Code Sentinel checks
+│   ├── heartbeat/          # Scheduler, quiet hours, notice store, Code Sentinel + mining checks
+│   ├── mining/             # Ocean pool client, snapshot storage, BTC price
 │   └── factory/            # Agent Factory + software/ builds + Tier 5 handoffs
 ├── playbooks/              # Design notes and feature prompts
 ├── docs/                   # Incident runbook, handoff records

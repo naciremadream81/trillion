@@ -1,0 +1,49 @@
+{
+ "result": {
+  "start_ts": "1786666988",
+  "end_ts": "1789258988",
+  "earnings": [
+   {
+    "block_hash": "00000000000000000002068197c8001a42e5b9c3ee8b32799e0ccf08ffcb3c46",
+    "ts": "2026-08-20T23:11:03",
+    "shares_in_window": 46405561876480,
+    "fees_colected_satoshis": 144417,
+    "satoshis_net_earned": 14297234
+   },
+   {
+    "block_hash": "0000000000000000000160cf7ac93f4a215c675c2a9334e0d8c64cb8320c5950",
+    "ts": "2026-08-20T09:39:27",
+    "shares_in_window": 47912875720704,
+    "fees_colected_satoshis": 147097,
+    "satoshis_net_earned": 14562604
+   },
+   {
+    "block_hash": "0000000000000000000129b8f95e8b7f25e96b5da443479fe4bb365fd6c87f1d",
+    "ts": "2026-08-20T06:04:11",
+    "shares_in_window": 48166667811801,
+    "fees_colected_satoshis": 148391,
+    "satoshis_net_earned": 14690711
+   }
+  ],
+  "payouts": [
+   {
+    "ts": "2026-08-20T23:11:17",
+    "on_chain_txid": "e160bdfed69bcae7d9ca2fbd12831aa9daff6d5568cd7f131fefa02a64599571",
+    "total_satoshis_net_paid": 14297234,
+    "is_generation_txn": true
+   },
+   {
+    "ts": "2026-08-20T09:39:44",
+    "on_chain_txid": "6884131b49984543978ea647f97ef0396df83ca0bb1c32361223a973fb621e63",
+    "total_satoshis_net_paid": 14562604,
+    "is_generation_txn": true
+   },
+   {
+    "ts": "2026-08-20T06:06:30",
+    "on_chain_txid": "9723fbf13ce5a64645009fd9c53ab5fa9bd5c8752b7409819666a6717dbc2eff",
+    "total_satoshis_net_paid": 14690711,
+    "is_generation_txn": true
+   }
+  ]
+ }
+}

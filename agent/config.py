@@ -187,6 +187,15 @@ class Settings:
     # routes by agent/security/auth.py's bearer_auth_middleware, so rotating
     # it immediately revokes anyone holding the old value. When it's empty
     # (the loopback-only default) that middleware is a no-op.
+    # ── Mining tracker (playbooks/btc-mining-tracker.md) ────────────────────
+    # The payout address the tracker follows. Empty disables the feature
+    # entirely — build_mining_checks() returns nothing rather than erroring,
+    # mirroring how the Code Sentinel self-skips without a GitHub token.
+    # This is financial data: agent/security/log_redact.py masks it, and it
+    # is never put in a prompt.
+    mining_wallet: str = ""
+    mining_retention_days: int = 30
+
     web_host: str = "127.0.0.1"
     web_auth_token: str = ""
     # §2.1 rotation overlap: the outgoing token, accepted alongside the
@@ -247,6 +256,8 @@ def get_settings() -> Settings:
         github_token=os.getenv("GITHUB_TOKEN", ""),
         github_username=os.getenv("GITHUB_USERNAME", ""),
         github_watched_repos=_env_list("TRILLION_GITHUB_WATCHED_REPOS"),
+        mining_wallet=os.getenv("TRILLION_MINING_WALLET", "").strip(),
+        mining_retention_days=int(os.getenv("TRILLION_MINING_RETENTION_DAYS", "30") or 30),
         web_host=os.getenv("TRILLION_WEB_HOST", "127.0.0.1"),
         web_auth_token=os.getenv("TRILLION_WEB_AUTH_TOKEN", ""),
         web_auth_token_prev=os.getenv("TRILLION_WEB_AUTH_TOKEN_PREV", ""),

@@ -607,7 +607,13 @@ async def main() -> None:
         from agent.heartbeat.storage import HeartbeatRepo
 
         heartbeat_repo = HeartbeatRepo()
-        heartbeat_checks = build_code_sentinel_checks(settings) + [CveScanCheck()]
+        from agent.heartbeat.checks.mining import build_mining_checks
+
+        heartbeat_checks = (
+            build_code_sentinel_checks(settings)
+            + build_mining_checks(settings)  # empty unless TRILLION_MINING_WALLET is set
+            + [CveScanCheck()]
+        )
         heartbeat_scheduler = HeartbeatScheduler(
             heartbeat_checks, heartbeat_repo, settings, background_tasks=background_tasks,
         )
