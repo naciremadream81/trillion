@@ -1871,12 +1871,14 @@
     let sttSocket = null;          // the live WebSocket, or null
     let sttFinalText = '';         // accumulated is_final transcript for this turn
     let sttEndpointFired = false;  // the recognizer said the utterance ended
+    let sttEndpointKind = 'none';  // 'none' | 'segment' | 'utterance' — see sttOnEndpoint
     let sttFailed = false;         // socket errored -> this turn falls back to batch
 
     function sttReset() {
       sttSendChain = Promise.resolve();
       sttFinalText = '';
       sttEndpointFired = false;
+      sttEndpointKind = 'none';
       sttFailed = false;
     }
 
@@ -1932,10 +1934,10 @@
             sttFinalText = (sttFinalText + ' ' + msg.text).trim();
           }
           if (msg.text) setHint('“' + (sttFinalText || msg.text) + '”');
-          if (msg.speech_final) sttOnEndpoint();
+          if (msg.speech_final) sttOnEndpoint('segment');
           return;
         }
-        if (msg.type === 'utterance_end') { sttOnEndpoint(); return; }
+        if (msg.type === 'utterance_end') { sttOnEndpoint('utterance'); return; }
       };
       socket.onerror = () => { sttFailed = true; };
       socket.onclose = () => { if (sttSocket === socket) sttSocket = null; };
@@ -1976,14 +1978,28 @@
       }).catch(() => { sttFailed = true; });
     }
 
-    function sttOnEndpoint() {
-      // The recognizer's end-of-utterance. Only acts in hands-free mode:
-      // in push-to-talk the stop-tap IS the end-of-turn signal and always
-      // wins, exactly as the playbook's Tier 2 note says.
+    function sttOnEndpoint(kind) {
+      // The recognizer's own end signal. Only acts in hands-free mode: in
+      // push-to-talk the stop-tap IS the end-of-turn signal and always wins,
+      // exactly as the playbook's Tier 2 note says.
+      //
+      // This used to call stopListening() for BOTH signals, which was wrong
+      // for `speech_final`: that marks the end of a segment, so a speaker
+      // pausing between two sentences got cut off mid-thought — the very
+      // failure the energy-only endpointer was rewritten to avoid. Now the
+      // signal is handed to the VAD, which shortens its wait for a segment
+      // and ends immediately only on a full utterance_end.
       sttEndpointFired = true;
+      sttEndpointKind = kind === 'utterance' ? 'utterance'
+        : (sttEndpointKind === 'utterance' ? 'utterance' : 'segment');
       if (!handsFree || !listening) return;
-      stopVad(); // the energy endpointer is now redundant for this turn
-      stopListening(); // the identical tap-to-stop path — turn logic is never forked
+      if (!vadPollTimer) {
+        // Hands-free is on but the energy detector never started (setup
+        // failed, or the mic was opened by a tap). The recognizer is the
+        // only endpointer available, so honour it directly.
+        if (sttEndpointKind === 'utterance') stopListening();
+      }
+      // Otherwise the VAD tick picks it up on its next pass, within 50ms.
     }
 
     // Executable record for the queue above. There is no JS test runner in
@@ -2393,6 +2409,16 @@
       // THAT is the confidence signal a fast path should branch on, and the
       // layered design becomes worth revisiting on a real basis.
       silenceMs: 1200,
+      // The layered fast path, revived — but on the signal the comment above
+      // said to wait for, not on "they said a lot". When streaming STT is on
+      // and Deepgram has marked the end of a SEGMENT (`speech_final`), the
+      // recognizer is telling us a sentence finished, which is real evidence
+      // and not an inference from microphone energy. It is NOT evidence the
+      // person is done talking — a speaker pausing between two sentences
+      // produces exactly this — so it shortens the wait rather than ending
+      // the turn. Deepgram's own `utterance_end` (1000ms of silence after
+      // the last recognized WORD) is the stronger signal and ends it outright.
+      confidentSilenceMs: 600,
       noisyFloorDb: -45,              // retained as a diagnostic: a calibrated floor above this means the RMS signal is unreliable. No longer changes the endpoint decision (there is only one threshold now), but it is logged on every decision and is the first thing to look at when a room endpoints badly.
       maxUtteranceMs: 30000,          // hard stop regardless of VAD state — also caps the blob size POSTed to Deepgram
       noSpeechTimeoutMs: 8000,        // mic open this long with no confirmed speech onset at all -> give up WITHOUT posting anything
@@ -2456,10 +2482,23 @@
       // no longer change the outcome. Deliberate: an input that is recorded
       // but not acted on is honest; a heuristic that acts on a meaningless
       // signal is not.
-      const thresholdMs = vad.silenceMs;
+      // recognizerEndpoint: 'none' | 'segment' | 'utterance'.
+      // 'none' is the only value reachable with streaming STT off, which is
+      // what keeps push-to-talk and energy-only hands-free behaving exactly
+      // as they did before this existed.
+      const recognizerEndpoint = input.recognizerEndpoint || 'none';
+      let thresholdMs = vad.silenceMs;
+      if (recognizerEndpoint === 'utterance') {
+        // Deepgram already waited utterance_end_ms past the last recognized
+        // word. Waiting our own 1200ms on top of that is just latency.
+        thresholdMs = 0;
+      } else if (recognizerEndpoint === 'segment') {
+        thresholdMs = Math.min(vad.confidentSilenceMs, vad.silenceMs);
+      }
       return {
         end: silenceMs >= thresholdMs,
         thresholdMs,
+        recognizerEndpoint,
         // Echoed purely for the diagnostic log — see startVad's tick.
         speechMs, lastBurstMs, noiseFloorDb,
       };
@@ -2487,6 +2526,44 @@
       {
         name: 'boundary: 1199ms silence just misses',
         input: { speechMs: 2000, lastBurstMs: 2000, silenceMs: 1199, noiseFloorDb: -55 },
+        expectEnd: false,
+      },
+      // ── Layered endpointing on the recognizer's signal ──────────────
+      // The fast path the comment above VAD_DEFAULTS said to revisit "on a
+      // real basis". These cases are that basis: the branch is on what
+      // Deepgram reports, not on how much the speaker said.
+      {
+        name: 'recognizer: no signal -> unchanged 1200ms behaviour',
+        input: { speechMs: 2000, lastBurstMs: 2000, silenceMs: 700, noiseFloorDb: -55,
+                 recognizerEndpoint: 'none' },
+        expectEnd: false,
+      },
+      {
+        name: 'recognizer: segment end shortens the wait to 600ms',
+        input: { speechMs: 2000, lastBurstMs: 2000, silenceMs: 700, noiseFloorDb: -55,
+                 recognizerEndpoint: 'segment' },
+        expectEnd: true,
+      },
+      {
+        name: 'recognizer: a segment end alone does NOT cut a mid-sentence pause',
+        // The bug this replaced: speech_final ended the turn outright, so a
+        // speaker pausing between two sentences was cut off mid-thought.
+        input: { speechMs: 2000, lastBurstMs: 2000, silenceMs: 300, noiseFloorDb: -55,
+                 recognizerEndpoint: 'segment' },
+        expectEnd: false,
+      },
+      {
+        name: 'recognizer: utterance end ends the turn immediately',
+        // Deepgram already waited utterance_end_ms past the last recognized
+        // word; waiting our own 1200ms on top is pure latency.
+        input: { speechMs: 2000, lastBurstMs: 2000, silenceMs: 0, noiseFloorDb: -55,
+                 recognizerEndpoint: 'utterance' },
+        expectEnd: true,
+      },
+      {
+        name: 'recognizer: an unknown signal falls back to the honest threshold',
+        input: { speechMs: 2000, lastBurstMs: 2000, silenceMs: 700, noiseFloorDb: -55,
+                 recognizerEndpoint: 'nonsense' },
         expectEnd: false,
       },
       {
@@ -2749,7 +2826,8 @@
             if (burstMs > 0) { speechMs += dt; burstMs += dt; } else { silenceMs += dt; }
           }
 
-          const inputs = { speechMs, lastBurstMs: burstMs > 0 ? burstMs : lastBurstMs, silenceMs, noiseFloorDb };
+          const inputs = { speechMs, lastBurstMs: burstMs > 0 ? burstMs : lastBurstMs, silenceMs, noiseFloorDb,
+                           recognizerEndpoint: sttEndpointKind };
           const decision = shouldEndTurn(inputs);
           if (decision.end) {
             // Log every REAL endpoint decision (not every tick — that would

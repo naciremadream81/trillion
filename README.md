@@ -16,7 +16,7 @@ Voice latency instrumentation (smooth-voice_2 Tier 1, measure-only) is built int
 |---|---|
 | STT (Deepgram nova-2) | ~670ms–1.2s, scales with clip length (verified via a real TTS→STT round trip, transcript matched the source text) |
 | Model (Claude, first token) | ~1.2–1.4s for a short reply |
-| TTS (Piper, local) | ~180–620ms/sentence once warm, scales with sentence length. There used to be **~3.5s extra on the very first synthesis after the process starts** while the ~63MB voice model loaded; that cost is now paid at server startup instead — see below |
+| TTS (Piper, local) | **~390–505ms for a short sentence on a freshly-started process** (median 449ms), scaling with length: ~2.7s medium, ~5.3s long. **A long-running server is ~2.7× slower** — see "Synthesis degrades with uptime" below. There used to be **~3.5s extra on the very first synthesis after the process starts** while the ~63MB voice model loaded; that cost is now paid at server startup instead |
 
 Straight add of the three "first token/byte" legs is ~2.05–3.22s before the first sound plays once the process is warm (STT + model + TTS-warm ranges above).
 
@@ -41,56 +41,43 @@ first request now behaves as a warm one — the tax is eliminated, not reduced.
 A fresh process is therefore ~2.05–3.22s to first sound, the same as a warm one,
 rather than the ~5.55–6.72s it used to be.
 
-> **Caveat on the per-sentence numbers above.** The ~180–620ms/sentence figures
-> are the earlier idle-machine measurements and are deliberately left as-is. A
-> re-run during this work reported 1338–4839ms/sentence, but the Pi was saturated
-> at the time (load average 4.18 on 4 cores, mostly from the coding session doing
-> the work), so those readings are not comparable and were not published. The
-> cold-start delta above *is* safe to publish from the same loaded run, because a
-> before/after comparison on one machine cancels the load out — an absolute
-> per-sentence number does not. **The per-sentence row still wants an idle
-> re-measure.**
+### Synthesis degrades with uptime (measured)
 
-### Streaming STT (opt-in, default off)
+The per-sentence figures above were re-measured on an idle Pi, and doing so
+turned up something the old caveat was hiding: **Piper gets slower the longer
+the server has been running.**
 
-`POST /api/transcribe` (batch) is still the default and still the fallback.
-`GET /api/transcribe/stream` is a WebSocket relay to Deepgram's streaming
-endpoint: the browser sends audio as MediaRecorder produces it and gets back
-interim transcripts plus the recognizer's own end-of-utterance signal
-(`speech_final`, and `utterance_end` after a silence following the last
-*recognized word*). Turn it on from the console with
-`window.trillionStreamingStt.enabled = true` (persisted in localStorage).
+Measured by alternating requests between a freshly-started process and the
+`trillion-orb` service that had been up for three days — interleaved rather
+than run as two blocks, so ambient load affects both equally and cancels out:
 
-A relay rather than a direct browser connection because Deepgram
-authenticates with the API key — a direct connection would put a paid
-credential in page JavaScript. The key never leaves the server.
+| | median | min | max |
+|---|---|---|---|
+| fresh process | **449ms** | 389ms | 505ms |
+| 3-day-old service | **1222ms** | 1023ms | 1333ms |
 
-**What this is actually for, measured.** Verified end to end on the Pi: a
-Piper-synthesized sentence streamed through the relay came back transcribed
-exactly, with the endpoint signal present. But it is **not** faster to a final
-transcript for a short utterance — measured against the batch path on the
-same clip and machine, best case 1854ms (batch) vs 3197ms (streaming),
-because Deepgram waits out its endpointing window before finalizing.
+Same sentence, same machine, same moment: **2.7× slower**. The cause looks
+like memory growth rather than anything thermal — the CPU was at 69°C with
+`get_throttled=0x0`, while the two processes differed sharply:
 
-The win is not latency, it's the *signal*. Hands-free previously had to infer
-"they're done" from microphone energy alone, which is what made it cut people
-off mid-sentence (see the long comment above `startVad` in `index.html` for
-the three attempts that failed). Deepgram's endpoint is derived from
-recognized speech, so a pause full of room noise no longer reads as talking
-and a quiet breath no longer reads as finished. That is what smooth-voice_2
-Tier 2 asks for, and the layered fast/slow endpointing that got removed for
-lack of a trustworthy confidence signal now has a real one to branch on.
+| | age | RSS | swapped out |
+|---|---|---|---|
+| fresh process | 4 min | **78 MB** | 0 MB |
+| 3-day-old service | 3d 4h | **716 MB** | 31 MB |
 
-Caveat on those numbers: the harness paced a synthesized clip in 8KB chunks
-rather than driving a real microphone, and the batch figures varied
-5983 → 854ms across three runs from cold-start effects. Treat them as "the
-same order of magnitude, and streaming is not the speed-up you might assume",
-not as a precise comparison. A real-mic measurement is still wanted.
+A ~9× resident-memory growth for identical functionality, on a box already
+1.6 GB into a 2 GB swap file. Pages that have been swapped out have to fault
+back in on every synthesis, which is the shape of the slowdown.
 
-Streaming is purely additive: audio chunks accumulate for the batch path
-whether or not the socket is up, so a socket that never opens, drops, or
-produces nothing usable falls through to `POST /api/transcribe` exactly as
-before. It can short-circuit that path, never replace it.
+**Practical consequence:** restarting `trillion-orb.service` restores voice
+latency. Until the leak itself is found, a periodic restart is the honest
+mitigation, and the fresh-process figures above are the ones to design
+against — a person talking to a server that has been up for a week is hearing
+the slow numbers, not these.
+
+```bash
+systemctl --user restart trillion-orb.service
+```
 
 ### `scripts/voice_bench.py`
 
@@ -108,7 +95,7 @@ python scripts/voice_bench.py
 
 **Tiers 2-6, acted on against those numbers:**
 
-- **Tier 2 (end-of-turn detection) — hands-free VAD, opt-in.** An earlier pass recorded this tier as N/A because voice was push-to-talk: the stop-tap *was* the end-of-turn signal. That note also said "if voice ever goes hands-free, this tier comes back" — it has. A header toggle (default off) opens a browser-side `AnalyserNode` detector at 20Hz that ends the turn on silence; push-to-talk is untouched when it's off, and a tap still works when it's on. It uses **one** silence threshold (1200ms), not the layered fast/slow endpointing the playbook describes. Tier 2 assumes you can lean on the recognizer's own end-of-utterance signal for confidence, and `/api/transcribe` is batch Deepgram, so there isn't one. A layered version was built and measured: its confidence signal — a long final speech burst — turned out to mean "they said a lot", not "they finished", and it cut people off mid-sentence. Removed in favour of one honest number. Tunables live on `window.trillionVoiceVad` and are read every tick, so they can be adjusted mid-conversation from the console.
+- **Tier 2 (end-of-turn detection) — hands-free VAD, opt-in.** An earlier pass recorded this tier as N/A because voice was push-to-talk: the stop-tap *was* the end-of-turn signal. That note also said "if voice ever goes hands-free, this tier comes back" — it has. A header toggle (default off) opens a browser-side `AnalyserNode` detector at 20Hz that ends the turn on silence; push-to-talk is untouched when it's off, and a tap still works when it's on. With streaming STT off it uses **one** silence threshold (1200ms). A layered fast/slow version was built early and removed after measurement: its confidence signal — a long final speech burst — turned out to mean "they said a lot", not "they finished", and it cut people off mid-sentence. **The layered design is now back, branching on the signal the playbook actually assumes.** With streaming STT on, Deepgram's own endpoint drives the threshold: `utterance_end` (1000ms past the last recognized *word*) ends the turn immediately, since waiting another 1200ms on top is pure latency; `speech_final` marks the end of a *segment* and only shortens the wait to 600ms, because a speaker pausing between two sentences produces exactly that signal. An earlier revision ended the turn outright on `speech_final` and would have reintroduced the mid-sentence cut this tier exists to avoid — `window.trillionVadSelfTest()` now covers that case explicitly. Tunables live on `window.trillionVoiceVad` and are read every tick, so they can be adjusted mid-conversation from the console.
 - **Tier 3 (prompt-caching hygiene) — audited, found already correct, now guarded.** The classic failure (caching on, but something that changes every turn sits inside the cached prefix) isn't present: the system prompt is byte-identical build to build, and `append_voice_cue()` runs strictly *after* `apply_prompt_caching()`, so the per-turn cue lands after every breakpoint. Working code left alone; `tests/test_caching.py::TestCachedPrefixStaysStable` locks the property in so it can't silently regress.
 - **Tier 4 (the biggest measured number) — Piper's cold start moved off the critical path.** `warm_up()` loads the voice model *and* runs one throwaway inference (loading and first-inference are separate costs); `serve.py` schedules it as a background startup task, so it never blocks the server binding — confirmed live on the Pi, where the bind line prints *before* `Piper voice model warm.` A missing model logs and stays cold, and `/api/tts` still returns its own clear error. The before/after numbers are above. `_load_voice` also takes a lock: `synthesize` runs on a multi-worker executor, so two concurrent first-requests could otherwise both load the ~63MB model.
 - **Tier 4 (provider choice) — ElevenLabs is selectable.** `TTS_PROVIDER=elevenlabs` (default stays `piper`), model `eleven_flash_v2_5`, requires a paid plan. Piper remains the default and its path is unchanged.
