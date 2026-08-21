@@ -55,3 +55,4 @@ voices/*.onnx
 voices/*.onnx.json
 csp_reports.db
 mining.db
+design.db

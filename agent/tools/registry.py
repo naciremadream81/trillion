@@ -152,6 +152,31 @@ def build_registry(settings) -> ToolRegistry:
 
         registry.register(QueryMiningTool(MiningRepo(), settings.mining_wallet))
 
+    # Design agent — off by default and additionally gated on the claude CLI
+    # actually being installed, since generate_mockup is useless without it
+    # and a registered-but-broken tool is worse than an absent one.
+    if getattr(settings, "design_agent_enabled", False):
+        from ..design.budget import DesignBudget
+        from ..design.claude_code_runner import claude_binary
+        from .design import GenerateMockupTool, ListDesignProjectsTool
+
+        if claude_binary():
+            registry.register(
+                GenerateMockupTool(
+                    settings,
+                    budget=DesignBudget(
+                        per_dispatch_usd=settings.design_per_dispatch_usd,
+                        daily_usd=settings.design_daily_usd,
+                    ),
+                )
+            )
+            registry.register(ListDesignProjectsTool(settings))
+        else:
+            print(
+                "Design agent enabled but the `claude` CLI is not on PATH; "
+                "design tools not registered."
+            )
+
     registry.register(SearchNotesTool(settings.notes_index_path))
     registry.register(DraftEmailTool())
 

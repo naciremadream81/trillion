@@ -24,6 +24,7 @@ them on" from the source, not from memory. Everything between a block's
 <!-- AUTO-START: config-gating -->
 - `supabase_analytics_url` — enables `query_analytics`
 - `search_provider` — disables `web_search`
+- `design_agent_enabled` — enables `generate_mockup`, `list_design_projects`
 - `mining_wallet` — enables `query_mining`
 <!-- AUTO-END: config-gating -->
 
@@ -31,6 +32,6 @@ them on" from the source, not from memory. Everything between a block's
 
 <!-- SLIM-START -->
 Tools currently available: `confirm_action`, `draft_email`, `forget_fact`, `remember_fact`, `search_notes`, `web_search`.
-Unset config that would add more: `supabase_analytics_url`→query_analytics; `mining_wallet`→query_mining.
+Unset config that would add more: `supabase_analytics_url`→query_analytics; `design_agent_enabled`→generate_mockup, list_design_projects; `mining_wallet`→query_mining.
 Full detail: context/self/trillion.md.
 <!-- SLIM-END -->

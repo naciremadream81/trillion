@@ -119,7 +119,7 @@ class TestProbeConfigGating(unittest.TestCase):
         self.assertEqual(
             fields,
             {"supabase_analytics_url", "brave_search_api_key", "firecrawl_api_key",
-             "mining_wallet"},
+             "mining_wallet", "design_agent_enabled"},
         )
 
     def test_against_real_settings_and_registry_matches_known_wiring(self):
@@ -132,7 +132,7 @@ class TestProbeConfigGating(unittest.TestCase):
         self.assertEqual(
             fields,
             {"supabase_analytics_url", "brave_search_api_key", "firecrawl_api_key",
-             "mining_wallet"},
+             "mining_wallet", "design_agent_enabled"},
         )
 
     def test_already_satisfied_gate_is_excluded_from_real_baseline(self):

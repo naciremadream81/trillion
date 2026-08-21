@@ -216,6 +216,8 @@ All of these are wired — the commented entries in `.env.example` are real over
 | `TRILLION_WEB_AUTH_TOKEN_PREV` | The outgoing token during a rotation. Both values authenticate while it's set; clear it to finish the rotation — see [`docs/incident-runbook.md`](docs/incident-runbook.md) |
 | `TRILLION_CVE_SCAN_DB` | Where `pip-audit` scan history is written |
 | `TRILLION_MINING_WALLET` | Ocean payout address. Empty disables the mining tracker entirely |
+| `TRILLION_DESIGN_AGENT` | Off by default. Enables `generate_mockup`, which spawns Claude Code to compose screens — gated, capped, and needs `claude` on PATH |
+| `TRILLION_DESIGN_PER_DISPATCH_USD` / `TRILLION_DESIGN_DAILY_USD` | Design cost ceilings (default $5 / $15). Refuses before spawning rather than truncating |
 | `TRILLION_MINING_RETENTION_DAYS` / `TRILLION_MINING_DB` | Snapshot retention (default 30 days) and where history is written |
 | `TRILLION_CSP_ENFORCE` | Off by default (report-only). See "Flipping CSP to enforcing" below — don't set it on a guess |
 | `TRILLION_CSP_REPORT_DB` | Where CSP violation reports are persisted (default `csp_reports.db`) |
@@ -336,6 +338,7 @@ trillion/
 │   ├── security/           # Headers/CSP, bearer auth, startup guard, CVE scan, self-audit
 │   ├── heartbeat/          # Scheduler, quiet hours, notice store, Code Sentinel + mining checks
 │   ├── mining/             # Ocean pool client, snapshot storage, BTC price
+│   ├── design/             # Head-of-Design: docs, tokens, scaffold, catalog, composer
 │   └── factory/            # Agent Factory + software/ builds + Tier 5 handoffs
 ├── playbooks/              # Design notes and feature prompts
 ├── docs/                   # Incident runbook, handoff records
