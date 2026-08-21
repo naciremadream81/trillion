@@ -268,5 +268,131 @@ class TestHandoffApprovalPath(unittest.TestCase):
         self.assertEqual(approved["arguments"], {"message": "the original task"})
 
 
+class TestNestedToolCallsPreserveTheOuterHistory(unittest.IsolatedAsyncioTestCase):
+    """
+    Codex review, P1 — the self-approval defence failing open.
+
+    A dispatch runs a specialist, whose own _run_tool reached the same
+    contextvar publish and REPLACED Sean's conversation with its scratch
+    history (typically one or two turns). propose_handoff then parked an
+    action whose history_index was far below the real conversation length, so
+    approval.py's "a genuine human turn AFTER the proposal" check could be
+    satisfied by a message Sean sent long before it — letting confirm_action
+    run in the same turn with no new consent.
+    """
+
+    async def test_only_the_outermost_agent_publishes_its_history(self):
+        from agent.core import _current_history, current_agent_history
+
+        main_history = [{"role": "user", "content": "a"}] * 12
+        specialist_history = [{"role": "user", "content": "x"}]
+        seen = {}
+
+        async def specialist_tool_call():
+            outer = _current_history.get()
+            token = _current_history.set(specialist_history) if outer is None else None
+            try:
+                seen["index"] = len(current_agent_history() or [])
+            finally:
+                if token is not None:
+                    _current_history.reset(token)
+
+        async def main_tool_call():
+            outer = _current_history.get()
+            token = _current_history.set(main_history) if outer is None else None
+            try:
+                await specialist_tool_call()
+            finally:
+                if token is not None:
+                    _current_history.reset(token)
+
+        await main_tool_call()
+        self.assertEqual(seen["index"], len(main_history))
+
+    async def test_the_contextvar_is_cleared_after_the_outermost_call(self):
+        from agent.core import Agent, current_agent_history
+        from agent.providers.base import ProviderResponse, TextChunk, TokenUsage
+
+        class FakeProvider:
+            model_name = "fake"
+
+            async def stream(self, messages, system, tools=None):
+                yield TextChunk(text="")
+                yield ProviderResponse(text="", tool_calls=[], usage=TokenUsage(), model="fake")
+
+        agent = Agent(provider=FakeProvider(), tool_registry=None)
+        await agent._run_tool(type("TC", (), {"name": "x", "arguments": {}, "id": "1"})())
+        self.assertIsNone(current_agent_history())
+
+    async def test_a_real_nested_dispatch_records_the_main_history_index(self):
+        # End to end through the real Agent, not a simulation of it.
+        from agent.core import Agent, current_agent_history
+        from agent.providers.base import ProviderResponse, TextChunk, ToolCall, TokenUsage
+        from agent.tools.base import BaseTool
+        from agent.tools.registry import ToolRegistry
+
+        observed = {}
+
+        class InnerTool(BaseTool):
+            name = "inner"
+            description = "d"
+            input_schema = {"type": "object", "properties": {}}
+            risk = "read_only"
+            requires_confirmation = False
+
+            async def run(self, **kwargs):
+                observed["index"] = len(current_agent_history() or [])
+                return "inner done"
+
+        class NestedProvider:
+            """Calls `inner` once, then finishes — the specialist's loop."""
+
+            model_name = "fake"
+
+            def __init__(self):
+                self.calls = 0
+
+            async def stream(self, messages, system, tools=None):
+                self.calls += 1
+                if self.calls == 1:
+                    yield ToolCall(id="t1", name="inner", arguments={})
+                    yield ProviderResponse(
+                        text="", tool_calls=[ToolCall(id="t1", name="inner", arguments={})],
+                        usage=TokenUsage(), model="fake",
+                    )
+                else:
+                    yield TextChunk(text="done")
+                    yield ProviderResponse(text="done", tool_calls=[], usage=TokenUsage(), model="fake")
+
+        inner_registry = ToolRegistry()
+        inner_registry.register(InnerTool())
+        specialist = Agent(provider=NestedProvider(), tool_registry=inner_registry)
+
+        class DispatchTool(BaseTool):
+            name = "dispatch_to_spec"
+            description = "d"
+            input_schema = {"type": "object", "properties": {}}
+            risk = "low"
+            requires_confirmation = False
+
+            async def run(self, **kwargs):
+                out = ""
+                async for chunk in specialist.turn("go"):
+                    out += chunk
+                return out
+
+        outer_registry = ToolRegistry()
+        outer_registry.register(DispatchTool())
+        main = Agent(provider=NestedProvider(), tool_registry=outer_registry)
+        main.history = [{"role": "user", "content": "m"}] * 9
+
+        tc = ToolCall(id="d1", name="dispatch_to_spec", arguments={})
+        await main._run_tool(tc)
+
+        # The nested tool must have seen the MAIN conversation, not the
+        # specialist's scratch history.
+        self.assertEqual(observed["index"], 9)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1874,6 +1874,7 @@
     let sttFailed = false;         // socket errored -> this turn falls back to batch
 
     function sttReset() {
+      sttSendChain = Promise.resolve();
       sttFinalText = '';
       sttEndpointFired = false;
       sttFailed = false;
@@ -1941,6 +1942,40 @@
       return socket;
     }
 
+    // Audio is queued rather than sent directly, for two reasons that both
+    // silently break streaming otherwise:
+    //
+    // 1. THE HANDSHAKE IS SLOWER THAN THE FIRST TIMESLICE. MediaRecorder
+    //    emits its first chunk at 250ms; a WebSocket that is still
+    //    CONNECTING at that point would have that chunk dropped. That first
+    //    chunk carries the WebM/EBML container header — without it Deepgram
+    //    cannot decode ANY of the fragments that follow, so the endpoint
+    //    signal never fires and hands-free silently falls back to energy
+    //    detection. The failure looks like "streaming just doesn't help",
+    //    which is the hardest kind to notice.
+    // 2. ORDER. Blob.arrayBuffer() is async, so two chunks converted
+    //    concurrently can reach send() out of order. A serialized chain
+    //    keeps the stream in the order it was recorded.
+    let sttSendChain = Promise.resolve();
+
+    function sttEnqueue(blob) {
+      if (!blob || sttFailed) return;
+      if (!sttSocket) return;   // streaming off for this turn
+      sttSendChain = sttSendChain.then(async () => {
+        if (sttFailed || !sttSocket) return;
+        // Wait out a handshake still in flight rather than dropping the chunk.
+        for (let i = 0; i < 60 && sttSocket && sttSocket.readyState === WebSocket.CONNECTING; i++) {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        if (!sttSocket || sttSocket.readyState !== WebSocket.OPEN) return;
+        try {
+          sttSocket.send(await blob.arrayBuffer());
+        } catch (e) {
+          sttFailed = true;   // fall through to the batch path
+        }
+      }).catch(() => { sttFailed = true; });
+    }
+
     function sttOnEndpoint() {
       // The recognizer's end-of-utterance. Only acts in hands-free mode:
       // in push-to-talk the stop-tap IS the end-of-turn signal and always
@@ -1950,6 +1985,47 @@
       stopVad(); // the energy endpointer is now redundant for this turn
       stopListening(); // the identical tap-to-stop path — turn logic is never forked
     }
+
+    // Executable record for the queue above. There is no JS test runner in
+    // this repo, so the self-test convention (see
+    // window.trillionSplitSentencesSelfTest / trillionVadSelfTest) is how
+    // browser-side logic gets checked. This one specifically covers the case
+    // Codex caught: chunks produced while the handshake is still in flight.
+    window.trillionSttQueueSelfTest = async function trillionSttQueueSelfTest() {
+      const realSocket = sttSocket;
+      const realFailed = sttFailed;
+      const realChain = sttSendChain;
+      const sent = [];
+      try {
+        sttFailed = false;
+        sttSendChain = Promise.resolve();
+        // A socket that stays CONNECTING for 600ms — longer than the 250ms
+        // first timeslice, which is exactly when the header chunk used to be
+        // dropped on the floor.
+        sttSocket = {
+          readyState: WebSocket.CONNECTING,
+          send(buf) { sent.push(new TextDecoder().decode(buf)); },
+        };
+        setTimeout(() => { if (sttSocket) sttSocket.readyState = WebSocket.OPEN; }, 600);
+
+        ['CHUNK-1-HEADER', 'CHUNK-2', 'CHUNK-3'].forEach((text) =>
+          sttEnqueue(new Blob([text], { type: 'audio/webm' })));
+
+        await sttSendChain;
+        const joined = sent.join('|');
+        const results = [
+          ['header chunk survives a slow handshake', sent[0] === 'CHUNK-1-HEADER'],
+          ['no chunk dropped', sent.length === 3],
+          ['order preserved', joined === 'CHUNK-1-HEADER|CHUNK-2|CHUNK-3'],
+        ];
+        const fail = results.filter((r) => !r[1]).map((r) => r[0]);
+        return { pass: results.length - fail.length, fail: fail.length, total: results.length, failed: fail, sent };
+      } finally {
+        sttSocket = realSocket;
+        sttFailed = realFailed;
+        sttSendChain = realChain;
+      }
+    };
 
     window.trillionStreamingStt = {
       get enabled() { return streamingStt; },
@@ -2758,14 +2834,7 @@
         // Collected for the batch fallback ALWAYS, streamed as well when the
         // socket is up. Never one or the other — see streamingStt's comment.
         chunks.push(e.data);
-        if (sttSocket && sttSocket.readyState === WebSocket.OPEN && !sttFailed) {
-          e.data.arrayBuffer().then(
-            (buf) => {
-              if (sttSocket && sttSocket.readyState === WebSocket.OPEN) sttSocket.send(buf);
-            },
-            () => { sttFailed = true; },
-          );
-        }
+        sttEnqueue(e.data);
       };
       mediaRecorder.onstop = onRecordingStopped;
       // A timeslice is what makes ondataavailable fire DURING the recording

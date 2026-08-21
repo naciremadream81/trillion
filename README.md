@@ -258,6 +258,7 @@ Type normally for a streaming turn. Slash commands:
 - `POST /api/transcribe` — audio in, transcript out (Deepgram; needs `DEEPGRAM_API_KEY`)
 - `GET /api/transcribe/stream` — WebSocket relay to Deepgram streaming; interim transcripts and the end-of-utterance signal (opt-in, see above)
 - `POST /api/tts` — text in, WAV out (local Piper; no key needed)
+- `GET /api/design/<project>/preview/...` — serves generated mockups and their Next assets (design agent only)
 - `GET /api/mining` — mining status from the last poll (empty `{configured: false}` without a wallet)
 - `GET /api/handoffs` — specialist handoff proposals waiting on your yes
 - `GET /api/heartbeat/notices` — active (undismissed) heartbeat notices

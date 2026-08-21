@@ -155,27 +155,56 @@ class GenerateMockupTool(BaseTool):
             first_dispatch=first_dispatch,
         )
 
+        # Regenerating an existing screen leaves the PREVIOUS index.html in
+        # place. An existence-only check after the run would then report
+        # success for a failed rebuild and hand back a URL serving the old
+        # design — so record what was there beforehand and require this run to
+        # have actually replaced it.
+        preview_root = os.path.join(project_root, ".prism", "preview")
+        built = expected_output_path(preview_root, feature_slug, screen_name)
+        try:
+            mtime_before = os.path.getmtime(built)
+        except OSError:
+            mtime_before = None
+
         model = getattr(self.settings, "design_compose_model", None) if self.settings else None
         result = await spawn_claude_code(
             prompt,
             cwd=project_root,
             model=model,
+            # The ceiling now constrains the run itself, not just whether it
+            # may start — see spawn_claude_code's docstring.
+            max_cost_usd=self.budget.per_dispatch_usd,
             on_event=self.on_event,
         )
 
-        preview_root = os.path.join(project_root, ".prism", "preview")
-        built = expected_output_path(preview_root, feature_slug, screen_name)
-        built_ok = os.path.isfile(built)
+        try:
+            mtime_after = os.path.getmtime(built)
+        except OSError:
+            mtime_after = None
+        # Three conditions, all required: the run succeeded, the file exists,
+        # and it is not the one that was already there.
+        built_ok = (
+            result.ok
+            and mtime_after is not None
+            and (mtime_before is None or mtime_after > mtime_before)
+        )
 
+        # A run killed for going over budget never emits a result event, so
+        # total_cost_usd stays 0 — recording that would hand the budget back
+        # the very money that triggered the kill. Take whichever figure is
+        # larger: the authoritative one when it arrived, the estimate when it
+        # didn't.
+        spent_usd = max(result.total_cost_usd, result.estimated_cost_usd)
         self.budget.record(
             project_slug,
             feature_slug=feature_slug,
             screen_name=screen_name,
-            cost_usd=result.total_cost_usd,
+            cost_usd=spent_usd,
             succeeded=built_ok,
         )
 
-        spent = f"${result.total_cost_usd:.2f}"
+        spent = f"${spent_usd:.2f}"
         if built_ok:
             url = f"/api/design/{project_slug}/preview/{feature_slug}/{screen_name}/"
             lines = [
@@ -194,7 +223,13 @@ class GenerateMockupTool(BaseTool):
 
         # Verified on the filesystem, so this branch is reachable even when
         # Claude Code reported success.
-        reason = result.error or "the build produced no output file"
+        if result.ok and mtime_after is not None and mtime_before == mtime_after:
+            reason = (
+                "the build left the previous version of this screen untouched, so "
+                "nothing was regenerated"
+            )
+        else:
+            reason = result.error or "the build produced no output file"
         return (
             f"[generate_mockup did not produce a screen: {reason}] "
             f"Spent {spent}. Expected {os.path.relpath(built, project_root)} to exist. "

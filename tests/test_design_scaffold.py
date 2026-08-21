@@ -226,5 +226,103 @@ class TestScaffoldWriting(unittest.TestCase):
             expected_output_path(result["preview_root"], "../../etc", "passwd")
 
 
+class TestPreviewServing(unittest.IsolatedAsyncioTestCase):
+    """
+    Codex review, P1: generate_mockup advertised /api/design/.../preview/ URLs
+    and the exported Next app emits its assets under the same prefix, but no
+    route existed — every advertised preview and every script it loaded 404'd.
+    """
+
+    async def asyncSetUp(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        import serve as serve_module
+        from agent.providers.base import BaseProvider, ProviderResponse, TextChunk, TokenUsage
+        from agent.tools.registry import ToolRegistry
+
+        class FakeProvider(BaseProvider):
+            @property
+            def model_name(self):
+                return "fake"
+
+            async def stream(self, messages, system, tools=None):
+                yield TextChunk(text="")
+                yield ProviderResponse(text="", tool_calls=[], usage=TokenUsage(), model="fake")
+
+        self.tmp = tempfile.mkdtemp()
+        self.projects = os.path.join(self.tmp, "projects")
+        os.makedirs(os.path.join(self.projects, "demo-project"))
+
+        self._prev = {k: os.environ.get(k) for k in (
+            "TRILLION_DESIGN_AGENT", "TRILLION_SOFTWARE_FACTORY_ROOT",
+            "TRILLION_FACTORY_DB", "TRILLION_NOTES_VAULT_PATH",
+            "TRILLION_NOTES_INDEX_PATH", "TRILLION_HEARTBEAT_DB", "TRILLION_CSP_REPORT_DB")}
+        os.environ["TRILLION_DESIGN_AGENT"] = "true"
+        os.environ["TRILLION_SOFTWARE_FACTORY_ROOT"] = self.projects
+        os.environ["TRILLION_FACTORY_DB"] = os.path.join(self.tmp, "f.db")
+        os.environ["TRILLION_NOTES_VAULT_PATH"] = os.path.join(self.tmp, "v")
+        os.environ["TRILLION_NOTES_INDEX_PATH"] = os.path.join(self.tmp, "n.db")
+        os.environ["TRILLION_HEARTBEAT_DB"] = os.path.join(self.tmp, "h.db")
+        os.environ["TRILLION_CSP_REPORT_DB"] = os.path.join(self.tmp, "c.db")
+
+        # A built screen, laid out the way trailingSlash: true makes Next emit.
+        out = os.path.join(self.projects, "demo-project", ".prism", "preview", "out")
+        os.makedirs(os.path.join(out, "landing", "hero"))
+        with open(os.path.join(out, "landing", "hero", "index.html"), "w") as f:
+            f.write("<html>hero</html>")
+        os.makedirs(os.path.join(out, "_next", "static"))
+        with open(os.path.join(out, "_next", "static", "app.js"), "w") as f:
+            f.write("console.log(1)")
+        with open(os.path.join(out, "index.html"), "w") as f:
+            f.write("<html>index</html>")
+
+        self.serve_module = serve_module
+        serve_module._provider = FakeProvider()
+        serve_module._registry = ToolRegistry()
+        self.client = TestClient(TestServer(serve_module.build_app()))
+        await self.client.start_server()
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        self.serve_module._provider = None
+        self.serve_module._registry = None
+        for k, v in self._prev.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    async def test_a_generated_screen_is_served(self):
+        # The exact URL generate_mockup hands back.
+        resp = await self.client.get("/api/design/demo-project/preview/landing/hero/")
+        self.assertEqual(resp.status, 200)
+        self.assertIn("hero", await resp.text())
+
+    async def test_next_assets_are_served(self):
+        # basePath + assetPrefix make the exported app request these.
+        resp = await self.client.get("/api/design/demo-project/preview/_next/static/app.js")
+        self.assertEqual(resp.status, 200)
+
+    async def test_the_preview_root_serves_the_index(self):
+        resp = await self.client.get("/api/design/demo-project/preview/")
+        self.assertEqual(resp.status, 200)
+
+    async def test_an_ungenerated_screen_is_a_clear_404(self):
+        resp = await self.client.get("/api/design/demo-project/preview/landing/nope/")
+        self.assertEqual(resp.status, 404)
+
+    async def test_traversal_out_of_the_project_is_refused(self):
+        for path in ("/api/design/demo-project/preview/../../../../etc/passwd",
+                     "/api/design/../../etc/preview/passwd"):
+            with self.subTest(path=path):
+                resp = await self.client.get(path)
+                self.assertNotEqual(resp.status, 200)
+
+    async def test_an_unknown_project_is_a_404(self):
+        resp = await self.client.get("/api/design/no-such-project/preview/landing/hero/")
+        self.assertEqual(resp.status, 404)
+
+
 if __name__ == "__main__":
     unittest.main()

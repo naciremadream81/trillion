@@ -766,6 +766,52 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
         ]
         return web.json_response({"agents": agents})
 
+    async def design_preview(request: web.Request) -> web.StreamResponse:
+        """
+        Serve a project's exported mockups — playbooks/design-subagent.md
+        Tier 2's serving endpoint.
+
+        generate_mockup hands back URLs under this prefix, and the exported
+        Next.js app emits its own asset URLs under it too (that is what
+        basePath + assetPrefix are for). Without this route every advertised
+        preview and every script it loads returns 404.
+
+        Three shapes map onto one handler because they are all "a file inside
+        this project's out/ directory":
+            /api/design/<project>/preview/                     -> out/index.html
+            /api/design/<project>/preview/_next/<path>          -> out/_next/<path>
+            /api/design/<project>/preview/<feature>/<screen>/   -> out/<feature>/<screen>/index.html
+
+        Containment is the whole job: `tail` is attacker-shaped in principle,
+        so it goes through the same jail as everything else and a directory
+        request is resolved to index.html rather than listed.
+        """
+        from agent.design.docs import DesignDocError, assert_within_project, resolve_project_root
+
+        settings = get_settings()
+        if not settings.design_agent_enabled:
+            return web.json_response({"error": "design agent is not enabled"}, status=404)
+
+        project = request.match_info.get("project", "")
+        tail = request.match_info.get("tail", "") or ""
+        try:
+            project_root = resolve_project_root(project, settings)
+            out_root = assert_within_project(project_root, os.path.join(".prism", "preview", "out"))
+            # A trailing-slash route (which is what trailingSlash: true makes
+            # Next emit) resolves to that directory's index.html.
+            relative = tail if tail and not tail.endswith("/") else os.path.join(tail, "index.html")
+            target = assert_within_project(out_root, relative.lstrip("/"))
+        except DesignDocError:
+            return web.json_response({"error": "not found"}, status=404)
+
+        if os.path.isdir(target):
+            target = os.path.join(target, "index.html")
+        if not os.path.isfile(target):
+            return web.json_response(
+                {"error": "no such preview — has this screen been generated?"}, status=404
+            )
+        return web.FileResponse(target)
+
     async def mining_status(_request: web.Request) -> web.Response:
         # Read-only view of the last recorded poll. Like query_mining, this
         # never calls the pool — the heartbeat owns that cadence, and a
@@ -936,6 +982,8 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
     app.router.add_post("/api/transcribe", transcribe_audio)
     app.router.add_get("/api/transcribe/stream", transcribe_stream)
     app.router.add_post("/api/tts", synthesize_speech)
+    app.router.add_get("/api/design/{project}/preview/", design_preview)
+    app.router.add_get("/api/design/{project}/preview/{tail:.*}", design_preview)
     app.router.add_get("/api/mining", mining_status)
     app.router.add_get("/api/handoffs", pending_handoffs)
     app.router.add_get("/api/heartbeat/notices", heartbeat_notices)

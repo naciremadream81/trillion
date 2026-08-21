@@ -281,7 +281,18 @@ class Agent:
         # chain) can index against the conversation that will actually approve
         # its proposal. Reset in a finally so a raising tool can't leak it into
         # the next call on this task.
-        token = _current_history.set(self.history)
+        #
+        # ONLY THE OUTERMOST AGENT PUBLISHES. A dispatch runs a specialist,
+        # whose own _run_tool reaches this same line — and overwriting here
+        # would replace Sean's conversation with the specialist's scratch
+        # history, which is typically one or two turns long. propose_handoff
+        # would then park an action whose history_index is far below the real
+        # conversation's length, and approval.py's check (a genuine human turn
+        # at an index *after* the proposal) would be satisfied by a message
+        # Sean sent long before it. That is the self-approval defence failing
+        # open, in the one code path built to rely on it.
+        outer = _current_history.get()
+        token = _current_history.set(self.history) if outer is None else None
         try:
             return await self.tool_registry.run(tc)
         except Exception as e:  # noqa: BLE001
@@ -289,4 +300,5 @@ class Agent:
             # and explain it to Sean rather than crashing.
             return f"[Tool '{tc.name}' failed: {e}]"
         finally:
-            _current_history.reset(token)
+            if token is not None:
+                _current_history.reset(token)

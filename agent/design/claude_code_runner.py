@@ -74,6 +74,8 @@ class ClaudeCodeResult:
     num_turns: int = 0
     duration_seconds: float = 0.0
     error: str = ""
+    estimated_cost_usd: float = 0.0
+    over_budget: bool = False
     events: list = field(default_factory=list)
 
 
@@ -137,7 +139,23 @@ def parse_event(line: str) -> dict | None:
 
     kind = data.get("type")
     if kind == "assistant":
-        for block in ((data.get("message") or {}).get("content") or []):
+        message = data.get("message") or {}
+        usage = message.get("usage")
+        if isinstance(usage, dict):
+            # Confirmed against the real CLI: assistant events carry
+            # message.usage with input/output/cache token counts. This is what
+            # makes a mid-flight cost ceiling possible at all — total_cost_usd
+            # only arrives on the final result event, which is far too late to
+            # stop a run that is already over budget.
+            return {
+                "type": "usage",
+                "model": str(message.get("model") or ""),
+                "input_tokens": int(usage.get("input_tokens") or 0),
+                "output_tokens": int(usage.get("output_tokens") or 0),
+                "cache_write_tokens": int(usage.get("cache_creation_input_tokens") or 0),
+                "cache_read_tokens": int(usage.get("cache_read_input_tokens") or 0),
+            }
+        for block in (message.get("content") or []):
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 name = block.get("name", "tool")
                 target = ""
@@ -171,12 +189,25 @@ async def spawn_claude_code(
     max_turns: int = DEFAULT_MAX_TURNS,
     allowed_tools=DEFAULT_ALLOWED_TOOLS,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    max_cost_usd: float | None = None,
     on_event=None,
 ) -> ClaudeCodeResult:
     """
     Run one composition. Never raises for a failed build — a failure comes
     back as a result with ok=False and an error string, because the caller is
     a tool whose job is to hand the model something it can reason about.
+
+    `max_cost_usd` is enforced MID-FLIGHT, not just reserved beforehand. Token
+    usage is accumulated from the assistant events the CLI streams, priced
+    with agent/cost/pricing.py, and the subprocess is killed the moment the
+    running estimate crosses the ceiling. Without this the ceiling would only
+    decide whether a run may *start*, and a single runaway dispatch could
+    spend past both it and the daily cap before anything noticed.
+
+    The running figure is an estimate — the authoritative number is
+    total_cost_usd on the final result event, which is what gets recorded.
+    An estimate is the right instrument here anyway: the alternative is
+    finding out the true cost only once it is already spent.
     """
     result = ClaudeCodeResult()
     try:
@@ -203,6 +234,8 @@ async def spawn_claude_code(
         result.error = f"could not start claude: {e}"
         return result
 
+    from ..cost.pricing import compute_cost
+
     async def drain() -> None:
         assert process.stdout is not None
         async for raw in process.stdout:
@@ -210,6 +243,25 @@ async def spawn_claude_code(
             if event is None:
                 continue
             result.events.append(event)
+            if event["type"] == "usage":
+                result.estimated_cost_usd += compute_cost(
+                    event["model"] or (model or ""),
+                    input_tokens=event["input_tokens"],
+                    output_tokens=event["output_tokens"],
+                    cache_write_tokens=event["cache_write_tokens"],
+                    cache_read_tokens=event["cache_read_tokens"],
+                )
+                if max_cost_usd is not None and result.estimated_cost_usd > max_cost_usd:
+                    result.over_budget = True
+                    result.error = (
+                        f"stopped at an estimated ${result.estimated_cost_usd:.2f}, "
+                        f"over the ${max_cost_usd:.2f} per-dispatch ceiling"
+                    )
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    return
             if event["type"] == "result":
                 result.result_text = event["result"]
                 result.total_cost_usd = event["total_cost_usd"]

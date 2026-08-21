@@ -302,5 +302,155 @@ class TestToolRefusals(unittest.IsolatedAsyncioTestCase):
         self.assertIn("design.md", result)
 
 
+class TestCostCeilingIsEnforcedNotJustReserved(unittest.TestCase):
+    """
+    Codex review, P1: per_dispatch_usd was only added to historical spend to
+    decide whether a run could START. Nothing constrained the run itself, so a
+    single dispatch could spend past both it and the daily cap before any cost
+    was recorded.
+    """
+
+    def test_assistant_events_expose_usage_for_mid_flight_tracking(self):
+        # Confirmed against the real CLI. This is what makes a mid-flight
+        # ceiling possible — total_cost_usd only arrives on the final result
+        # event, far too late to stop a run already over budget.
+        event = parse_event(
+            '{"type":"assistant","message":{"model":"claude-sonnet-4-6","usage":'
+            '{"input_tokens":1200,"output_tokens":300,"cache_read_input_tokens":900,'
+            '"cache_creation_input_tokens":50}}}'
+        )
+        self.assertEqual(event["type"], "usage")
+        self.assertEqual(event["input_tokens"], 1200)
+        self.assertEqual(event["output_tokens"], 300)
+        self.assertEqual(event["cache_read_tokens"], 900)
+        self.assertEqual(event["cache_write_tokens"], 50)
+
+    def test_a_usage_event_does_not_shadow_tool_progress(self):
+        # An assistant event carrying content rather than usage must still
+        # produce the progress line the UI shows.
+        event = parse_event(
+            '{"type":"assistant","message":{"content":[{"type":"tool_use",'
+            '"name":"Write","input":{"file_path":"page.tsx"}}]}}'
+        )
+        self.assertEqual(event["type"], "tool")
+
+    def test_the_runner_accepts_a_ceiling(self):
+        import inspect
+
+        from agent.design.claude_code_runner import spawn_claude_code
+
+        self.assertIn("max_cost_usd", inspect.signature(spawn_claude_code).parameters)
+
+    def test_the_tool_passes_its_configured_ceiling_through(self):
+        import inspect
+
+        source = inspect.getsource(GenerateMockupTool.run)
+        self.assertIn("max_cost_usd=self.budget.per_dispatch_usd", source)
+
+    def test_a_killed_run_still_charges_the_budget(self):
+        # A run killed for going over never emits a result event, so
+        # total_cost_usd stays 0. Recording that would hand the budget back
+        # the very money that triggered the kill.
+        import inspect
+
+        source = inspect.getsource(GenerateMockupTool.run)
+        self.assertIn("max(result.total_cost_usd, result.estimated_cost_usd)", source)
+
+
+class TestStaleOutputIsNotSuccess(unittest.IsolatedAsyncioTestCase):
+    """
+    Codex review, P2: regenerating an existing screen leaves the previous
+    index.html in place, so an existence-only check reported success for a
+    failed rebuild and handed back a URL serving the old design.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.project = os.path.join(self.tmp, "demo-project")
+        os.makedirs(self.project)
+
+        class Settings:
+            software_factory_root = self.tmp
+            design_compose_model = ""
+
+        self.settings = Settings()
+        self.budget = DesignBudget(os.path.join(self.tmp, "d.db"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    async def _run_with_fake_claude(self, fake):
+        import agent.tools.design as design_module
+
+        original = design_module.spawn_claude_code
+        design_module.spawn_claude_code = fake
+        try:
+            tool = GenerateMockupTool(self.settings, budget=self.budget)
+            return await tool.run(
+                project_slug="demo-project", feature_slug="landing",
+                screen_name="hero", description="A hero.",
+            )
+        finally:
+            design_module.spawn_claude_code = original
+
+    def _plant_stale_output(self):
+        from agent.design.claude_code_runner import ClaudeCodeResult  # noqa: F401
+
+        out = os.path.join(self.project, ".prism", "preview", "out", "landing", "hero")
+        os.makedirs(out, exist_ok=True)
+        path = os.path.join(out, "index.html")
+        with open(path, "w") as f:
+            f.write("<html>the OLD design</html>")
+        old_time = 1_600_000_000
+        os.utime(path, (old_time, old_time))
+        return path
+
+    async def test_a_failed_rebuild_over_stale_output_is_not_success(self):
+        from agent.design.claude_code_runner import ClaudeCodeResult
+
+        self._plant_stale_output()
+
+        async def failing(*a, **kw):
+            return ClaudeCodeResult(ok=False, error="build failed", total_cost_usd=1.5)
+
+        result = await self._run_with_fake_claude(failing)
+        self.assertIn("did not produce a screen", result)
+        self.assertNotIn("Built landing/hero", result)
+
+    async def test_a_successful_run_that_touched_nothing_is_not_success(self):
+        # Claude Code reporting ok while leaving the previous file untouched.
+        from agent.design.claude_code_runner import ClaudeCodeResult
+
+        self._plant_stale_output()
+
+        async def no_op(*a, **kw):
+            return ClaudeCodeResult(ok=True, total_cost_usd=1.0)
+
+        result = await self._run_with_fake_claude(no_op)
+        self.assertIn("untouched", result)
+
+    async def test_a_genuine_rebuild_is_success(self):
+        from agent.design.claude_code_runner import ClaudeCodeResult
+
+        path = self._plant_stale_output()
+
+        async def rebuilds(*a, **kw):
+            with open(path, "w") as f:
+                f.write("<html>the NEW design</html>")
+            return ClaudeCodeResult(ok=True, total_cost_usd=2.0, num_turns=9)
+
+        result = await self._run_with_fake_claude(rebuilds)
+        self.assertIn("Built landing/hero", result)
+
+    async def test_a_failed_dispatch_is_still_charged(self):
+        from agent.design.claude_code_runner import ClaudeCodeResult
+
+        async def failing(*a, **kw):
+            return ClaudeCodeResult(ok=False, error="boom", total_cost_usd=1.25)
+
+        await self._run_with_fake_claude(failing)
+        self.assertAlmostEqual(self.budget.spent_today(), 1.25)
+
+
 if __name__ == "__main__":
     unittest.main()
