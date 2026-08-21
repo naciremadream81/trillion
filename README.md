@@ -6,7 +6,7 @@ Trillion is a **single-user** Python agent: chat in the terminal or browser, swa
 
 **Working today:** text brain (CLI + web chat), provider seam, tool registry, cost dashboard, Agent Factory, Software Factory, voice V1 (Deepgram STT + selectable TTS: local Piper by default or ElevenLabs via `TTS_PROVIDER=elevenlabs`, wired to `POST /api/transcribe` and `POST /api/tts`), hands-free voice mode (optional; push-to-talk remains default), Tier 6 safety rails (confirmation gate, audit log, `/pause` kill switch), durable cross-session memory (`agent/memory.py` + `remember_fact`/`forget_fact`), the heartbeat scheduler with quiet hours and the Code Sentinel, the `search_notes` and `draft_email` tools, untrusted-content sanitization on every tool result, and the security shield (`GET /api/security/status`).
 
-**Not done yet:** streaming STT (which would let end-of-turn detection lean on the recognizer's own endpoint signal instead of audio energy alone) and acoustic barge-in (talking over Trillion mid-reply — deliberately not implemented, since on an open-speaker Pi its own output re-enters the mic and can self-trigger an endpoint). Server-side cancellation **is** done: an aborted `/api/chat` now stops generating instead of running to the end of a reply nobody will read, which matters because barge-in aborts the fetch every time you talk over Trillion. A provider swap (model, STT, TTS) still needs Sean's say-so first.
+**Not done yet:** acoustic barge-in (talking over Trillion mid-reply — deliberately not implemented, since on an open-speaker Pi its own output re-enters the mic and can self-trigger an endpoint). Server-side cancellation **is** done: an aborted `/api/chat` now stops generating instead of running to the end of a reply nobody will read, which matters because barge-in aborts the fetch every time you talk over Trillion. A provider swap (model, STT, TTS) still needs Sean's say-so first.
 
 Self-knowledge (`agent/selfknowledge/`, generating `context/self/trillion.md`) and cosmic-orb UI tiers 4-6 (sub-agent constellation, dispatch beams/rings, performance mode, `prefers-reduced-motion`) are built — the orb UI change couldn't be visually verified against a real WebGL context in this session's sandboxed preview browser (no GPU there), so treat it as code-reviewed and unit-tested but not yet eyeballed running; check it in a real browser before relying on it.
 
@@ -50,6 +50,47 @@ rather than the ~5.55–6.72s it used to be.
 > before/after comparison on one machine cancels the load out — an absolute
 > per-sentence number does not. **The per-sentence row still wants an idle
 > re-measure.**
+
+### Streaming STT (opt-in, default off)
+
+`POST /api/transcribe` (batch) is still the default and still the fallback.
+`GET /api/transcribe/stream` is a WebSocket relay to Deepgram's streaming
+endpoint: the browser sends audio as MediaRecorder produces it and gets back
+interim transcripts plus the recognizer's own end-of-utterance signal
+(`speech_final`, and `utterance_end` after a silence following the last
+*recognized word*). Turn it on from the console with
+`window.trillionStreamingStt.enabled = true` (persisted in localStorage).
+
+A relay rather than a direct browser connection because Deepgram
+authenticates with the API key — a direct connection would put a paid
+credential in page JavaScript. The key never leaves the server.
+
+**What this is actually for, measured.** Verified end to end on the Pi: a
+Piper-synthesized sentence streamed through the relay came back transcribed
+exactly, with the endpoint signal present. But it is **not** faster to a final
+transcript for a short utterance — measured against the batch path on the
+same clip and machine, best case 1854ms (batch) vs 3197ms (streaming),
+because Deepgram waits out its endpointing window before finalizing.
+
+The win is not latency, it's the *signal*. Hands-free previously had to infer
+"they're done" from microphone energy alone, which is what made it cut people
+off mid-sentence (see the long comment above `startVad` in `index.html` for
+the three attempts that failed). Deepgram's endpoint is derived from
+recognized speech, so a pause full of room noise no longer reads as talking
+and a quiet breath no longer reads as finished. That is what smooth-voice_2
+Tier 2 asks for, and the layered fast/slow endpointing that got removed for
+lack of a trustworthy confidence signal now has a real one to branch on.
+
+Caveat on those numbers: the harness paced a synthesized clip in 8KB chunks
+rather than driving a real microphone, and the batch figures varied
+5983 → 854ms across three runs from cold-start effects. Treat them as "the
+same order of magnitude, and streaming is not the speed-up you might assume",
+not as a precise comparison. A real-mic measurement is still wanted.
+
+Streaming is purely additive: audio chunks accumulate for the batch path
+whether or not the socket is up, so a socket that never opens, drops, or
+produces nothing usable falls through to `POST /api/transcribe` exactly as
+before. It can short-circuit that path, never replace it.
 
 ### `scripts/voice_bench.py`
 
@@ -211,6 +252,7 @@ Type normally for a streaming turn. Slash commands:
 - `POST /api/chat` — chat wired to the same `Agent` + tool registry
 - `GET /api/usage` — month-to-date cost JSON (~60s cache)
 - `POST /api/transcribe` — audio in, transcript out (Deepgram; needs `DEEPGRAM_API_KEY`)
+- `GET /api/transcribe/stream` — WebSocket relay to Deepgram streaming; interim transcripts and the end-of-utterance signal (opt-in, see above)
 - `POST /api/tts` — text in, WAV out (local Piper; no key needed)
 - `GET /api/handoffs` — specialist handoff proposals waiting on your yes
 - `GET /api/heartbeat/notices` — active (undismissed) heartbeat notices

@@ -594,6 +594,98 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
             return web.json_response({"error": str(e)}, status=400)
         return web.json_response({"text": text})
 
+    async def transcribe_stream(request: web.Request) -> web.WebSocketResponse:
+        """
+        Streaming STT relay (smooth-voice_2 Tier 2).
+
+        The browser sends audio chunks as MediaRecorder produces them and
+        gets back normalized events — interim transcripts, and crucially the
+        recognizer's own end-of-utterance signal, which is what lets
+        hands-free stop guessing from microphone energy.
+
+        A relay rather than a direct browser->Deepgram connection because
+        Deepgram authenticates with the API key: a direct connection would
+        put a paid credential in page JavaScript. The key never leaves this
+        process.
+
+        Both directions are pumped concurrently — audio keeps arriving while
+        transcripts come back, so a sequential loop would deadlock the moment
+        the speaker said two things.
+        """
+        from agent.voice.deepgram_stream import DeepgramStream, StreamingTranscriptionError
+
+        ws = web.WebSocketResponse(heartbeat=20)
+        await ws.prepare(request)
+
+        settings = get_settings()
+        try:
+            stream_cm = DeepgramStream(settings.deepgram_api_key)
+        except StreamingTranscriptionError as e:
+            await ws.send_json({"type": "error", "message": str(e)})
+            await ws.close()
+            return ws
+
+        try:
+            async with stream_cm as stream:
+
+                async def pump_downstream() -> None:
+                    # Deepgram -> browser.
+                    async for event in stream:
+                        if ws.closed:
+                            return
+                        await ws.send_json(event)
+
+                downstream = asyncio.create_task(pump_downstream())
+                try:
+                    # Browser -> Deepgram.
+                    async for message in ws:
+                        if message.type == web.WSMsgType.BINARY:
+                            await stream.send_audio(message.data)
+                        elif message.type == web.WSMsgType.TEXT:
+                            # The browser's only verb. Anything else is
+                            # ignored rather than parsed: this socket carries
+                            # audio, and giving it a command vocabulary is
+                            # attack surface for no gain.
+                            if message.data.strip() == "close":
+                                await stream.finish()
+                                # STOP READING and go wait for the flush.
+                                # Without this break the loop keeps waiting on
+                                # a browser that has already said everything
+                                # it intends to, so the flushed tail is only
+                                # collected once the *browser* hangs up — and
+                                # a browser that hangs up promptly loses the
+                                # last segment of the utterance, which is the
+                                # one word the turn usually hinges on. The
+                                # browser keeps its socket open to receive;
+                                # we close it below once Deepgram is done.
+                                break
+                        elif message.type == web.WSMsgType.ERROR:
+                            break
+                    else:
+                        # The browser hung up without saying "close" — flush
+                        # anyway so a held final segment isn't stranded.
+                        await stream.finish()
+                    # Give Deepgram a moment to emit the flushed tail rather
+                    # than tearing the socket down the instant audio stops.
+                    try:
+                        await asyncio.wait_for(downstream, timeout=5.0)
+                    except asyncio.TimeoutError:
+                        pass
+                finally:
+                    downstream.cancel()
+        except StreamingTranscriptionError as e:
+            if not ws.closed:
+                await ws.send_json({"type": "error", "message": str(e)})
+        except Exception as e:  # noqa: BLE001 — never let a socket crash the server
+            if not ws.closed:
+                await ws.send_json(
+                    {"type": "error", "message": f"{type(e).__name__}: {e}"}
+                )
+        finally:
+            if not ws.closed:
+                await ws.close()
+        return ws
+
     async def synthesize_speech(request: web.Request) -> web.Response:
         # Voice V1 TTS: one sentence in, one audio clip out. Called once per
         # sentence as the agent's reply streams, so playback can start early.
@@ -816,6 +908,7 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
     app.router.add_get("/api/agents", active_agents)
     app.router.add_post("/api/chat", chat)
     app.router.add_post("/api/transcribe", transcribe_audio)
+    app.router.add_get("/api/transcribe/stream", transcribe_stream)
     app.router.add_post("/api/tts", synthesize_speech)
     app.router.add_get("/api/handoffs", pending_handoffs)
     app.router.add_get("/api/heartbeat/notices", heartbeat_notices)
