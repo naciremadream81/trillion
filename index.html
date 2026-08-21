@@ -503,6 +503,11 @@
         <span class="tr-cost-tag">API</span>
         <span class="tr-cost-delta flat" id="tr-cost-delta"></span>
       </button>
+      <button class="tr-cost" id="tr-mining" aria-label="Bitcoin mining status" aria-expanded="false" aria-haspopup="dialog" style="display:none;">
+        <span class="tr-cost-amount" id="tr-mining-hashrate">--</span>
+        <span class="tr-cost-tag">MINE</span>
+        <span class="tr-cost-delta flat" id="tr-mining-workers"></span>
+      </button>
       <button class="tr-cost tr-shield" id="tr-shield" aria-label="Security shield score" aria-expanded="false" aria-haspopup="dialog">
         <svg class="tr-shield-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 2l8 3.5v6c0 5-3.5 8.5-8 10.5-4.5-2-8-5.5-8-10.5v-6L12 2z"/>
@@ -584,6 +589,36 @@
       <h4>By day</h4>
       <svg class="tr-spark" id="tr-cost-spark" viewBox="0 0 100 32" preserveAspectRatio="none" style="display:none;"></svg>
       <div class="tr-cost-days" id="tr-cost-days"><div class="tr-cost-empty">No usage yet.</div></div>
+    </div>
+  </div>
+
+  <!-- ==================== MINING EXPAND PANEL ==================== -->
+  <!-- Reuses .tr-cost-panel and its children rather than introducing a
+       parallel set of classes: the playbook says to match the existing
+       pattern, and a second visual language for a second pill is how a
+       header starts looking assembled from parts. -->
+  <div class="tr-cost-panel" id="tr-mining-panel" role="dialog" aria-label="Bitcoin mining status">
+    <div class="tr-cost-phead">
+      <div class="tr-cost-plabel">Mining · Ocean</div>
+      <div class="tr-cost-big" id="tr-mining-big">--</div>
+      <div class="tr-cost-psub">
+        <span>24h avg <b id="tr-mining-avg">--</b></span>
+        <span id="tr-mining-lastshare"></span>
+      </div>
+    </div>
+    <div class="tr-cost-sec">
+      <h4>Workers</h4>
+      <div id="tr-mining-workers-detail"><div class="tr-cost-empty">No data yet.</div></div>
+    </div>
+    <div class="tr-cost-sec">
+      <h4>Balance</h4>
+      <div class="tr-cost-row"><span class="k">Unpaid</span><span class="v" id="tr-mining-unpaid">--</span></div>
+      <div class="tr-cost-row"><span class="k">Est. next block</span><span class="v" id="tr-mining-next">--</span></div>
+    </div>
+    <div class="tr-cost-sec">
+      <h4>Payouts</h4>
+      <div class="tr-cost-row"><span class="k">Last 30 days</span><span class="v" id="tr-mining-30d">--</span></div>
+      <div class="tr-cost-row"><span class="k">Most recent</span><span class="v" id="tr-mining-last">--</span></div>
     </div>
   </div>
 
@@ -3821,6 +3856,138 @@
 
     fetchSecurityStatus(); // initial load
     startPolling();
+  })();
+
+  // ==================== MINING PILL + PANEL ====================
+  // playbooks/btc-mining-tracker.md Step 3. Reads GET /api/mining, which
+  // serves the last poll the heartbeat recorded — the browser deliberately
+  // never calls Ocean itself, or opening two tabs would double the load on
+  // a public API that the heartbeat is already polling on a schedule.
+  (function () {
+    const btn = document.getElementById('tr-mining');
+    const panel = document.getElementById('tr-mining-panel');
+    if (!btn || !panel) return;
+    const POLL_MS = 60000; // matches the heartbeat's fast tick; polling faster shows the same row twice
+
+    const el = (id) => document.getElementById(id);
+
+    function formatHashrate(hs) {
+      // Hashes/sec into the unit a miner actually speaks in. Mirrors
+      // _format_hashrate in agent/tools/mining.py so the spoken answer and
+      // the widget never disagree about the number.
+      let value = Number(hs) || 0;
+      const units = ['H/s', 'KH/s', 'MH/s', 'GH/s', 'TH/s', 'PH/s', 'EH/s'];
+      for (let i = 0; i < units.length; i++) {
+        if (value < 1000) return value.toFixed(2) + ' ' + units[i];
+        value /= 1000;
+      }
+      return value.toFixed(2) + ' ZH/s';
+    }
+
+    function formatBtc(btc, usd) {
+      const base = (Number(btc) || 0).toFixed(8) + ' BTC';
+      if (usd === null || usd === undefined) return base;
+      return base + ' · $' + Number(usd).toLocaleString(undefined, { maximumFractionDigits: 2 });
+    }
+
+    function relativeTime(iso) {
+      if (!iso) return '';
+      const then = Date.parse(iso);
+      if (Number.isNaN(then)) return '';
+      const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+      if (secs < 90) return secs + 's ago';
+      if (secs < 5400) return Math.round(secs / 60) + 'm ago';
+      if (secs < 172800) return Math.round(secs / 3600) + 'h ago';
+      return Math.round(secs / 86400) + 'd ago';
+    }
+
+    function render(data) {
+      if (!data || data.configured === false) {
+        btn.style.display = 'none';   // no wallet configured: the pill is absent, not empty
+        return;
+      }
+      btn.style.display = '';
+      el('tr-mining-hashrate').textContent = formatHashrate(data.hashrate_60s);
+      el('tr-mining-big').textContent = formatHashrate(data.hashrate_60s);
+      el('tr-mining-avg').textContent = formatHashrate(data.hashrate_86400s);
+
+      const offline = Number(data.workers_offline) || 0;
+      const degraded = Number(data.workers_degraded) || 0;
+      const online = Number(data.workers_online) || 0;
+      const delta = el('tr-mining-workers');
+      // Colour follows the cost pill's convention: red is the state you'd
+      // want to act on, teal is fine. A rig being down is the thing worth
+      // catching out of the corner of your eye.
+      if (offline > 0) {
+        delta.textContent = offline + ' down';
+        delta.className = 'tr-cost-delta up';
+      } else if (degraded > 0) {
+        delta.textContent = degraded + ' slow';
+        delta.className = 'tr-cost-delta flat';
+      } else {
+        delta.textContent = online > 0 ? online + ' up' : '';
+        delta.className = 'tr-cost-delta down';
+      }
+
+      const share = relativeTime(data.last_share_at);
+      el('tr-mining-lastshare').textContent = share ? 'Last share ' + share : '';
+
+      const rows = [
+        ['Online', online, 'down'],
+        ['Degraded', degraded, 'flat'],
+        ['Offline', offline, 'up'],
+      ].filter((r) => r[1] > 0);
+      el('tr-mining-workers-detail').innerHTML = rows.length
+        ? rows.map((r) =>
+            '<div class="tr-cost-row"><span class="k">' + r[0] + '</span>'
+            + '<span class="v tr-cost-delta ' + r[2] + '">' + r[1] + '</span></div>'
+          ).join('')
+        : '<div class="tr-cost-empty">No workers reporting.</div>';
+
+      el('tr-mining-unpaid').textContent = formatBtc(data.unpaid_btc, data.unpaid_usd);
+      el('tr-mining-next').textContent = formatBtc(data.estimated_next_block_btc, null);
+      el('tr-mining-30d').textContent = formatBtc(data.payouts_30d_btc, data.payouts_30d_usd);
+      el('tr-mining-last').textContent = data.last_payout_at
+        ? formatBtc(data.last_payout_btc, null) + ' · ' + relativeTime(data.last_payout_at)
+        : '—';
+    }
+
+    async function fetchMining() {
+      try {
+        const res = await fetch('/api/mining', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        render(await res.json());
+      } catch (err) {
+        // Degrade quietly, same as the shield: a mining widget that can't
+        // reach the server should disappear, not shout.
+      }
+    }
+
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = panel.classList.toggle('open');
+      btn.setAttribute('aria-expanded', String(open));
+      if (open) fetchMining();
+    });
+    document.addEventListener('click', (e) => {
+      if (panel.classList.contains('open') && !panel.contains(e.target) && e.target !== btn) {
+        panel.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && panel.classList.contains('open')) {
+        panel.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+    });
+
+    let timer = null;
+    if (!timer) timer = setInterval(() => { if (!document.hidden) fetchMining(); }, POLL_MS);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) fetchMining(); });
+
+    window.trillionMining = { refresh: fetchMining, render: render }; // console-hook convention
+    fetchMining();
   })();
   </script>
 </body>

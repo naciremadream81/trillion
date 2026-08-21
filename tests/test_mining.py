@@ -399,5 +399,94 @@ class TestMiningAlerts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(live, [])
 
 
+class TestMiningEndpoint(unittest.IsolatedAsyncioTestCase):
+    async def test_unconfigured_reports_configured_false(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        import serve as serve_module
+        from agent.providers.base import BaseProvider, ProviderResponse, TextChunk, TokenUsage
+        from agent.tools.registry import ToolRegistry
+
+        class FakeProvider(BaseProvider):
+            @property
+            def model_name(self):
+                return "fake"
+
+            async def stream(self, messages, system, tools=None):
+                yield TextChunk(text="")
+                yield ProviderResponse(text="", tool_calls=[], usage=TokenUsage(), model="fake")
+
+        tmp = tempfile.mkdtemp()
+        prev = {k: os.environ.get(k) for k in (
+            "TRILLION_MINING_WALLET", "TRILLION_FACTORY_DB", "TRILLION_NOTES_VAULT_PATH",
+            "TRILLION_NOTES_INDEX_PATH", "TRILLION_HEARTBEAT_DB", "TRILLION_CSP_REPORT_DB")}
+        os.environ.pop("TRILLION_MINING_WALLET", None)
+        os.environ["TRILLION_FACTORY_DB"] = os.path.join(tmp, "f.db")
+        os.environ["TRILLION_NOTES_VAULT_PATH"] = os.path.join(tmp, "v")
+        os.environ["TRILLION_NOTES_INDEX_PATH"] = os.path.join(tmp, "n.db")
+        os.environ["TRILLION_HEARTBEAT_DB"] = os.path.join(tmp, "h.db")
+        os.environ["TRILLION_CSP_REPORT_DB"] = os.path.join(tmp, "c.db")
+        serve_module._provider = FakeProvider()
+        serve_module._registry = ToolRegistry()
+        try:
+            client = TestClient(TestServer(serve_module.build_app()))
+            await client.start_server()
+            resp = await client.get("/api/mining")
+            self.assertEqual(resp.status, 200)
+            # The pill is absent, not empty — an unconfigured feature should
+            # not occupy header space.
+            self.assertEqual((await resp.json())["configured"], False)
+            await client.close()
+        finally:
+            serve_module._provider = None
+            serve_module._registry = None
+            for k, v in prev.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestQueryMiningTool(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.repo = MiningRepo(os.path.join(self.tmp, "m.db"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _tool(self):
+        from agent.tools.mining import QueryMiningTool
+
+        return QueryMiningTool(self.repo, "bc1qtestaddressvaluehere")
+
+    async def test_no_data_yet_says_so_plainly(self):
+        self.assertIn("No mining data", await self._tool().run())
+
+    async def test_the_wallet_address_never_appears_in_the_output(self):
+        # Privacy guardrail: the model has no use for the address, and
+        # putting it in a prompt ships Sean's financial identity to a
+        # provider for no benefit.
+        wallet_id = self.repo.ensure_wallet("bc1qtestaddressvaluehere")
+        self.repo.record_snapshot(
+            wallet_id, hashrates={60: 10**15, 86400: 10**15}, unpaid_btc=0.5,
+            estimated_next_block_btc=0.1, active_worker_count=3,
+            last_share_at=None, btc_usd=73720.0,
+        )
+        result = await self._tool().run()
+        self.assertNotIn("bc1qtestaddressvaluehere", result)
+        self.assertIn("PH/s", result)
+
+    async def test_a_broken_repo_returns_an_error_as_data(self):
+        class Broken:
+            def summary(self, address):
+                raise RuntimeError("db gone")
+
+        from agent.tools.mining import QueryMiningTool
+
+        self.assertIn("Could not read mining data", await QueryMiningTool(Broken(), "x").run())
+
+
 if __name__ == "__main__":
     unittest.main()
