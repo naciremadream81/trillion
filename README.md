@@ -16,7 +16,7 @@ Voice latency instrumentation (smooth-voice_2 Tier 1, measure-only) is built int
 |---|---|
 | STT (Deepgram nova-2) | ~670ms–1.2s, scales with clip length (verified via a real TTS→STT round trip, transcript matched the source text) |
 | Model (Claude, first token) | ~1.2–1.4s for a short reply |
-| TTS (Piper, local) | **~390–505ms for a short sentence on a freshly-started process** (median 449ms), scaling with length: ~2.7s medium, ~5.3s long. **A long-running server is ~2.7× slower** — see "Synthesis degrades with uptime" below. There used to be **~3.5s extra on the very first synthesis after the process starts** while the ~63MB voice model loaded; that cost is now paid at server startup instead |
+| TTS (Piper, local) | **~390–505ms for a short sentence on a freshly-started process** (median 449ms), scaling with length: ~2.7s medium, ~5.3s long. A long-running server used to be ~2.7× slower; that was a leaked SQLite connection per request and is **fixed** — see below. There used to be **~3.5s extra on the very first synthesis after the process starts** while the ~63MB voice model loaded; that cost is now paid at server startup instead |
 
 Straight add of the three "first token/byte" legs is ~2.05–3.22s before the first sound plays once the process is warm (STT + model + TTS-warm ranges above).
 
@@ -41,39 +41,48 @@ first request now behaves as a warm one — the tax is eliminated, not reduced.
 A fresh process is therefore ~2.05–3.22s to first sound, the same as a warm one,
 rather than the ~5.55–6.72s it used to be.
 
-### Synthesis degrades with uptime (measured)
+### Synthesis degraded with uptime — found and fixed
 
-The per-sentence figures above were re-measured on an idle Pi, and doing so
-turned up something the old caveat was hiding: **Piper gets slower the longer
-the server has been running.**
-
-Measured by alternating requests between a freshly-started process and the
-`trillion-orb` service that had been up for three days — interleaved rather
-than run as two blocks, so ambient load affects both equally and cancels out:
+Re-measuring the per-sentence figures on an idle Pi turned up something the
+old caveat was hiding: **Piper got slower the longer the server had been
+running.** Measured by alternating requests between a fresh process and the
+`trillion-orb` service after three days' uptime — interleaved rather than run
+as two blocks, so ambient load affects both equally:
 
 | | median | min | max |
 |---|---|---|---|
 | fresh process | **449ms** | 389ms | 505ms |
 | 3-day-old service | **1222ms** | 1023ms | 1333ms |
 
-Same sentence, same machine, same moment: **2.7× slower**. The cause looks
-like memory growth rather than anything thermal — the CPU was at 69°C with
-`get_throttled=0x0`, while the two processes differed sharply:
+Same sentence, same machine, same moment: 2.7× slower. Not thermal — 69°C
+with `get_throttled=0x0`. The two processes differed in memory: 78 MB RSS at
+four minutes against **716 MB at three days**, with 41 open database file
+descriptors against 9, on a box already 1.6 GB into a 2 GB swap file. Pages
+faulting back in on every synthesis is the shape of that slowdown.
 
-| | age | RSS | swapped out |
-|---|---|---|---|
-| fresh process | 4 min | **78 MB** | 0 MB |
-| 3-day-old service | 3d 4h | **716 MB** | 31 MB |
+**The cause was a leaked SQLite connection per request.** Every storage
+module here did `with self._connect() as conn:` over a raw
+`sqlite3.connect(...)` — and *that context manager commits without closing*.
+Profiling per endpoint, `GET /api/security/status` leaked ~10 MB per 60 calls
+and `GET /api/heartbeat/notices` ~5 MB per 60; the browser polls both
+continuously, so a dashboard left open all day was the whole problem. The
+`ResourceWarning: unclosed database` lines in test output had been saying so
+for a long time.
 
-A ~9× resident-memory growth for identical functionality, on a box already
-1.6 GB into a 2 GB swap file. Pages that have been swapped out have to fault
-back in on every synthesis, which is the shape of the slowdown.
+Fixed in [`agent/storage_utils.py`](agent/storage_utils.py): `_connect()` is
+now a context manager that closes. All 71 existing call sites were left
+untouched — the generator yields the connection, so `as conn` still binds it.
+Verified before and after on a running server:
 
-**Practical consequence:** restarting `trillion-orb.service` restores voice
-latency. Until the leak itself is found, a periodic restart is the honest
-mitigation, and the fresh-process figures above are the ones to design
-against — a person talking to a server that has been up for a week is hearing
-the slow numbers, not these.
+| endpoint | before | after |
+|---|---|---|
+| `GET /api/security/status` ×60 | +10.1 MB | **+0.0 MB** |
+| `GET /api/heartbeat/notices` ×60 | +4.9 MB | **+0.0 MB** |
+| open `.db` file descriptors | 9 → 41 over 3 days | **0** |
+
+The fresh-process figures at the top of this section are now what a
+long-running server does too. If you are running a build from before this
+fix, restart it:
 
 ```bash
 systemctl --user restart trillion-orb.service

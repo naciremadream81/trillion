@@ -24,7 +24,10 @@ from __future__ import annotations
 
 import os
 import sqlite3
+
+from .. import storage_utils
 from datetime import datetime, timezone
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS design_dispatches (
@@ -65,10 +68,16 @@ class DesignBudget:
         with self._connect() as conn:
             conn.executescript(SCHEMA)
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _connect(self):
+        """
+        Connection context manager — see agent/storage_utils.py.
+
+        Was a bare `sqlite3.connect(...)` returned raw. Every call site wraps
+        it in `with`, and sqlite3's own context manager commits without
+        closing, so each request leaked a connection. Same call-site shape,
+        with the close that was missing.
+        """
+        return storage_utils.connect(self.db_path)
 
     def spent_today(self) -> float:
         """
