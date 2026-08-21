@@ -8,7 +8,7 @@ with only the anthropic SDK, or only aiohttp for Ollama, and it's fine.
 """
 
 
-def get_provider(name: str):
+def get_provider(name: str, model: str | None = None):
     """
     Factory. Returns an initialized provider instance.
 
@@ -16,18 +16,24 @@ def get_provider(name: str):
         TRILLION_PROVIDER=claude   (default)
         TRILLION_PROVIDER=openai   (also works for OpenRouter)
         TRILLION_PROVIDER=ollama   (local, Raspberry Pi)
+
+    `model` overrides the provider's env-configured default for this instance
+    only. It exists for orchestration.md Tier 2's "a declared model per agent":
+    a spawned specialist doing cheap, narrow work has no business burning the
+    same model as the main conversation. None means "use the env default",
+    which is what the main agent always passes.
     """
     name = name.lower().strip()
 
     if name == "claude":
         from .claude import ClaudeProvider
-        return ClaudeProvider()
+        return ClaudeProvider(model)
     if name == "openai":
         from .openai_provider import OpenAIProvider
-        return OpenAIProvider()
+        return OpenAIProvider(model)
     if name == "ollama":
         from .ollama import OllamaProvider
-        return OllamaProvider()
+        return OllamaProvider(model)
 
     raise ValueError(
         f"Unknown provider '{name}'. "

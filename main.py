@@ -66,6 +66,7 @@ SLASH_COMMANDS = {
     "/pending": "List spawn tasks awaiting approval",
     "/approve": "Approve a drafted spec: /approve <id>",
     "/reject":  "Reject with feedback: /reject <id> <feedback>",
+    "/agent-model": "Set a specialist's model: /agent-model <slug> <model|default>",
     "/build":   "Build a whole software project: /build <description>",
     "/builds":  "List recent Software Factory builds and their status",
     "/pause":   "Stop Trillion from acting (conversation and reads still work)",
@@ -232,6 +233,28 @@ def _handle_factory_command(cmd: str, rest: str, factory: "FactoryContext") -> N
             if factory.watcher is not None:
                 factory.watcher.sync_once()
             console.print(f"[green]Approved — spawned agent #{agent_id} is now live.[/green]\n")
+
+    elif cmd == "/agent-model":
+        # orchestration.md Tier 2: a declared model per agent. "default"
+        # clears the override back to Trillion's own model.
+        parts = rest.split(maxsplit=1)
+        if not parts:
+            console.print("[yellow]Usage: /agent-model <slug> <model|default>[/yellow]\n")
+            return
+        slug = parts[0]
+        model = parts[1].strip() if len(parts) > 1 else ""
+        if model.lower() in {"", "default", "none", "clear"}:
+            model = ""
+        if factory.repo.set_agent_model(slug, model):
+            shown = model or "Trillion's default"
+            console.print(f"[green]'{slug}' will run on {shown} from its next dispatch.[/green]\n")
+            if factory.watcher is not None:
+                # The live DispatchTool holds a provider built at registration
+                # time; the watcher's fingerprint covers `model`, so this
+                # rebuilds it rather than leaving the old one in place.
+                factory.watcher.sync_once()
+        else:
+            console.print(f"[red]No active specialist with slug '{slug}'.[/red]\n")
 
     elif cmd == "/reject":
         reject_parts = rest.split(maxsplit=1)
@@ -479,7 +502,17 @@ async def main() -> None:
         from agent.factory.storage import FactoryRepo
 
         repo = FactoryRepo()
-        watcher = RegistryWatcher(repo, provider, registry)
+        # Tier 5 handoffs — see serve.py's matching block for why this builds
+        # its own SafetyRepo rather than reordering the gate setup below.
+        try:
+            from agent.safety.storage import SafetyRepo as _SafetyRepo
+
+            handoff_safety_repo = _SafetyRepo()
+        except Exception:
+            handoff_safety_repo = None
+        watcher = RegistryWatcher(
+            repo, provider, registry, safety_repo=handoff_safety_repo
+        )
         watcher.sync_once()  # agents approved in a prior session are live immediately
         watcher_task = asyncio.create_task(watcher.run_forever())
         background_tasks.add(watcher_task)
@@ -574,7 +607,13 @@ async def main() -> None:
         from agent.heartbeat.storage import HeartbeatRepo
 
         heartbeat_repo = HeartbeatRepo()
-        heartbeat_checks = build_code_sentinel_checks(settings) + [CveScanCheck()]
+        from agent.heartbeat.checks.mining import build_mining_checks
+
+        heartbeat_checks = (
+            build_code_sentinel_checks(settings)
+            + build_mining_checks(settings)  # empty unless TRILLION_MINING_WALLET is set
+            + [CveScanCheck()]
+        )
         heartbeat_scheduler = HeartbeatScheduler(
             heartbeat_checks, heartbeat_repo, settings, background_tasks=background_tasks,
         )

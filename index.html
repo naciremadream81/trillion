@@ -503,6 +503,11 @@
         <span class="tr-cost-tag">API</span>
         <span class="tr-cost-delta flat" id="tr-cost-delta"></span>
       </button>
+      <button class="tr-cost" id="tr-mining" aria-label="Bitcoin mining status" aria-expanded="false" aria-haspopup="dialog" style="display:none;">
+        <span class="tr-cost-amount" id="tr-mining-hashrate">--</span>
+        <span class="tr-cost-tag">MINE</span>
+        <span class="tr-cost-delta flat" id="tr-mining-workers"></span>
+      </button>
       <button class="tr-cost tr-shield" id="tr-shield" aria-label="Security shield score" aria-expanded="false" aria-haspopup="dialog">
         <svg class="tr-shield-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 2l8 3.5v6c0 5-3.5 8.5-8 10.5-4.5-2-8-5.5-8-10.5v-6L12 2z"/>
@@ -584,6 +589,36 @@
       <h4>By day</h4>
       <svg class="tr-spark" id="tr-cost-spark" viewBox="0 0 100 32" preserveAspectRatio="none" style="display:none;"></svg>
       <div class="tr-cost-days" id="tr-cost-days"><div class="tr-cost-empty">No usage yet.</div></div>
+    </div>
+  </div>
+
+  <!-- ==================== MINING EXPAND PANEL ==================== -->
+  <!-- Reuses .tr-cost-panel and its children rather than introducing a
+       parallel set of classes: the playbook says to match the existing
+       pattern, and a second visual language for a second pill is how a
+       header starts looking assembled from parts. -->
+  <div class="tr-cost-panel" id="tr-mining-panel" role="dialog" aria-label="Bitcoin mining status">
+    <div class="tr-cost-phead">
+      <div class="tr-cost-plabel">Mining · Ocean</div>
+      <div class="tr-cost-big" id="tr-mining-big">--</div>
+      <div class="tr-cost-psub">
+        <span>24h avg <b id="tr-mining-avg">--</b></span>
+        <span id="tr-mining-lastshare"></span>
+      </div>
+    </div>
+    <div class="tr-cost-sec">
+      <h4>Workers</h4>
+      <div id="tr-mining-workers-detail"><div class="tr-cost-empty">No data yet.</div></div>
+    </div>
+    <div class="tr-cost-sec">
+      <h4>Balance</h4>
+      <div class="tr-cost-row"><span class="k">Unpaid</span><span class="v" id="tr-mining-unpaid">--</span></div>
+      <div class="tr-cost-row"><span class="k">Est. next block</span><span class="v" id="tr-mining-next">--</span></div>
+    </div>
+    <div class="tr-cost-sec">
+      <h4>Payouts</h4>
+      <div class="tr-cost-row"><span class="k">Last 30 days</span><span class="v" id="tr-mining-30d">--</span></div>
+      <div class="tr-cost-row"><span class="k">Most recent</span><span class="v" id="tr-mining-last">--</span></div>
     </div>
   </div>
 
@@ -1812,6 +1847,211 @@
     // would be worse than the button's markup living in a different visual
     // group in the header than its logic does.
     let handsFree = localStorage.getItem('trillion-voice-handsfree') === '1';
+
+    // ============ Streaming STT (smooth-voice_2 Tier 2, the real signal) ============
+    // The VAD block below has a long comment explaining that Tier 2 assumes
+    // you can lean on the recognizer's own end-of-utterance signal, and that
+    // we couldn't, because /api/transcribe is batch Deepgram. This is that
+    // signal arriving. /api/transcribe/stream relays audio to Deepgram's
+    // WebSocket as MediaRecorder produces it and sends back `speech_final`
+    // (the recognizer's own "this utterance ended") and `utterance_end`
+    // (fired after a silence following the last *recognized word*, not after
+    // a silence in microphone energy — which is the entire difference).
+    //
+    // OPT-IN, DEFAULT OFF, and purely additive. Same posture as hands-free
+    // itself, and for a stronger reason: the batch path is not merely left
+    // alone, it stays armed as the fallback. Chunks keep accumulating in
+    // `chunks` exactly as before whether or not the socket is up, so if the
+    // socket never opens, drops, or produces nothing usable,
+    // onRecordingStopped POSTs the blob and behaves precisely as it does
+    // today. Streaming can only ever *short-circuit* that path, never
+    // replace it — which is what keeps a network failure from turning into
+    // a lost turn.
+    let streamingStt = localStorage.getItem('trillion-voice-streaming') === '1';
+    let sttSocket = null;          // the live WebSocket, or null
+    let sttFinalText = '';         // accumulated is_final transcript for this turn
+    let sttEndpointFired = false;  // the recognizer said the utterance ended
+    let sttEndpointKind = 'none';  // 'none' | 'segment' | 'utterance' — see sttOnEndpoint
+    let sttFailed = false;         // socket errored -> this turn falls back to batch
+
+    function sttReset() {
+      sttSendChain = Promise.resolve();
+      sttFinalText = '';
+      sttEndpointFired = false;
+      sttEndpointKind = 'none';
+      sttFailed = false;
+    }
+
+    function closeSttSocket() {
+      // Says "close" and lets go of the reference, but deliberately does NOT
+      // close the socket here: the server still has to flush Deepgram's held
+      // final segment back to us, and closing now would throw away the tail
+      // of the last utterance — the exact transcript we are waiting for.
+      // The server closes it once flushed; the timer is the backstop for a
+      // server that doesn't, so a socket can't outlive its turn.
+      const socket = sttSocket;
+      if (!socket) return;
+      sttSocket = null;
+      try {
+        if (socket.readyState === WebSocket.OPEN) socket.send('close');
+      } catch (e) { /* a socket that died before goodbye needs no goodbye */ }
+      setTimeout(() => {
+        try {
+          if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+            socket.close();
+          }
+        } catch (e) { /* already gone */ }
+      }, 3000);
+    }
+
+    function openSttSocket() {
+      // Returns the socket, or null if streaming is off or unavailable. A
+      // null return is not an error path — it is the ordinary batch path.
+      if (!streamingStt || typeof WebSocket === 'undefined') return null;
+      let socket;
+      try {
+        const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        socket = new WebSocket(scheme + '//' + location.host + '/api/transcribe/stream');
+      } catch (e) {
+        sttFailed = true;
+        return null;
+      }
+      socket.binaryType = 'arraybuffer';
+      socket.onmessage = (event) => {
+        let msg;
+        try { msg = JSON.parse(event.data); } catch (e) { return; }
+        if (!msg || typeof msg !== 'object') return;
+        if (msg.type === 'error') {
+          // Do NOT end the turn here. Falling back means letting the
+          // recording finish and POSTing it, which is exactly what happens
+          // if we simply stop trusting this socket.
+          sttFailed = true;
+          console.warn('[stt] streaming error, falling back to batch:', msg.message);
+          return;
+        }
+        if (msg.type === 'transcript') {
+          if (msg.is_final && msg.text) {
+            sttFinalText = (sttFinalText + ' ' + msg.text).trim();
+          }
+          if (msg.text) setHint('“' + (sttFinalText || msg.text) + '”');
+          if (msg.speech_final) sttOnEndpoint('segment');
+          return;
+        }
+        if (msg.type === 'utterance_end') { sttOnEndpoint('utterance'); return; }
+      };
+      socket.onerror = () => { sttFailed = true; };
+      socket.onclose = () => { if (sttSocket === socket) sttSocket = null; };
+      return socket;
+    }
+
+    // Audio is queued rather than sent directly, for two reasons that both
+    // silently break streaming otherwise:
+    //
+    // 1. THE HANDSHAKE IS SLOWER THAN THE FIRST TIMESLICE. MediaRecorder
+    //    emits its first chunk at 250ms; a WebSocket that is still
+    //    CONNECTING at that point would have that chunk dropped. That first
+    //    chunk carries the WebM/EBML container header — without it Deepgram
+    //    cannot decode ANY of the fragments that follow, so the endpoint
+    //    signal never fires and hands-free silently falls back to energy
+    //    detection. The failure looks like "streaming just doesn't help",
+    //    which is the hardest kind to notice.
+    // 2. ORDER. Blob.arrayBuffer() is async, so two chunks converted
+    //    concurrently can reach send() out of order. A serialized chain
+    //    keeps the stream in the order it was recorded.
+    let sttSendChain = Promise.resolve();
+
+    function sttEnqueue(blob) {
+      if (!blob || sttFailed) return;
+      if (!sttSocket) return;   // streaming off for this turn
+      sttSendChain = sttSendChain.then(async () => {
+        if (sttFailed || !sttSocket) return;
+        // Wait out a handshake still in flight rather than dropping the chunk.
+        for (let i = 0; i < 60 && sttSocket && sttSocket.readyState === WebSocket.CONNECTING; i++) {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        if (!sttSocket || sttSocket.readyState !== WebSocket.OPEN) return;
+        try {
+          sttSocket.send(await blob.arrayBuffer());
+        } catch (e) {
+          sttFailed = true;   // fall through to the batch path
+        }
+      }).catch(() => { sttFailed = true; });
+    }
+
+    function sttOnEndpoint(kind) {
+      // The recognizer's own end signal. Only acts in hands-free mode: in
+      // push-to-talk the stop-tap IS the end-of-turn signal and always wins,
+      // exactly as the playbook's Tier 2 note says.
+      //
+      // This used to call stopListening() for BOTH signals, which was wrong
+      // for `speech_final`: that marks the end of a segment, so a speaker
+      // pausing between two sentences got cut off mid-thought — the very
+      // failure the energy-only endpointer was rewritten to avoid. Now the
+      // signal is handed to the VAD, which shortens its wait for a segment
+      // and ends immediately only on a full utterance_end.
+      sttEndpointFired = true;
+      sttEndpointKind = kind === 'utterance' ? 'utterance'
+        : (sttEndpointKind === 'utterance' ? 'utterance' : 'segment');
+      if (!handsFree || !listening) return;
+      if (!vadPollTimer) {
+        // Hands-free is on but the energy detector never started (setup
+        // failed, or the mic was opened by a tap). The recognizer is the
+        // only endpointer available, so honour it directly.
+        if (sttEndpointKind === 'utterance') stopListening();
+      }
+      // Otherwise the VAD tick picks it up on its next pass, within 50ms.
+    }
+
+    // Executable record for the queue above. There is no JS test runner in
+    // this repo, so the self-test convention (see
+    // window.trillionSplitSentencesSelfTest / trillionVadSelfTest) is how
+    // browser-side logic gets checked. This one specifically covers the case
+    // Codex caught: chunks produced while the handshake is still in flight.
+    window.trillionSttQueueSelfTest = async function trillionSttQueueSelfTest() {
+      const realSocket = sttSocket;
+      const realFailed = sttFailed;
+      const realChain = sttSendChain;
+      const sent = [];
+      try {
+        sttFailed = false;
+        sttSendChain = Promise.resolve();
+        // A socket that stays CONNECTING for 600ms — longer than the 250ms
+        // first timeslice, which is exactly when the header chunk used to be
+        // dropped on the floor.
+        sttSocket = {
+          readyState: WebSocket.CONNECTING,
+          send(buf) { sent.push(new TextDecoder().decode(buf)); },
+        };
+        setTimeout(() => { if (sttSocket) sttSocket.readyState = WebSocket.OPEN; }, 600);
+
+        ['CHUNK-1-HEADER', 'CHUNK-2', 'CHUNK-3'].forEach((text) =>
+          sttEnqueue(new Blob([text], { type: 'audio/webm' })));
+
+        await sttSendChain;
+        const joined = sent.join('|');
+        const results = [
+          ['header chunk survives a slow handshake', sent[0] === 'CHUNK-1-HEADER'],
+          ['no chunk dropped', sent.length === 3],
+          ['order preserved', joined === 'CHUNK-1-HEADER|CHUNK-2|CHUNK-3'],
+        ];
+        const fail = results.filter((r) => !r[1]).map((r) => r[0]);
+        return { pass: results.length - fail.length, fail: fail.length, total: results.length, failed: fail, sent };
+      } finally {
+        sttSocket = realSocket;
+        sttFailed = realFailed;
+        sttSendChain = realChain;
+      }
+    };
+
+    window.trillionStreamingStt = {
+      get enabled() { return streamingStt; },
+      set enabled(on) {
+        streamingStt = !!on;
+        localStorage.setItem('trillion-voice-streaming', streamingStt ? '1' : '0');
+      },
+      get lastTranscript() { return sttFinalText; },
+    }; // console-hook convention — see window.trillionOrb / window.trillionVoiceVad
+
     const handsFreeBtn = document.getElementById('tr-handsfree');
     function reflectHandsFreeButton() {
       if (!handsFreeBtn) return;
@@ -2169,6 +2409,16 @@
       // THAT is the confidence signal a fast path should branch on, and the
       // layered design becomes worth revisiting on a real basis.
       silenceMs: 1200,
+      // The layered fast path, revived — but on the signal the comment above
+      // said to wait for, not on "they said a lot". When streaming STT is on
+      // and Deepgram has marked the end of a SEGMENT (`speech_final`), the
+      // recognizer is telling us a sentence finished, which is real evidence
+      // and not an inference from microphone energy. It is NOT evidence the
+      // person is done talking — a speaker pausing between two sentences
+      // produces exactly this — so it shortens the wait rather than ending
+      // the turn. Deepgram's own `utterance_end` (1000ms of silence after
+      // the last recognized WORD) is the stronger signal and ends it outright.
+      confidentSilenceMs: 600,
       noisyFloorDb: -45,              // retained as a diagnostic: a calibrated floor above this means the RMS signal is unreliable. No longer changes the endpoint decision (there is only one threshold now), but it is logged on every decision and is the first thing to look at when a room endpoints badly.
       maxUtteranceMs: 30000,          // hard stop regardless of VAD state — also caps the blob size POSTed to Deepgram
       noSpeechTimeoutMs: 8000,        // mic open this long with no confirmed speech onset at all -> give up WITHOUT posting anything
@@ -2232,10 +2482,23 @@
       // no longer change the outcome. Deliberate: an input that is recorded
       // but not acted on is honest; a heuristic that acts on a meaningless
       // signal is not.
-      const thresholdMs = vad.silenceMs;
+      // recognizerEndpoint: 'none' | 'segment' | 'utterance'.
+      // 'none' is the only value reachable with streaming STT off, which is
+      // what keeps push-to-talk and energy-only hands-free behaving exactly
+      // as they did before this existed.
+      const recognizerEndpoint = input.recognizerEndpoint || 'none';
+      let thresholdMs = vad.silenceMs;
+      if (recognizerEndpoint === 'utterance') {
+        // Deepgram already waited utterance_end_ms past the last recognized
+        // word. Waiting our own 1200ms on top of that is just latency.
+        thresholdMs = 0;
+      } else if (recognizerEndpoint === 'segment') {
+        thresholdMs = Math.min(vad.confidentSilenceMs, vad.silenceMs);
+      }
       return {
         end: silenceMs >= thresholdMs,
         thresholdMs,
+        recognizerEndpoint,
         // Echoed purely for the diagnostic log — see startVad's tick.
         speechMs, lastBurstMs, noiseFloorDb,
       };
@@ -2263,6 +2526,44 @@
       {
         name: 'boundary: 1199ms silence just misses',
         input: { speechMs: 2000, lastBurstMs: 2000, silenceMs: 1199, noiseFloorDb: -55 },
+        expectEnd: false,
+      },
+      // ── Layered endpointing on the recognizer's signal ──────────────
+      // The fast path the comment above VAD_DEFAULTS said to revisit "on a
+      // real basis". These cases are that basis: the branch is on what
+      // Deepgram reports, not on how much the speaker said.
+      {
+        name: 'recognizer: no signal -> unchanged 1200ms behaviour',
+        input: { speechMs: 2000, lastBurstMs: 2000, silenceMs: 700, noiseFloorDb: -55,
+                 recognizerEndpoint: 'none' },
+        expectEnd: false,
+      },
+      {
+        name: 'recognizer: segment end shortens the wait to 600ms',
+        input: { speechMs: 2000, lastBurstMs: 2000, silenceMs: 700, noiseFloorDb: -55,
+                 recognizerEndpoint: 'segment' },
+        expectEnd: true,
+      },
+      {
+        name: 'recognizer: a segment end alone does NOT cut a mid-sentence pause',
+        // The bug this replaced: speech_final ended the turn outright, so a
+        // speaker pausing between two sentences was cut off mid-thought.
+        input: { speechMs: 2000, lastBurstMs: 2000, silenceMs: 300, noiseFloorDb: -55,
+                 recognizerEndpoint: 'segment' },
+        expectEnd: false,
+      },
+      {
+        name: 'recognizer: utterance end ends the turn immediately',
+        // Deepgram already waited utterance_end_ms past the last recognized
+        // word; waiting our own 1200ms on top is pure latency.
+        input: { speechMs: 2000, lastBurstMs: 2000, silenceMs: 0, noiseFloorDb: -55,
+                 recognizerEndpoint: 'utterance' },
+        expectEnd: true,
+      },
+      {
+        name: 'recognizer: an unknown signal falls back to the honest threshold',
+        input: { speechMs: 2000, lastBurstMs: 2000, silenceMs: 700, noiseFloorDb: -55,
+                 recognizerEndpoint: 'nonsense' },
         expectEnd: false,
       },
       {
@@ -2525,7 +2826,8 @@
             if (burstMs > 0) { speechMs += dt; burstMs += dt; } else { silenceMs += dt; }
           }
 
-          const inputs = { speechMs, lastBurstMs: burstMs > 0 ? burstMs : lastBurstMs, silenceMs, noiseFloorDb };
+          const inputs = { speechMs, lastBurstMs: burstMs > 0 ? burstMs : lastBurstMs, silenceMs, noiseFloorDb,
+                           recognizerEndpoint: sttEndpointKind };
           const decision = shouldEndTurn(inputs);
           if (decision.end) {
             // Log every REAL endpoint decision (not every tick — that would
@@ -2603,9 +2905,24 @@
       const mimeType = MediaRecorder.isTypeSupported(preferred) ? preferred
         : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '');
       mediaRecorder = mimeType ? new MediaRecorder(mediaStream, { mimeType }) : new MediaRecorder(mediaStream);
-      mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+      sttReset();
+      sttSocket = openSttSocket();
+      mediaRecorder.ondataavailable = (e) => {
+        if (!e.data || e.data.size <= 0) return;
+        // Collected for the batch fallback ALWAYS, streamed as well when the
+        // socket is up. Never one or the other — see streamingStt's comment.
+        chunks.push(e.data);
+        sttEnqueue(e.data);
+      };
       mediaRecorder.onstop = onRecordingStopped;
-      mediaRecorder.start();
+      // A timeslice is what makes ondataavailable fire DURING the recording
+      // rather than once at the end — without it there is nothing to stream
+      // and the socket would sit idle until the turn was already over. 250ms
+      // is small enough for the endpoint signal to arrive promptly and large
+      // enough that each chunk is a worthwhile amount of audio.
+      // Harmless when streaming is off: the same chunks just accumulate in
+      // more pieces, and Blob() reassembles them identically.
+      mediaRecorder.start(250);
       setMic(true);
       if (handsFree) {
         // EXPLICITLY OUT OF SCOPE, on purpose: the mic stays CLOSED while
@@ -2664,6 +2981,7 @@
       if (vadNoSpeechAbort) {
         // The 8s no-speech timeout fired (see abortListeningNoSpeech) —
         // skip transcription entirely, there is nothing worth sending.
+        closeSttSocket(); // this path returns early; without this the socket leaks per turn
         vadNoSpeechAbort = false;
         window.setStatus('idle');
         setHint("Didn't catch that");
@@ -2673,6 +2991,35 @@
       if (blob.size < 500) { setHint(idleHintText()); handsFreeAdvance('empty'); return; } // tap-tap with no speech = cancel
       window.setStatus('processing');
       setHint('Transcribing…');
+
+      // Streaming short-circuit. The socket has been transcribing all along,
+      // so if it produced a final transcript there is nothing left to send —
+      // the whole /api/transcribe round trip (upload the clip, wait for
+      // Deepgram to process it cold) is already done and is skipped.
+      //
+      // Deliberately waits a moment first: a stop-tap can land a beat before
+      // Deepgram finalizes the last segment, and giving up instantly would
+      // throw away a transcript that was about to arrive and re-upload the
+      // whole clip to get it again. If nothing lands, we fall through to the
+      // batch POST below with the blob intact — the fallback is never
+      // disarmed, only skipped.
+      if (sttSocket || sttFinalText) {
+        closeSttSocket();
+        if (!sttFailed) {
+          const deadline = Date.now() + 1200;
+          while (!sttEndpointFired && !sttFinalText && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 50));
+          }
+          const streamed = (sttFinalText || '').trim();
+          if (streamed) {
+            vlMark(turnId, 'transcriptFinal');
+            setHint('“' + streamed + '”');
+            sendToAgent(streamed, turnId);
+            return;
+          }
+        }
+      }
+
       try {
         const res = await fetch('/api/transcribe', {
           method: 'POST',
@@ -3656,6 +4003,138 @@
 
     fetchSecurityStatus(); // initial load
     startPolling();
+  })();
+
+  // ==================== MINING PILL + PANEL ====================
+  // playbooks/btc-mining-tracker.md Step 3. Reads GET /api/mining, which
+  // serves the last poll the heartbeat recorded — the browser deliberately
+  // never calls Ocean itself, or opening two tabs would double the load on
+  // a public API that the heartbeat is already polling on a schedule.
+  (function () {
+    const btn = document.getElementById('tr-mining');
+    const panel = document.getElementById('tr-mining-panel');
+    if (!btn || !panel) return;
+    const POLL_MS = 60000; // matches the heartbeat's fast tick; polling faster shows the same row twice
+
+    const el = (id) => document.getElementById(id);
+
+    function formatHashrate(hs) {
+      // Hashes/sec into the unit a miner actually speaks in. Mirrors
+      // _format_hashrate in agent/tools/mining.py so the spoken answer and
+      // the widget never disagree about the number.
+      let value = Number(hs) || 0;
+      const units = ['H/s', 'KH/s', 'MH/s', 'GH/s', 'TH/s', 'PH/s', 'EH/s'];
+      for (let i = 0; i < units.length; i++) {
+        if (value < 1000) return value.toFixed(2) + ' ' + units[i];
+        value /= 1000;
+      }
+      return value.toFixed(2) + ' ZH/s';
+    }
+
+    function formatBtc(btc, usd) {
+      const base = (Number(btc) || 0).toFixed(8) + ' BTC';
+      if (usd === null || usd === undefined) return base;
+      return base + ' · $' + Number(usd).toLocaleString(undefined, { maximumFractionDigits: 2 });
+    }
+
+    function relativeTime(iso) {
+      if (!iso) return '';
+      const then = Date.parse(iso);
+      if (Number.isNaN(then)) return '';
+      const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+      if (secs < 90) return secs + 's ago';
+      if (secs < 5400) return Math.round(secs / 60) + 'm ago';
+      if (secs < 172800) return Math.round(secs / 3600) + 'h ago';
+      return Math.round(secs / 86400) + 'd ago';
+    }
+
+    function render(data) {
+      if (!data || data.configured === false) {
+        btn.style.display = 'none';   // no wallet configured: the pill is absent, not empty
+        return;
+      }
+      btn.style.display = '';
+      el('tr-mining-hashrate').textContent = formatHashrate(data.hashrate_60s);
+      el('tr-mining-big').textContent = formatHashrate(data.hashrate_60s);
+      el('tr-mining-avg').textContent = formatHashrate(data.hashrate_86400s);
+
+      const offline = Number(data.workers_offline) || 0;
+      const degraded = Number(data.workers_degraded) || 0;
+      const online = Number(data.workers_online) || 0;
+      const delta = el('tr-mining-workers');
+      // Colour follows the cost pill's convention: red is the state you'd
+      // want to act on, teal is fine. A rig being down is the thing worth
+      // catching out of the corner of your eye.
+      if (offline > 0) {
+        delta.textContent = offline + ' down';
+        delta.className = 'tr-cost-delta up';
+      } else if (degraded > 0) {
+        delta.textContent = degraded + ' slow';
+        delta.className = 'tr-cost-delta flat';
+      } else {
+        delta.textContent = online > 0 ? online + ' up' : '';
+        delta.className = 'tr-cost-delta down';
+      }
+
+      const share = relativeTime(data.last_share_at);
+      el('tr-mining-lastshare').textContent = share ? 'Last share ' + share : '';
+
+      const rows = [
+        ['Online', online, 'down'],
+        ['Degraded', degraded, 'flat'],
+        ['Offline', offline, 'up'],
+      ].filter((r) => r[1] > 0);
+      el('tr-mining-workers-detail').innerHTML = rows.length
+        ? rows.map((r) =>
+            '<div class="tr-cost-row"><span class="k">' + r[0] + '</span>'
+            + '<span class="v tr-cost-delta ' + r[2] + '">' + r[1] + '</span></div>'
+          ).join('')
+        : '<div class="tr-cost-empty">No workers reporting.</div>';
+
+      el('tr-mining-unpaid').textContent = formatBtc(data.unpaid_btc, data.unpaid_usd);
+      el('tr-mining-next').textContent = formatBtc(data.estimated_next_block_btc, null);
+      el('tr-mining-30d').textContent = formatBtc(data.payouts_30d_btc, data.payouts_30d_usd);
+      el('tr-mining-last').textContent = data.last_payout_at
+        ? formatBtc(data.last_payout_btc, null) + ' · ' + relativeTime(data.last_payout_at)
+        : '—';
+    }
+
+    async function fetchMining() {
+      try {
+        const res = await fetch('/api/mining', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        render(await res.json());
+      } catch (err) {
+        // Degrade quietly, same as the shield: a mining widget that can't
+        // reach the server should disappear, not shout.
+      }
+    }
+
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = panel.classList.toggle('open');
+      btn.setAttribute('aria-expanded', String(open));
+      if (open) fetchMining();
+    });
+    document.addEventListener('click', (e) => {
+      if (panel.classList.contains('open') && !panel.contains(e.target) && e.target !== btn) {
+        panel.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && panel.classList.contains('open')) {
+        panel.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+    });
+
+    let timer = null;
+    if (!timer) timer = setInterval(() => { if (!document.hidden) fetchMining(); }, POLL_MS);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) fetchMining(); });
+
+    window.trillionMining = { refresh: fetchMining, render: render }; // console-hook convention
+    fetchMining();
   })();
   </script>
 </body>

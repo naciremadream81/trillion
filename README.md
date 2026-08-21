@@ -6,7 +6,7 @@ Trillion is a **single-user** Python agent: chat in the terminal or browser, swa
 
 **Working today:** text brain (CLI + web chat), provider seam, tool registry, cost dashboard, Agent Factory, Software Factory, voice V1 (Deepgram STT + selectable TTS: local Piper by default or ElevenLabs via `TTS_PROVIDER=elevenlabs`, wired to `POST /api/transcribe` and `POST /api/tts`), hands-free voice mode (optional; push-to-talk remains default), Tier 6 safety rails (confirmation gate, audit log, `/pause` kill switch), durable cross-session memory (`agent/memory.py` + `remember_fact`/`forget_fact`), the heartbeat scheduler with quiet hours and the Code Sentinel, the `search_notes` and `draft_email` tools, untrusted-content sanitization on every tool result, and the security shield (`GET /api/security/status`).
 
-**Not done yet:** streaming STT (which would let end-of-turn detection lean on the recognizer's own endpoint signal instead of audio energy alone), acoustic barge-in (talking over Trillion mid-reply — deliberately not implemented, since on an open-speaker Pi its own output re-enters the mic and can self-trigger an endpoint), and server-side cancellation when a client aborts (today an aborted `/api/chat` keeps generating until a write hits the dropped connection, so the tail of an interrupted reply is still billed). A provider swap (model, STT, TTS) still needs Sean's say-so first.
+**Not done yet:** acoustic barge-in (talking over Trillion mid-reply — deliberately not implemented, since on an open-speaker Pi its own output re-enters the mic and can self-trigger an endpoint). Server-side cancellation **is** done: an aborted `/api/chat` now stops generating instead of running to the end of a reply nobody will read, which matters because barge-in aborts the fetch every time you talk over Trillion. A provider swap (model, STT, TTS) still needs Sean's say-so first.
 
 Self-knowledge (`agent/selfknowledge/`, generating `context/self/trillion.md`) and cosmic-orb UI tiers 4-6 (sub-agent constellation, dispatch beams/rings, performance mode, `prefers-reduced-motion`) are built — the orb UI change couldn't be visually verified against a real WebGL context in this session's sandboxed preview browser (no GPU there), so treat it as code-reviewed and unit-tested but not yet eyeballed running; check it in a real browser before relying on it.
 
@@ -16,7 +16,7 @@ Voice latency instrumentation (smooth-voice_2 Tier 1, measure-only) is built int
 |---|---|
 | STT (Deepgram nova-2) | ~670ms–1.2s, scales with clip length (verified via a real TTS→STT round trip, transcript matched the source text) |
 | Model (Claude, first token) | ~1.2–1.4s for a short reply |
-| TTS (Piper, local) | ~180–620ms/sentence once warm, scales with sentence length. There used to be **~3.5s extra on the very first synthesis after the process starts** while the ~63MB voice model loaded; that cost is now paid at server startup instead — see below |
+| TTS (Piper, local) | **~390–505ms for a short sentence on a freshly-started process** (median 449ms), scaling with length: ~2.7s medium, ~5.3s long. A long-running server used to be ~2.7× slower; that was a leaked SQLite connection per request and is **fixed** — see below. There used to be **~3.5s extra on the very first synthesis after the process starts** while the ~63MB voice model loaded; that cost is now paid at server startup instead |
 
 Straight add of the three "first token/byte" legs is ~2.05–3.22s before the first sound plays once the process is warm (STT + model + TTS-warm ranges above).
 
@@ -41,15 +41,52 @@ first request now behaves as a warm one — the tax is eliminated, not reduced.
 A fresh process is therefore ~2.05–3.22s to first sound, the same as a warm one,
 rather than the ~5.55–6.72s it used to be.
 
-> **Caveat on the per-sentence numbers above.** The ~180–620ms/sentence figures
-> are the earlier idle-machine measurements and are deliberately left as-is. A
-> re-run during this work reported 1338–4839ms/sentence, but the Pi was saturated
-> at the time (load average 4.18 on 4 cores, mostly from the coding session doing
-> the work), so those readings are not comparable and were not published. The
-> cold-start delta above *is* safe to publish from the same loaded run, because a
-> before/after comparison on one machine cancels the load out — an absolute
-> per-sentence number does not. **The per-sentence row still wants an idle
-> re-measure.**
+### Synthesis degraded with uptime — found and fixed
+
+Re-measuring the per-sentence figures on an idle Pi turned up something the
+old caveat was hiding: **Piper got slower the longer the server had been
+running.** Measured by alternating requests between a fresh process and the
+`trillion-orb` service after three days' uptime — interleaved rather than run
+as two blocks, so ambient load affects both equally:
+
+| | median | min | max |
+|---|---|---|---|
+| fresh process | **449ms** | 389ms | 505ms |
+| 3-day-old service | **1222ms** | 1023ms | 1333ms |
+
+Same sentence, same machine, same moment: 2.7× slower. Not thermal — 69°C
+with `get_throttled=0x0`. The two processes differed in memory: 78 MB RSS at
+four minutes against **716 MB at three days**, with 41 open database file
+descriptors against 9, on a box already 1.6 GB into a 2 GB swap file. Pages
+faulting back in on every synthesis is the shape of that slowdown.
+
+**The cause was a leaked SQLite connection per request.** Every storage
+module here did `with self._connect() as conn:` over a raw
+`sqlite3.connect(...)` — and *that context manager commits without closing*.
+Profiling per endpoint, `GET /api/security/status` leaked ~10 MB per 60 calls
+and `GET /api/heartbeat/notices` ~5 MB per 60; the browser polls both
+continuously, so a dashboard left open all day was the whole problem. The
+`ResourceWarning: unclosed database` lines in test output had been saying so
+for a long time.
+
+Fixed in [`agent/storage_utils.py`](agent/storage_utils.py): `_connect()` is
+now a context manager that closes. All 71 existing call sites were left
+untouched — the generator yields the connection, so `as conn` still binds it.
+Verified before and after on a running server:
+
+| endpoint | before | after |
+|---|---|---|
+| `GET /api/security/status` ×60 | +10.1 MB | **+0.0 MB** |
+| `GET /api/heartbeat/notices` ×60 | +4.9 MB | **+0.0 MB** |
+| open `.db` file descriptors | 9 → 41 over 3 days | **0** |
+
+The fresh-process figures at the top of this section are now what a
+long-running server does too. If you are running a build from before this
+fix, restart it:
+
+```bash
+systemctl --user restart trillion-orb.service
+```
 
 ### `scripts/voice_bench.py`
 
@@ -67,7 +104,7 @@ python scripts/voice_bench.py
 
 **Tiers 2-6, acted on against those numbers:**
 
-- **Tier 2 (end-of-turn detection) — hands-free VAD, opt-in.** An earlier pass recorded this tier as N/A because voice was push-to-talk: the stop-tap *was* the end-of-turn signal. That note also said "if voice ever goes hands-free, this tier comes back" — it has. A header toggle (default off) opens a browser-side `AnalyserNode` detector at 20Hz that ends the turn on silence; push-to-talk is untouched when it's off, and a tap still works when it's on. It uses **one** silence threshold (1200ms), not the layered fast/slow endpointing the playbook describes. Tier 2 assumes you can lean on the recognizer's own end-of-utterance signal for confidence, and `/api/transcribe` is batch Deepgram, so there isn't one. A layered version was built and measured: its confidence signal — a long final speech burst — turned out to mean "they said a lot", not "they finished", and it cut people off mid-sentence. Removed in favour of one honest number. Tunables live on `window.trillionVoiceVad` and are read every tick, so they can be adjusted mid-conversation from the console.
+- **Tier 2 (end-of-turn detection) — hands-free VAD, opt-in.** An earlier pass recorded this tier as N/A because voice was push-to-talk: the stop-tap *was* the end-of-turn signal. That note also said "if voice ever goes hands-free, this tier comes back" — it has. A header toggle (default off) opens a browser-side `AnalyserNode` detector at 20Hz that ends the turn on silence; push-to-talk is untouched when it's off, and a tap still works when it's on. With streaming STT off it uses **one** silence threshold (1200ms). A layered fast/slow version was built early and removed after measurement: its confidence signal — a long final speech burst — turned out to mean "they said a lot", not "they finished", and it cut people off mid-sentence. **The layered design is now back, branching on the signal the playbook actually assumes.** With streaming STT on, Deepgram's own endpoint drives the threshold: `utterance_end` (1000ms past the last recognized *word*) ends the turn immediately, since waiting another 1200ms on top is pure latency; `speech_final` marks the end of a *segment* and only shortens the wait to 600ms, because a speaker pausing between two sentences produces exactly that signal. An earlier revision ended the turn outright on `speech_final` and would have reintroduced the mid-sentence cut this tier exists to avoid — `window.trillionVadSelfTest()` now covers that case explicitly. Tunables live on `window.trillionVoiceVad` and are read every tick, so they can be adjusted mid-conversation from the console.
 - **Tier 3 (prompt-caching hygiene) — audited, found already correct, now guarded.** The classic failure (caching on, but something that changes every turn sits inside the cached prefix) isn't present: the system prompt is byte-identical build to build, and `append_voice_cue()` runs strictly *after* `apply_prompt_caching()`, so the per-turn cue lands after every breakpoint. Working code left alone; `tests/test_caching.py::TestCachedPrefixStaysStable` locks the property in so it can't silently regress.
 - **Tier 4 (the biggest measured number) — Piper's cold start moved off the critical path.** `warm_up()` loads the voice model *and* runs one throwaway inference (loading and first-inference are separate costs); `serve.py` schedules it as a background startup task, so it never blocks the server binding — confirmed live on the Pi, where the bind line prints *before* `Piper voice model warm.` A missing model logs and stays cold, and `/api/tts` still returns its own clear error. The before/after numbers are above. `_load_voice` also takes a lock: `synthesize` runs on a multi-worker executor, so two concurrent first-requests could otherwise both load the ~63MB model.
 - **Tier 4 (provider choice) — ElevenLabs is selectable.** `TTS_PROVIDER=elevenlabs` (default stays `piper`), model `eleven_flash_v2_5`, requires a paid plan. Piper remains the default and its path is unchanged.
@@ -171,8 +208,16 @@ All of these are wired — the commented entries in `.env.example` are real over
 | `GITHUB_TOKEN` / `GITHUB_USERNAME` / `TRILLION_GITHUB_WATCHED_REPOS` | Code Sentinel. Empty token or repo list = those checks self-skip rather than failing every tick |
 | `TRILLION_CONFIRMATION_MODE` / `TRILLION_CONFIRMATION_TTL_SECONDS` | Confirmation gate aggressiveness (`off`\|`smart`\|`manual`) and how long a parked action stays approvable |
 | `TRILLION_PAUSED` | Main kill switch — same as `/pause` |
-| `TRILLION_WEB_HOST` / `TRILLION_WEB_AUTH_TOKEN` | Bind host, and the bearer token enforced per-request on `/api/` by `agent/security/auth.py` |
+| `TRILLION_WEB_HOST` / `TRILLION_WEB_AUTH_TOKEN` | Bind host, and the bearer token enforced per-request on `/api/` by `agent/security/auth.py`. Ten failed attempts from one address in 5 min locks it out for 15 min (`429` + `Retry-After`) |
+| `TRILLION_WEB_AUTH_TOKEN_PREV` | The outgoing token during a rotation. Both values authenticate while it's set; clear it to finish the rotation — see [`docs/incident-runbook.md`](docs/incident-runbook.md) |
 | `TRILLION_CVE_SCAN_DB` | Where `pip-audit` scan history is written |
+| `TRILLION_MINING_WALLET` | Ocean payout address. Empty disables the mining tracker entirely |
+| `TRILLION_DESIGN_AGENT` | Off by default. Enables `generate_mockup`, which spawns Claude Code to compose screens — gated, capped, and needs `claude` on PATH |
+| `TRILLION_DESIGN_PER_DISPATCH_USD` / `TRILLION_DESIGN_DAILY_USD` | Design cost ceilings (default $5 / $15). Refuses before spawning rather than truncating |
+| `GEMINI_API_KEY` | Optional. Enables `generate_image` for design backdrops; without it the other six design tiers work unchanged |
+| `TRILLION_MINING_RETENTION_DAYS` / `TRILLION_MINING_DB` | Snapshot retention (default 30 days) and where history is written |
+| `TRILLION_CSP_ENFORCE` | Off by default (report-only). See "Flipping CSP to enforcing" below — don't set it on a guess |
+| `TRILLION_CSP_REPORT_DB` | Where CSP violation reports are persisted (default `csp_reports.db`) |
 
 ---
 
@@ -193,6 +238,7 @@ Type normally for a streaming turn. Slash commands:
 | `/pending` | List spawn tasks awaiting approval |
 | `/approve <id>` | Approve a draft and mint the agent |
 | `/reject <id> <feedback>` | Reject with feedback (revision loop) |
+| `/agent-model <slug> <model\|default>` | Set which model a specialist runs on; `default` clears it back to Trillion's |
 | `/build <description>` | Software Factory: start a background project build |
 | `/builds` | List recent builds and status |
 | `/pause` | Kill switch: stop gated actions, background dispatch, and builds (conversation and reads keep working) |
@@ -207,15 +253,41 @@ Type normally for a streaming turn. Slash commands:
 - `POST /api/chat` — chat wired to the same `Agent` + tool registry
 - `GET /api/usage` — month-to-date cost JSON (~60s cache)
 - `POST /api/transcribe` — audio in, transcript out (Deepgram; needs `DEEPGRAM_API_KEY`)
+- `GET /api/transcribe/stream` — WebSocket relay to Deepgram streaming; interim transcripts and the end-of-utterance signal (opt-in, see above)
 - `POST /api/tts` — text in, WAV out (local Piper; no key needed)
+- `GET /api/design/<project>/preview/...` — serves generated mockups and their Next assets (design agent only)
+- `GET /api/mining` — mining status from the last poll (empty `{configured: false}` without a wallet)
+- `GET /api/handoffs` — specialist handoff proposals waiting on your yes
 - `GET /api/heartbeat/notices` — active (undismissed) heartbeat notices
 - `POST /api/heartbeat/dismiss` — dismiss a notice by id
 - `GET /api/security/status` — self-audit score, colour, and per-signal deltas
 - `GET /api/security/cve-status` — latest `pip-audit` result
 - `POST /api/security/cve-scan` — trigger a dependency scan now
-- `POST /api/security/csp-report` — browser CSP violation sink
+- `POST /api/security/csp-report` — browser CSP violation sink (persisted, not just logged)
+- `GET /api/security/csp-violations` — what actually got blocked, grouped by directive and source
 
 `serve.py` binds `127.0.0.1` by default. `agent/security/startup_guard.py` refuses to start on any non-loopback host unless `TRILLION_WEB_AUTH_TOKEN` is set, and when that token is set `agent/security/auth.py` enforces it per-request on `/api/`. Note the stock browser UI does **not** send an `Authorization` header — a non-loopback bind expects a reverse proxy to inject it (see [`docs/incident-runbook.md`](docs/incident-runbook.md)). Set `TRILLION_WEB_STRICT_PORT=1` when a service manager should fail instead of falling forward on a busy configured port.
+
+### Flipping CSP to enforcing
+
+CSP ships **report-only**. Getting to enforcing is evidence-driven, not a
+guess — an over-tight policy breaks the UI in ways that look like unrelated
+bugs. The reports used to go to `print()`, which on a systemd unit with no
+persistent journal is `/dev/null`, so this step was unrunnable until the
+reports became durable.
+
+1. Run the app and exercise **every** path: a text turn, a voice turn (mic in,
+   TTS out), each header panel, a factory build. Use a real browser — a
+   headless one without WebGL halts the orb script and silently skips paths.
+2. Read `GET /api/security/csp-violations`. Each row is a concrete "this
+   directive blocked this source, N times".
+3. Widen `CSP_POLICY` in [`agent/security/headers.py`](agent/security/headers.py)
+   **only by what that list shows**. Anything not on the list stays blocked.
+4. Set `TRILLION_CSP_ENFORCE=true` and restart. `GET /api/security/status`
+   should now report `csp-status: enforcing` and the −10 disappears.
+5. Keep watching `/api/security/csp-violations` — the report-only header still
+   ships alongside the enforcing one precisely so a too-tight policy stays
+   visible after the flip.
 
 Usage rows are written when the agent runs (CLI or web) so the dashboard stays live against the same SQLite file.
 
@@ -224,12 +296,14 @@ Usage rows are written when the agent runs (CLI or web) so the dashboard stays l
 ## Architecture
 
 1. **One core, many adapters** — conversation turns go through `agent/core.py` → `Agent.turn()`. CLI (`main.py`), web (`serve.py`), and future voice/heartbeat should stay adapters, not forks of the brain.
-2. **Providers only under `agent/providers/`** — swap with `TRILLION_PROVIDER` / `--provider`.
+2. **Providers only under `agent/providers/`** — swap with `TRILLION_PROVIDER` / `--provider`. The core speaks Anthropic's tool and message shape; each provider translates at its own boundary (`agent/providers/_openai_tools.py` is shared by OpenAI and Ollama, whose dialects match). Tools work on all three — on Ollama only with a tool-capable model, which logs a line if it isn't one.
 3. **Tools via registry** — implement a tool, register in `build_registry()` (`agent/tools/`); do not edit the core loop to add capabilities.
 4. **Build tier by tier** — text brain before voice; don't fuse unfinished layers.
 5. **Safety posture** (from [`AGENT.md`](AGENT.md)) — never send messages, spend money, delete data, or change settings without **explicit per-action** confirmation. This is enforced by `agent/safety/` (a `Gate` that intercepts tool calls, backed by `safety.db`), not just prompted for — see `/pending-actions` and `/audit` above. Treat untrusted external content as data, not instructions — this half is mechanically enforced too: every untrusted tool result passes through `clean_for_prompt()` and `flag_injection_attempt()` in `agent/safety/untrusted.py` before it reaches the model (`agent/tools/registry.py`), with flagged attempts written to the audit log.
 
 Agent Factory drafts need your `/approve` before they go live. Software Factory relies on path jail + daily caps / pause / optional budget instead of a per-build approval prompt.
+
+**Handoffs propose, they don't chain.** A spawned specialist can call `propose_handoff` to recommend that another specialist take the next step — but it cannot dispatch one. The proposal is parked as an ordinary pending action on the target's `dispatch_to_<slug>`, so it lists under `/pending-actions`, executes only through `confirm_action` with the arguments you were shown, expires on the same TTL, and is refused by `/deny`. The specialist proposing cannot approve it: `confirm_action` is `factory_allowed = False`, so it is never in a spawned agent's registry. Artifacts must be paths, ids, or URLs — an inline blob is rejected, because a payload smuggled in as metadata would reach the next agent's prompt without passing the untrusted-content scrub that a tool result goes through.
 
 ---
 
@@ -260,8 +334,10 @@ trillion/
 │   ├── cost/               # Pricing, SQLite usage, aggregates
 │   ├── safety/             # Confirmation gate, risk tiers, untrusted-content sanitizer
 │   ├── security/           # Headers/CSP, bearer auth, startup guard, CVE scan, self-audit
-│   ├── heartbeat/          # Scheduler, quiet hours, notice store, Code Sentinel checks
-│   └── factory/            # Agent Factory + software/ builds
+│   ├── heartbeat/          # Scheduler, quiet hours, notice store, Code Sentinel + mining checks
+│   ├── mining/             # Ocean pool client, snapshot storage, BTC price
+│   ├── design/             # Head-of-Design: docs, tokens, scaffold, catalog, composer, images, references
+│   └── factory/            # Agent Factory + software/ builds + Tier 5 handoffs
 ├── playbooks/              # Design notes and feature prompts
 ├── docs/                   # Incident runbook, handoff records
 ├── context/                # Docs injected into the system prompt
