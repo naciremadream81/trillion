@@ -253,33 +253,33 @@ class TestRegistryWatcher(unittest.TestCase):
     def test_sync_once_registers_newly_approved_agent(self):
         self._approve_agent()
         watcher = RegistryWatcher(self.repo, FakeProvider([]), self.registry)
-        watcher.sync_once()
+        asyncio.run(watcher.sync_once())
         self.assertIn("dispatch_to_sql_migration_review", self.registry.names())
 
     def test_sync_once_is_idempotent(self):
         self._approve_agent()
         watcher = RegistryWatcher(self.repo, FakeProvider([]), self.registry)
-        watcher.sync_once()
+        asyncio.run(watcher.sync_once())
         first = self.registry._tools["dispatch_to_sql_migration_review"]
-        watcher.sync_once()
+        asyncio.run(watcher.sync_once())
         second = self.registry._tools["dispatch_to_sql_migration_review"]
         self.assertIs(first, second)
 
     def test_sync_once_unregisters_disabled_agent(self):
         self._approve_agent()
         watcher = RegistryWatcher(self.repo, FakeProvider([]), self.registry)
-        watcher.sync_once()
+        asyncio.run(watcher.sync_once())
         self.assertIn("dispatch_to_sql_migration_review", self.registry.names())
 
         self.repo.disable_agent("sql-migration-review")
-        watcher.sync_once()
+        asyncio.run(watcher.sync_once())
         self.assertNotIn("dispatch_to_sql_migration_review", self.registry.names())
 
     def test_sync_once_registers_multiple_agents(self):
         self._approve_agent("sql-migration-review")
         self._approve_agent("api-doc-writer")
         watcher = RegistryWatcher(self.repo, FakeProvider([]), self.registry)
-        watcher.sync_once()
+        asyncio.run(watcher.sync_once())
         self.assertIn("dispatch_to_sql_migration_review", self.registry.names())
         self.assertIn("dispatch_to_api_doc_writer", self.registry.names())
 

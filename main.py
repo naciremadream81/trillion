@@ -88,7 +88,7 @@ def print_banner(provider_name: str, model_name: str) -> None:
     )
 
 
-def handle_slash(
+async def handle_slash(
     command: str,
     agent: Agent,
     provider_name: str,
@@ -146,7 +146,7 @@ def handle_slash(
         if factory is None:
             console.print("[yellow]Agent Factory isn't available in this session.[/yellow]\n")
         else:
-            _handle_factory_command(cmd, rest, factory)
+            await _handle_factory_command(cmd, rest, factory)
 
     elif cmd in ("/build", "/builds"):
         if software_factory is None:
@@ -178,7 +178,7 @@ class FactoryContext:
         self.watcher = watcher
 
 
-def _handle_factory_command(cmd: str, rest: str, factory: "FactoryContext") -> None:
+async def _handle_factory_command(cmd: str, rest: str, factory: "FactoryContext") -> None:
     from agent.factory.pipeline import SpawnCapExceeded, resume_spawn, start_spawn
     from agent.factory.storage import AWAITING_APPROVAL
 
@@ -231,7 +231,7 @@ def _handle_factory_command(cmd: str, rest: str, factory: "FactoryContext") -> N
             console.print(f"[red]{e}[/red]\n")
         else:
             if factory.watcher is not None:
-                factory.watcher.sync_once()
+                await factory.watcher.sync_once()
             console.print(f"[green]Approved — spawned agent #{agent_id} is now live.[/green]\n")
 
     elif cmd == "/agent-model":
@@ -252,7 +252,7 @@ def _handle_factory_command(cmd: str, rest: str, factory: "FactoryContext") -> N
                 # The live DispatchTool holds a provider built at registration
                 # time; the watcher's fingerprint covers `model`, so this
                 # rebuilds it rather than leaving the old one in place.
-                factory.watcher.sync_once()
+                await factory.watcher.sync_once()
         else:
             console.print(f"[red]No active specialist with slug '{slug}'.[/red]\n")
 
@@ -407,7 +407,7 @@ async def chat_loop(
 
             # ── Slash commands ────────────────────────────────────────────
             if user_input.startswith("/"):
-                should_continue = handle_slash(
+                should_continue = await handle_slash(
                     user_input, agent, provider_name, factory, software_factory, gate
                 )
                 if not should_continue:
@@ -513,7 +513,7 @@ async def main() -> None:
         watcher = RegistryWatcher(
             repo, provider, registry, safety_repo=handoff_safety_repo
         )
-        watcher.sync_once()  # agents approved in a prior session are live immediately
+        await watcher.sync_once()  # agents approved in a prior session are live immediately
         watcher_task = asyncio.create_task(watcher.run_forever())
         background_tasks.add(watcher_task)
         watcher_task.add_done_callback(background_tasks.discard)

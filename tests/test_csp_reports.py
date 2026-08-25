@@ -17,6 +17,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from agent.security.csp_reports import (
     CspReportRepo,
@@ -140,6 +141,34 @@ class TestCspReportRepo(unittest.TestCase):
         )
         summary = self.repo.directive_summary()
         self.assertEqual(summary[0]["directive"], "media-src")
+
+    def test_record_report_prunes_in_batches_not_every_insert(self):
+        # Regression for the DoS: with the cap sitting at/above threshold,
+        # record_report() used to run COUNT(*) + a DELETE-with-subquery on
+        # EVERY call. Since this endpoint is unauthenticated, that let an
+        # attacker drive an expensive query pair on every request just by
+        # posting reports. The fix only prunes once the store has drifted
+        # MAX_STORED_REPORTS + PRUNE_MARGIN over the cap.
+        #
+        # prune()'s `keep` default is bound to MAX_STORED_REPORTS at
+        # function-definition time, so patching the module constant alone
+        # doesn't move it — patch the bound default too, matching how
+        # record_report()'s bare `repo.prune()` call actually behaves.
+        with mock.patch("agent.security.csp_reports.MAX_STORED_REPORTS", 5), mock.patch(
+            "agent.security.csp_reports.PRUNE_MARGIN", 3
+        ), mock.patch.object(CspReportRepo.prune, "__defaults__", (5,)):
+            body = '{"csp-report": {"violated-directive": "script-src"}}'
+
+            # Fill up to cap + margin (5 + 3 = 8 rows): no prune should have
+            # fired yet, so the store keeps growing past the cap.
+            for _ in range(8):
+                record_report(body, self.repo)
+            self.assertEqual(self.repo.count(), 8)
+
+            # One more insert crosses cap + margin (9 > 8) and should
+            # trigger a prune back down to exactly the cap (5).
+            record_report(body, self.repo)
+            self.assertEqual(self.repo.count(), 5)
 
 
 class TestCspEnforceSwitch(unittest.TestCase):

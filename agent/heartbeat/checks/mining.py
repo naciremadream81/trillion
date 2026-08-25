@@ -92,6 +92,18 @@ class MiningLiveCheck:
         )
         self.repo.record_workers(wallet_id, workers)
 
+        if not workers:
+            # parse_workers is defensive and returns [] rather than raising on
+            # a successful-but-empty/malformed payload, so this doesn't hit
+            # the MiningPoolError guard above. A genuinely empty pool response
+            # is far more likely a transient upstream glitch than "every
+            # worker vanished" -- treat it the same as a pool error: skip
+            # offline-tracking entirely and leave the dedup cursor untouched.
+            # Recomputing offline_now from [] here would wipe the memory of
+            # any worker already offline/alerted-on, and the very next good
+            # tick would re-report it as "newly_offline", duplicating the alert.
+            return notices, cursor
+
         offline_now = {w.worker_name for w in workers if w.status == "offline"}
         newly_offline = sorted(offline_now - already_offline)
         if newly_offline:

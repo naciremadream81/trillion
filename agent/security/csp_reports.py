@@ -56,6 +56,14 @@ CREATE INDEX IF NOT EXISTS idx_csp_violations_directive
 # only bites when someone is deliberately POSTing garbage.
 MAX_STORED_REPORTS = 5000
 
+# How far over the cap the store is allowed to drift before an expensive
+# prune runs again. Without this margin, once the table sits at/above the
+# cap, every single insert pushes count() back over the threshold, so the
+# COUNT(*) + DELETE pair would run on every subsequent insert forever — and
+# this endpoint is deliberately unauthenticated, so an attacker could drive
+# that cost directly by request volume.
+PRUNE_MARGIN = 500
+
 
 def default_db_path() -> str:
     """Where violation history lives. Override with $TRILLION_CSP_REPORT_DB."""
@@ -234,7 +242,7 @@ def record_report(body: str, repo: CspReportRepo | None = None) -> None:
     try:
         repo = repo or CspReportRepo()
         repo.save(parse_report(body))
-        if repo.count() > MAX_STORED_REPORTS:
+        if repo.count() > MAX_STORED_REPORTS + PRUNE_MARGIN:
             repo.prune()
     except Exception:
         pass

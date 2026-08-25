@@ -198,6 +198,7 @@ class HotfixPushCheck:
                 logger.exception("hotfix_push check failed for %r", repo)
                 continue
             known = dict(new_cursor.get(repo, {}))
+            events = None
             for branch in branches:
                 branch_name = branch.get("name", "")
                 if not branch_name.startswith(HOTFIX_BRANCH_PREFIXES):
@@ -206,12 +207,11 @@ class HotfixPushCheck:
                 if known.get(branch_name) == sha:
                     continue
                 known[branch_name] = sha
-                if (
-                    self._username
-                    and sha
-                    and await self._is_own_push(repo, branch_name, sha)
-                ):
-                    continue  # Sean's own push — excluded entirely, per the playbook
+                if self._username and sha:
+                    if events is None:
+                        events = await self._fetch_repo_events(repo)
+                    if self._matches_own_push(events, branch_name, sha):
+                        continue  # Sean's own push — excluded entirely, per the playbook
                 notices.append(
                     Notice(
                         severity="warning",
@@ -225,7 +225,20 @@ class HotfixPushCheck:
             new_cursor[repo] = known
         return notices, new_cursor
 
-    async def _is_own_push(self, repo: str, branch_name: str, sha: str) -> bool:
+    async def _fetch_repo_events(self, repo: str) -> list:
+        """Fetch a repo's events once per run() call, shared across all its branches.
+
+        `list_repo_events` is repo-scoped, not branch-scoped, so its result is
+        identical for every hotfix/rollback branch checked in the same repo on
+        the same tick — callers should fetch it at most once per repo and reuse
+        it via `_matches_own_push`."""
+        try:
+            return await self._client.list_repo_events(repo)
+        except Exception:  # noqa: BLE001
+            logger.exception("hotfix_push check failed to fetch events for %r", repo)
+            return []
+
+    def _matches_own_push(self, events: list, branch_name: str, sha: str) -> bool:
         """Whether the watched account is the one who *pushed* sha to this branch.
 
         Deliberately not commit authorship. A commit's `author` is whoever
@@ -238,11 +251,6 @@ class HotfixPushCheck:
         Unknown means notify. Events age out of GitHub's window and the API
         can fail, and neither is evidence the push was Sean's; missing one
         exclusion is far cheaper than staying silent on a real hotfix."""
-        try:
-            events = await self._client.list_repo_events(repo)
-        except Exception:  # noqa: BLE001
-            logger.exception("hotfix_push check failed to fetch events for %r", repo)
-            return False
         ref = f"refs/heads/{branch_name}"
         for event in events:
             if event.get("type") != "PushEvent":

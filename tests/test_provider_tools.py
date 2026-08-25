@@ -17,6 +17,7 @@ import unittest
 from agent.providers._openai_tools import (
     MAX_TOOL_RESULT_CHARS,
     ToolCallAccumulator,
+    parse_tool_arguments,
     to_openai_messages,
     to_openai_tools,
 )
@@ -46,6 +47,35 @@ class TestToolSchemaTranslation(unittest.TestCase):
 
     def test_malformed_entries_are_skipped_not_forwarded(self):
         self.assertIsNone(to_openai_tools([{"description": "no name"}, "junk"]))
+
+
+class TestParseToolArguments(unittest.TestCase):
+    """
+    The shared normalizer both providers now call: OpenAI's accumulator
+    (arguments always arrive as a JSON string, assembled in fragments) and
+    Ollama's tool_calls loop (arguments normally arrive pre-decoded as a
+    dict, but some builds stringify it anyway) used to each implement this
+    parse/fallback logic independently.
+    """
+
+    def test_a_dict_passes_through_unchanged(self):
+        self.assertEqual(parse_tool_arguments({"q": "hi"}), {"q": "hi"})
+
+    def test_a_valid_json_string_is_parsed(self):
+        self.assertEqual(parse_tool_arguments('{"q": "hi"}'), {"q": "hi"})
+
+    def test_an_empty_string_becomes_an_empty_dict(self):
+        self.assertEqual(parse_tool_arguments(""), {})
+        self.assertEqual(parse_tool_arguments("   "), {})
+
+    def test_invalid_json_becomes_an_empty_dict(self):
+        self.assertEqual(parse_tool_arguments("{not json"), {})
+
+    def test_a_json_array_is_rejected_as_non_object(self):
+        self.assertEqual(parse_tool_arguments("[1, 2, 3]"), {})
+
+    def test_none_becomes_an_empty_dict(self):
+        self.assertEqual(parse_tool_arguments(None), {})
 
 
 class TestMessageTranslation(unittest.TestCase):
@@ -299,6 +329,95 @@ class TestOpenAIProviderEmitsToolCalls(unittest.TestCase):
         asyncio.run(go())
         roles = [m["role"] for m in self.sent["messages"]]
         self.assertEqual(roles, ["system", "assistant", "tool"])
+
+
+class _FakeOllamaResponse:
+    """Shaped like the aiohttp response OllamaProvider.stream() awaits."""
+
+    def __init__(self, lines, status=200):
+        self.status = status
+        self._lines = lines
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def text(self):
+        return ""
+
+    @property
+    def content(self):
+        lines = self._lines
+
+        async def gen():
+            for line in lines:
+                yield line
+
+        return gen()
+
+
+class _FakeOllamaSession:
+    def __init__(self, lines):
+        self._lines = lines
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def post(self, url, json=None):
+        return _FakeOllamaResponse(self._lines)
+
+
+class TestOllamaProviderParsesToolCalls(unittest.TestCase):
+    """
+    The end-to-end property for the other half of the shared-normalizer fix:
+    Ollama's /api/chat hands `arguments` back already decoded as an object
+    (unlike OpenAI's JSON-string-in-fragments), so this exercises that
+    dict-shaped path all the way through OllamaProvider.stream().
+    """
+
+    def test_dict_shaped_arguments_survive_into_a_ToolCall(self):
+        import asyncio
+
+        from agent.providers.base import ProviderResponse, ToolCall
+        from agent.providers import ollama as ollama_module
+
+        line = json.dumps({
+            "message": {
+                "content": "",
+                "tool_calls": [
+                    {"id": "c1", "function": {"name": "search", "arguments": {"q": "hi"}}}
+                ],
+            },
+            "done": True,
+            "prompt_eval_count": 3,
+            "eval_count": 5,
+        }).encode()
+
+        fake_session_cls = lambda *a, **k: _FakeOllamaSession([line])  # noqa: E731
+
+        prev_session_cls = ollama_module.aiohttp.ClientSession
+        ollama_module.aiohttp.ClientSession = fake_session_cls
+        try:
+            provider = ollama_module.OllamaProvider(model="llama3.2")
+
+            async def go():
+                return [e async for e in provider.stream([{"role": "user", "content": "hi"}], "sys")]
+
+            events = asyncio.run(go())
+        finally:
+            ollama_module.aiohttp.ClientSession = prev_session_cls
+
+        calls = [e for e in events if isinstance(e, ToolCall)]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].name, "search")
+        self.assertEqual(calls[0].arguments, {"q": "hi"})
+        final = [e for e in events if isinstance(e, ProviderResponse)][0]
+        self.assertEqual(final.stop_reason, "tool_use")
 
 
 if __name__ == "__main__":

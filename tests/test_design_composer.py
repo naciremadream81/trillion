@@ -334,6 +334,18 @@ class TestCostCeilingIsEnforcedNotJustReserved(unittest.TestCase):
         )
         self.assertEqual(event["type"], "tool")
 
+    def test_usage_present_alongside_a_tool_use_still_reports_the_tool(self):
+        # Regression: real assistant turns often carry message.usage on
+        # every turn AND a tool_use block in the same event. If usage were
+        # checked first, the tool progress event would be silently dropped
+        # on every turn that also calls a tool — breaking live progress.
+        event = parse_event(
+            '{"type":"assistant","message":{"model":"claude-sonnet-4-6","usage":'
+            '{"input_tokens":1200,"output_tokens":300},"content":['
+            '{"type":"tool_use","name":"Read","input":{"file_path":"design.md"}}]}}'
+        )
+        self.assertEqual(event, {"type": "tool", "name": "Read", "target": "design.md"})
+
     def test_the_runner_accepts_a_ceiling(self):
         import inspect
 

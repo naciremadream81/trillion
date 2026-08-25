@@ -19,7 +19,7 @@ from agent.tools.analytics_tool import MAX_ROWS, QueryAnalyticsTool, validate_sq
 
 
 def run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 class TestValidator(unittest.TestCase):

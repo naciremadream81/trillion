@@ -140,6 +140,27 @@ def parse_event(line: str) -> dict | None:
     kind = data.get("type")
     if kind == "assistant":
         message = data.get("message") or {}
+        # Check for a tool_use content block FIRST. Real assistant events
+        # often carry message.usage on every turn (see below), so if usage
+        # were checked first, any turn that also calls a tool would never
+        # surface its {"type": "tool", ...} progress event — silently
+        # breaking the live-progress feature this module exists for. An
+        # assistant turn that both calls a tool AND carries usage reports
+        # the tool event and skips that one usage sample; that's fine, the
+        # mid-flight cost figure is explicitly an estimate and the
+        # authoritative total_cost_usd still arrives on the final "result"
+        # event regardless.
+        for block in (message.get("content") or []):
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                name = block.get("name", "tool")
+                target = ""
+                args = block.get("input") or {}
+                if isinstance(args, dict):
+                    target = str(
+                        args.get("file_path") or args.get("path")
+                        or args.get("command") or args.get("pattern") or ""
+                    )[:120]
+                return {"type": "tool", "name": name, "target": target}
         usage = message.get("usage")
         if isinstance(usage, dict):
             # Confirmed against the real CLI: assistant events carry
@@ -155,17 +176,6 @@ def parse_event(line: str) -> dict | None:
                 "cache_write_tokens": int(usage.get("cache_creation_input_tokens") or 0),
                 "cache_read_tokens": int(usage.get("cache_read_input_tokens") or 0),
             }
-        for block in (message.get("content") or []):
-            if isinstance(block, dict) and block.get("type") == "tool_use":
-                name = block.get("name", "tool")
-                target = ""
-                args = block.get("input") or {}
-                if isinstance(args, dict):
-                    target = str(
-                        args.get("file_path") or args.get("path")
-                        or args.get("command") or args.get("pattern") or ""
-                    )[:120]
-                return {"type": "tool", "name": name, "target": target}
         return None
     if kind == "result":
         return {
@@ -236,6 +246,13 @@ async def spawn_claude_code(
 
     from ..cost.pricing import compute_cost
 
+    stderr_chunks: list[bytes] = []
+
+    async def drain_stderr() -> None:
+        assert process.stderr is not None
+        async for raw in process.stderr:
+            stderr_chunks.append(raw)
+
     async def drain() -> None:
         assert process.stdout is not None
         async for raw in process.stdout:
@@ -278,7 +295,7 @@ async def spawn_claude_code(
                     pass
 
     try:
-        await asyncio.wait_for(drain(), timeout=timeout_seconds)
+        await asyncio.wait_for(asyncio.gather(drain(), drain_stderr()), timeout=timeout_seconds)
         await asyncio.wait_for(process.wait(), timeout=30)
     except asyncio.TimeoutError:
         result.error = f"claude did not finish within {timeout_seconds:.0f}s; killed"
@@ -298,15 +315,10 @@ async def spawn_claude_code(
 
     result.exit_code = process.returncode
     if process.returncode != 0 and not result.error:
-        stderr = b""
-        if process.stderr is not None:
-            try:
-                stderr = await process.stderr.read()
-            except Exception:
-                stderr = b""
-            result.error = (
-                stderr.decode("utf-8", "replace").strip()[:500]
-                or f"claude exited {process.returncode}"
-            )
+        stderr = b"".join(stderr_chunks)
+        result.error = (
+            stderr.decode("utf-8", "replace").strip()[:500]
+            or f"claude exited {process.returncode}"
+        )
     result.ok = not result.error and process.returncode == 0
     return result

@@ -144,6 +144,10 @@ class ConfigDrivenAgent:
         # the override can't be built (an unknown model name, a missing SDK):
         # a specialist running on the default model is a far better failure
         # than a specialist that won't run at all.
+        # Captured before the possible reassignment below, so `_owns_provider`
+        # can tell "built our own client" apart from "fell back to the shared
+        # one" purely by identity — see aclose().
+        shared_provider = provider
         declared_model = (row.get("model") or "").strip()
         if declared_model:
             try:
@@ -161,6 +165,13 @@ class ConfigDrivenAgent:
                     self.slug, declared_model, e,
                 )
 
+        # True only when this instance built its own provider (its own SDK
+        # client, its own connection pool) rather than falling back to the
+        # shared one main.py/the caller owns. Guards aclose() below: closing
+        # the shared provider out from under the main agent or a sibling
+        # specialist would be a bug, not a fix.
+        self._owns_provider = provider is not shared_provider
+
         self._agent = Agent(
             provider=provider,
             tool_registry=restricted_registry,
@@ -172,6 +183,11 @@ class ConfigDrivenAgent:
         async for chunk in self._agent.turn(message):
             reply += chunk
         return reply
+
+    async def aclose(self) -> None:
+        """Close the provider's connection, but only if we built it ourselves."""
+        if self._owns_provider:
+            await self._agent.provider.aclose()
 
 
 class DispatchTool:
@@ -223,6 +239,9 @@ class DispatchTool:
         finally:
             activity.mark_finished(self._sub_agent.slug)
 
+    async def aclose(self) -> None:
+        await self._sub_agent.aclose()
+
 
 class RegistryWatcher:
     """
@@ -248,13 +267,18 @@ class RegistryWatcher:
         self.base_registry = base_registry if base_registry is not None else registry
         self._known: dict[str, str] = {}  # slug -> system_prompt, to detect changes
 
-    def sync_once(self) -> None:
+    async def sync_once(self) -> None:
         active = self.repo.list_active_agents()
         active_by_slug = {row["slug"]: row for row in active}
 
         # Unregister anything we previously registered that's no longer active.
+        # Close its provider (if it owned one) BEFORE unregistering, so a
+        # superseded specialist's connection pool never leaks.
         for slug in list(self._known):
             if slug not in active_by_slug:
+                existing = self.registry.get(dispatch_tool_name(slug))
+                if existing is not None:
+                    await existing.aclose()
                 self.registry.unregister(dispatch_tool_name(slug))
                 del self._known[slug]
 
@@ -276,6 +300,12 @@ class RegistryWatcher:
             )
             if self._known.get(slug) == fingerprint:
                 continue
+            # The fingerprint changed — the tool we're about to overwrite may
+            # hold its own provider (a declared-model specialist). Close it
+            # before registering its replacement, same reasoning as above.
+            existing = self.registry.get(dispatch_tool_name(slug))
+            if existing is not None:
+                await existing.aclose()
             tool = DispatchTool(
                 row,
                 self.provider,
@@ -289,7 +319,7 @@ class RegistryWatcher:
     async def run_forever(self, poll_interval: float = 30.0) -> None:
         while True:
             try:
-                self.sync_once()
+                await self.sync_once()
             except Exception:  # noqa: BLE001 — a broken poll must never kill the watcher
                 logger.exception("RegistryWatcher.sync_once failed")
             await asyncio.sleep(poll_interval)

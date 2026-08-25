@@ -9,6 +9,7 @@ Run from the project root:
     python -m unittest tests.test_agent_model
 """
 
+import asyncio
 import os
 import shutil
 import tempfile
@@ -33,6 +34,17 @@ class FakeProvider(BaseProvider):
     async def stream(self, messages, system, tools=None):
         yield TextChunk(text="")
         yield ProviderResponse(text="", tool_calls=[], usage=TokenUsage(), model=self._model)
+
+
+class RecordingCloseProvider(FakeProvider):
+    """A FakeProvider that counts how many times aclose() is actually called."""
+
+    def __init__(self, model="fake-default"):
+        super().__init__(model)
+        self.close_count = 0
+
+    async def aclose(self) -> None:
+        self.close_count += 1
 
 
 class TestProviderModelOverride(unittest.TestCase):
@@ -162,20 +174,108 @@ class TestWatcherRebuildsOnModelChange(unittest.TestCase):
 
     def test_changing_the_model_replaces_the_live_dispatch_tool(self):
         watcher = RegistryWatcher(self.repo, FakeProvider(), self.registry)
-        watcher.sync_once()
+        asyncio.run(watcher.sync_once())
         first = self.registry.get(dispatch_tool_name("analyst"))
 
         self.repo.set_agent_model("analyst", "claude-haiku-4-5-20251001")
-        watcher.sync_once()
+        asyncio.run(watcher.sync_once())
         second = self.registry.get(dispatch_tool_name("analyst"))
         self.assertIsNot(first, second, "model change did not force a rebuild")
 
     def test_an_unchanged_agent_is_not_rebuilt(self):
         watcher = RegistryWatcher(self.repo, FakeProvider(), self.registry)
-        watcher.sync_once()
+        asyncio.run(watcher.sync_once())
         first = self.registry.get(dispatch_tool_name("analyst"))
-        watcher.sync_once()
+        asyncio.run(watcher.sync_once())
         self.assertIs(first, self.registry.get(dispatch_tool_name("analyst")))
+
+
+class TestWatcherClosesSupersededProvider(unittest.TestCase):
+    """
+    dispatch.py's RegistryWatcher.sync_once must close a superseded
+    specialist's OWN provider (leaking its SDK client's connection pool
+    otherwise), but must never touch the shared provider used by the main
+    agent or by specialists that don't declare their own model.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._prev = os.environ.get("TRILLION_FACTORY_DB")
+        os.environ["TRILLION_FACTORY_DB"] = os.path.join(self.tmp, "factory.db")
+        self.repo = FactoryRepo()
+        self.registry = ToolRegistry()
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("TRILLION_FACTORY_DB", None)
+        else:
+            os.environ["TRILLION_FACTORY_DB"] = self._prev
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _spawn(self, slug: str, model: str = "") -> None:
+        task_id = self.repo.create_spawn_task(f"a {slug}")
+        self.repo.set_draft(task_id, slug=slug, system_prompt="p", tool_allowlist=[])
+        self.repo.approve(task_id)
+        if model:
+            self.repo.set_agent_model(slug, model)
+
+    def test_a_declared_model_specialist_gets_its_own_provider_closed_on_rebuild(self):
+        self._spawn("analyst", model="cheap-model")
+        shared = RecordingCloseProvider("shared-model")
+        watcher = RegistryWatcher(self.repo, shared, self.registry)
+        asyncio.run(watcher.sync_once())
+
+        first = self.registry.get(dispatch_tool_name("analyst"))
+        first_provider = first._sub_agent._agent.provider
+        self.assertIsInstance(first_provider, RecordingCloseProvider)
+        self.assertIsNot(first_provider, shared)
+
+        # Change the declared model so the fingerprint changes and the
+        # watcher rebuilds — the superseded specialist's OWN provider must
+        # be closed exactly once.
+        self.repo.set_agent_model("analyst", "another-cheap-model")
+        asyncio.run(watcher.sync_once())
+
+        self.assertEqual(first_provider.close_count, 1)
+        self.assertEqual(shared.close_count, 0, "the shared provider must never be closed")
+
+    def test_a_declared_model_specialist_gets_its_own_provider_closed_on_removal(self):
+        self._spawn("analyst", model="cheap-model")
+        shared = RecordingCloseProvider("shared-model")
+        watcher = RegistryWatcher(self.repo, shared, self.registry)
+        asyncio.run(watcher.sync_once())
+
+        first = self.registry.get(dispatch_tool_name("analyst"))
+        first_provider = first._sub_agent._agent.provider
+
+        self.repo.disable_agent("analyst")
+        asyncio.run(watcher.sync_once())
+
+        self.assertEqual(first_provider.close_count, 1)
+        self.assertIsNone(self.registry.get(dispatch_tool_name("analyst")))
+
+    def test_a_specialist_with_no_declared_model_never_closes_the_shared_provider(self):
+        # "no declared model" -> uses the shared provider directly.
+        self._spawn("analyst")  # no model
+        self._spawn("other")  # a second specialist, to trigger a real rebuild
+        shared = RecordingCloseProvider("shared-model")
+        watcher = RegistryWatcher(self.repo, shared, self.registry)
+        asyncio.run(watcher.sync_once())
+
+        analyst_tool = self.registry.get(dispatch_tool_name("analyst"))
+        self.assertIs(analyst_tool._sub_agent._agent.provider, shared)
+
+        # Force a rebuild of the OTHER specialist; the analyst (which shares
+        # the provider) must be untouched, and the shared provider must not
+        # have been closed by anything.
+        self.repo.set_agent_model("other", "cheap-model")
+        asyncio.run(watcher.sync_once())
+
+        self.assertIs(
+            self.registry.get(dispatch_tool_name("analyst")), analyst_tool,
+            "an unrelated specialist's fingerprint change must not rebuild this one",
+        )
+        self.assertEqual(shared.close_count, 0)
 
 
 class TestRoutingPolicy(unittest.TestCase):

@@ -135,95 +135,110 @@ class Agent:
             return
 
         self.history.append({"role": "user", "content": user_input})
+        turn_start_index = len(self.history) - 1
+        turn_completed = False
 
         # Allow the model to call tools in a loop (Tier 2).
         # In Tier 1 there are no tools, so this runs exactly once.
         MAX_TOOL_ROUNDS = 8  # guard against a runaway tool-calling loop
         rounds = 0
-        while True:
-            rounds += 1
-            collected_text = ""
-            tool_calls: list[ToolCall] = []
-            final_response: ProviderResponse | None = None
+        try:
+            while True:
+                rounds += 1
+                collected_text = ""
+                tool_calls: list[ToolCall] = []
+                final_response: ProviderResponse | None = None
 
-            # Rebuilt every round, not just at construction: RegistryWatcher
-            # (agent/factory/dispatch.py) mutates tool_registry from a
-            # background poll while this Agent stays alive across many
-            # turns, and a CLI /approve triggers the same mutation
-            # synchronously. tools_schema below is already read fresh from
-            # tool_registry every round — this keeps the system prompt's
-            # prose description of "tools currently available" from
-            # contradicting the schemas actually offered in the same call.
-            self.system = self._build_system_prompt()
+                # Rebuilt every round, not just at construction: RegistryWatcher
+                # (agent/factory/dispatch.py) mutates tool_registry from a
+                # background poll while this Agent stays alive across many
+                # turns, and a CLI /approve triggers the same mutation
+                # synchronously. tools_schema below is already read fresh from
+                # tool_registry every round — this keeps the system prompt's
+                # prose description of "tools currently available" from
+                # contradicting the schemas actually offered in the same call.
+                self.system = self._build_system_prompt()
 
-            # Stream the provider's response
-            tools_schema = (
-                self.tool_registry.schemas() if self.tool_registry else None
-            )
-            async for event in self.provider.stream(
-                messages=self.history,
-                system=self.system,
-                tools=tools_schema,
-            ):
-                if isinstance(event, TextChunk):
-                    collected_text += event.text
-                    yield event.text
-                elif isinstance(event, ToolCall):
-                    tool_calls.append(event)
-                elif isinstance(event, ProviderResponse):
-                    final_response = event
-
-            # ── Best-effort cost capture for this API round-trip ──────────────
-            # One row per API call, so multi-round tool turns each get recorded.
-            # record_usage never raises — it can't slow or break the turn.
-            if final_response is not None:
-                record_usage(
-                    model=final_response.model or self.provider.model_name,
-                    usage=final_response.usage,
-                    source="conversation",
+                # Stream the provider's response
+                tools_schema = (
+                    self.tool_registry.schemas() if self.tool_registry else None
                 )
+                async for event in self.provider.stream(
+                    messages=self.history,
+                    system=self.system,
+                    tools=tools_schema,
+                ):
+                    if isinstance(event, TextChunk):
+                        collected_text += event.text
+                        yield event.text
+                    elif isinstance(event, ToolCall):
+                        tool_calls.append(event)
+                    elif isinstance(event, ProviderResponse):
+                        final_response = event
 
-            # No tool calls → we're done with this turn
-            if not tool_calls:
-                self.history.append(
-                    {"role": "assistant", "content": collected_text}
-                )
-                break
+                # ── Best-effort cost capture for this API round-trip ──────────────
+                # One row per API call, so multi-round tool turns each get recorded.
+                # record_usage never raises — it can't slow or break the turn.
+                if final_response is not None:
+                    record_usage(
+                        model=final_response.model or self.provider.model_name,
+                        usage=final_response.usage,
+                        source="conversation",
+                    )
 
-            # ── Tier 2: handle tool calls (Anthropic tool-use format) ──────
-            # The assistant turn must carry the tool_use blocks, and the tool
-            # results come back as a *user* turn of tool_result blocks — this is
-            # the exact shape the Claude API requires for a tool round-trip.
-            # (OpenAI's and Ollama's formats differ; each provider translates
-            # this shape at its own boundary — see agent/providers/
-            # _openai_tools.py. The core speaks one shape, always.)
-            assistant_content: list[dict] = []
-            if collected_text.strip():
-                assistant_content.append({"type": "text", "text": collected_text})
-            for tc in tool_calls:
-                assistant_content.append(
-                    {"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.arguments}
-                )
-            self.history.append({"role": "assistant", "content": assistant_content})
+                # No tool calls → we're done with this turn
+                if not tool_calls:
+                    self.history.append(
+                        {"role": "assistant", "content": collected_text}
+                    )
+                    turn_completed = True
+                    break
 
-            # Execute each tool; feed all results back as one user turn.
-            tool_results: list[dict] = []
-            for tc in tool_calls:
-                result = await self._run_tool(tc)
-                tool_results.append(
-                    {"type": "tool_result", "tool_use_id": tc.id, "content": result}
-                )
-            self.history.append({"role": "user", "content": tool_results})
+                # ── Tier 2: handle tool calls (Anthropic tool-use format) ──────
+                # The assistant turn must carry the tool_use blocks, and the tool
+                # results come back as a *user* turn of tool_result blocks — this is
+                # the exact shape the Claude API requires for a tool round-trip.
+                # (OpenAI's and Ollama's formats differ; each provider translates
+                # this shape at its own boundary — see agent/providers/
+                # _openai_tools.py. The core speaks one shape, always.)
+                assistant_content: list[dict] = []
+                if collected_text.strip():
+                    assistant_content.append({"type": "text", "text": collected_text})
+                for tc in tool_calls:
+                    assistant_content.append(
+                        {"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.arguments}
+                    )
+                self.history.append({"role": "assistant", "content": assistant_content})
 
-            # Safety valve: stop looping if the model keeps calling tools.
-            if rounds >= MAX_TOOL_ROUNDS:
-                self.history.append(
-                    {"role": "assistant",
-                     "content": "[Stopped after too many tool calls in one turn.]"}
-                )
-                yield "\n[Stopped after too many tool calls.]"
-                break
-            # Otherwise loop: the model now sees the tool results and continues.
+                # Execute each tool; feed all results back as one user turn.
+                tool_results: list[dict] = []
+                for tc in tool_calls:
+                    result = await self._run_tool(tc)
+                    tool_results.append(
+                        {"type": "tool_result", "tool_use_id": tc.id, "content": result}
+                    )
+                self.history.append({"role": "user", "content": tool_results})
+
+                # Safety valve: stop looping if the model keeps calling tools.
+                if rounds >= MAX_TOOL_ROUNDS:
+                    self.history.append(
+                        {"role": "assistant",
+                         "content": "[Stopped after too many tool calls in one turn.]"}
+                    )
+                    yield "\n[Stopped after too many tool calls.]"
+                    turn_completed = True
+                    break
+                # Otherwise loop: the model now sees the tool results and continues.
+        finally:
+            # If the turn was cancelled (e.g. serve.py's barge-in calls
+            # turn.aclose(), which throws GeneratorExit at whatever yield
+            # we're suspended on) or raised, history may hold a dangling
+            # user append and/or partial tool-round entries from this call.
+            # Roll back to exactly the pre-turn state so the next turn()
+            # call starts clean — otherwise two "user" entries land back to
+            # back and break every provider's alternating-role requirement.
+            if not turn_completed:
+                del self.history[turn_start_index:]
 
     def reset(self) -> None:
         """Clear the in-session history. Memory (Tier 4) is unaffected."""

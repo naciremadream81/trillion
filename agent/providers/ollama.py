@@ -17,7 +17,7 @@ from typing import AsyncIterator
 
 import aiohttp
 
-from ._openai_tools import to_openai_messages, to_openai_tools
+from ._openai_tools import parse_tool_arguments, to_openai_messages, to_openai_tools
 from .base import BaseProvider, TextChunk, ToolCall, ProviderResponse, TokenUsage
 
 
@@ -123,15 +123,8 @@ class OllamaProvider(BaseProvider):
                 name = function.get("name") or ""
                 if not name:
                     continue
-                arguments = function.get("arguments")
-                if isinstance(arguments, str):
-                    # Some builds stringify it anyway; accept both.
-                    try:
-                        arguments = json.loads(arguments) if arguments.strip() else {}
-                    except json.JSONDecodeError:
-                        arguments = {}
-                if not isinstance(arguments, dict):
-                    arguments = {}
+                # Some builds stringify it anyway; parse_tool_arguments accepts both.
+                arguments = parse_tool_arguments(function.get("arguments"))
                 tool_calls.append(
                     ToolCall(id=call.get("id") or f"call_{index}", name=name, arguments=arguments)
                 )

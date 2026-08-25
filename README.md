@@ -18,7 +18,7 @@ Voice latency instrumentation (smooth-voice_2 Tier 1, measure-only) is built int
 | Model (Claude, first token) | ~1.2–1.4s for a short reply |
 | TTS (Piper, local) | **~390–505ms for a short sentence on a freshly-started process** (median 449ms), scaling with length: ~2.7s medium, ~5.3s long. A long-running server used to be ~2.7× slower; that was a leaked SQLite connection per request and is **fixed** — see below. There used to be **~3.5s extra on the very first synthesis after the process starts** while the ~63MB voice model loaded; that cost is now paid at server startup instead |
 
-Straight add of the three "first token/byte" legs is ~2.05–3.22s before the first sound plays once the process is warm (STT + model + TTS-warm ranges above).
+Straight add of the three "first token/byte" legs is ~2.26–3.11s before the first sound plays once the process is warm (STT + model + TTS-warm ranges above).
 
 ### The cold-start tax is gone (measured before/after)
 
@@ -38,8 +38,8 @@ first `/api/tts` request of a fresh process:
 **~3.7s removed from the first voice turn after any restart or deploy.** The
 1158ms figure is marginally *faster* than the same build's warm reading, i.e. the
 first request now behaves as a warm one — the tax is eliminated, not reduced.
-A fresh process is therefore ~2.05–3.22s to first sound, the same as a warm one,
-rather than the ~5.55–6.72s it used to be.
+A fresh process is therefore ~2.26–3.11s to first sound, the same as a warm one,
+rather than the ~5.76–6.61s it used to be.
 
 ### Synthesis degraded with uptime — found and fixed
 

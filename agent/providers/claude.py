@@ -31,6 +31,9 @@ class ClaudeProvider(BaseProvider):
     def model_name(self) -> str:
         return self._model
 
+    async def aclose(self) -> None:
+        await self.client.close()
+
     async def stream(
         self,
         messages: list[dict],

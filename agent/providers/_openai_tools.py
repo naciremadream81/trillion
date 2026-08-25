@@ -59,6 +59,31 @@ def to_openai_tools(tools: list[dict] | None) -> list[dict] | None:
     return translated or None
 
 
+def parse_tool_arguments(raw) -> dict:
+    """
+    Normalize a tool call's arguments into a dict — tolerates a JSON string,
+    an already-decoded dict, or something malformed/absent.
+
+    Shared by both providers because they hit the same variance from the
+    wire: OpenAI always hands back a JSON string (accumulated in pieces by
+    ToolCallAccumulator); Ollama normally hands back an already-decoded
+    object but some builds stringify it anyway. Never raises — an
+    unparseable payload becomes {} rather than dropping the call.
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 def _stringify_tool_result(content) -> str:
     """
     Anthropic accepts a tool_result `content` that is a string or a list of
@@ -225,12 +250,6 @@ class ToolCallAccumulator:
             slot = self._calls[index]
             if not slot["name"]:
                 continue
-            raw = slot["arguments"].strip()
-            try:
-                parsed = json.loads(raw) if raw else {}
-            except (ValueError, TypeError):
-                parsed = {}
-            if not isinstance(parsed, dict):
-                parsed = {}
+            parsed = parse_tool_arguments(slot["arguments"])
             results.append((slot["id"] or f"call_{index}", slot["name"], parsed))
         return results

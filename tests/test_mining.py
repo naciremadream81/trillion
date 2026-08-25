@@ -372,6 +372,24 @@ class TestMiningAlerts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(notices, [])
         self.assertEqual(cursor, {})
 
+    async def test_an_empty_workers_payload_does_not_wipe_the_offline_cursor(self):
+        # A successful-but-empty/malformed workers payload doesn't raise
+        # MiningPoolError (parse_workers is defensive and returns []), so it
+        # must not be treated as "every worker recovered" either -- that
+        # would wipe the dedup cursor and cause the next real tick to
+        # re-report the still-offline worker as newly offline.
+        check_down = self._check(FakeClient(workers_payload({"rig1": (0, 100)})))
+        _, cursor = await check_down.run({})
+        self.assertEqual(cursor["offline_workers"], ["rig1"])
+
+        check_glitch = self._check(FakeClient(workers_payload({})))
+        notices, cursor = await check_glitch.run(cursor)
+        self.assertEqual(notices, [])
+        self.assertEqual(cursor["offline_workers"], ["rig1"])
+
+        notices, _ = await check_down.run(cursor)
+        self.assertEqual(notices, [])
+
     async def test_a_live_tick_records_a_snapshot(self):
         await self._check(FakeClient()).run({})
         wallet_id = self.repo.ensure_wallet("bc1qtest")

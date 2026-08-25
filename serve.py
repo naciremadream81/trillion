@@ -278,7 +278,7 @@ async def _start_factory_watcher(app: web.Application) -> None:
         watcher = RegistryWatcher(
             repo, _get_provider(), _get_registry(), safety_repo=handoff_safety_repo
         )
-        watcher.sync_once()
+        await watcher.sync_once()
         app["factory_watcher_task"] = asyncio.create_task(watcher.run_forever())
     except Exception as e:  # noqa: BLE001
         print(f"Agent Factory unavailable ({e}); continuing.")
