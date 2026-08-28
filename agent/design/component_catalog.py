@@ -145,8 +145,8 @@ def render_for_prompt(max_per_library: int = 12) -> str:
         f"- shadcn/ui (`npx shadcn@latest add <name>`): {shadcn}\n"
         f"- MagicUI (`npx magicui-cli add <name>`): {magic}\n"
         "- npm: framer-motion, lucide-react\n"
-        "Anything not listed here is not installable in this project. Do not "
-        "attempt to install a library that isn't named above."
+        "See `.prism/preview/prism/component_catalog.md` for the full list. Do not "
+        "attempt to install a library that isn't named there."
     )
 
 

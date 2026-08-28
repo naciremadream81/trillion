@@ -75,7 +75,7 @@ class TestCatalog(unittest.TestCase):
         self.assertLess(len(render_for_prompt()), 1200)
 
     def test_the_prompt_rendering_forbids_uncatalogued_installs(self):
-        self.assertIn("not installable", render_for_prompt())
+        self.assertIn("component_catalog.md", render_for_prompt())
 
     def test_the_full_catalog_names_what_is_unavailable(self):
         markdown = render_full_catalog_markdown()

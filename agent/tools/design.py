@@ -70,6 +70,14 @@ class GenerateMockupTool(BaseTool):
             "quality": {"type": "string", "enum": list(QUALITY_LEVELS)},
             "components_hint": {"type": "array", "items": {"type": "string"}},
             "reference_images": {"type": "array", "items": {"type": "string"}},
+            "image_urls": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Generated image URLs from generate_image, passed verbatim "
+                    "with the serving prefix included."
+                ),
+            },
         },
         "required": ["project_slug", "feature_slug", "screen_name", "description"],
     }
@@ -137,7 +145,12 @@ class GenerateMockupTool(BaseTool):
         node_modules = os.path.join(project_root, ".prism", "preview", "node_modules")
         first_dispatch = not os.path.isdir(node_modules)
         try:
-            prepare_scaffold(project_root, project_slug, tokens)
+            prepare_scaffold(
+                project_root,
+                project_slug,
+                tokens,
+                force=os.path.isfile(preview_package),
+            )
         except DesignDocError as e:
             return f"[generate_mockup refused: {e}]"
 
@@ -163,6 +176,7 @@ class GenerateMockupTool(BaseTool):
             quality=quality,
             components_hint=known,
             reference_images=reference_paths,
+            image_urls=kwargs.get("image_urls"),
             first_dispatch=first_dispatch,
         )
 
@@ -306,7 +320,7 @@ class GenerateImageTool(BaseTool):
     description = (
         "Generate a backdrop or illustration for a screen before composing it. "
         "Call this BEFORE generate_mockup, once per image the screen needs, then "
-        "pass the returned URLs into generate_mockup's visual_direction verbatim. "
+        "pass the returned URLs into generate_mockup's image_urls verbatim. "
         "Describe the image concretely and name the palette — vague prompts return "
         "generic stock-looking output."
     )

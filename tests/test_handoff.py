@@ -22,6 +22,7 @@ import unittest
 from agent.factory.handoff import (
     Handoff,
     ProposeHandoffTool,
+    build_dispatch_message,
     format_offer,
     phrase_confidence,
     validate,
@@ -159,6 +160,22 @@ class TestProposeHandoffTool(unittest.TestCase):
         ))
         action = self.repo.list_pending()[0]
         self.assertEqual(action["arguments"], {"message": "tighten the intro"})
+
+    def test_the_parked_action_includes_artifact_references(self):
+        run(self.tool.run(
+            target_agent="writer",
+            reason="ready to polish",
+            task="tighten the intro",
+            artifacts={"draft": "docs/draft.md"},
+        ))
+        action = self.repo.list_pending()[0]
+        self.assertEqual(
+            action["arguments"],
+            {"message": build_dispatch_message(
+                Handoff("writer", "ready to polish", "tighten the intro", artifacts={"draft": "docs/draft.md"})
+            )},
+        )
+        self.assertIn("docs/draft.md", action["arguments"]["message"])
 
     def test_history_index_is_captured_so_consent_must_come_after(self):
         # The self-approval defense: approving needs a genuine human turn

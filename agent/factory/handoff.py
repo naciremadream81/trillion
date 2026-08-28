@@ -187,6 +187,15 @@ def format_offer(handoff: Handoff, action_id: int, proposer: str) -> str:
     return "\n".join(lines)
 
 
+def build_dispatch_message(handoff: Handoff) -> str:
+    """The message frozen into the pending dispatch, including artifact refs."""
+    message = handoff.task
+    if handoff.artifacts:
+        refs = ", ".join(f"{k}={v}" for k, v in handoff.artifacts.items())
+        message = f"{message}\n\nIt should read: {refs}"
+    return message
+
+
 class ProposeHandoffTool(BaseTool):
     """
     The tool a spawned specialist calls to recommend the next step.
@@ -299,7 +308,7 @@ class ProposeHandoffTool(BaseTool):
         try:
             action_id = self.safety_repo.create_pending(
                 tool_name=self.dispatch_tool_namer(handoff.target_agent),
-                arguments={"message": handoff.task},
+                arguments={"message": build_dispatch_message(handoff)},
                 summary=(
                     f"Hand off to '{handoff.target_agent}' "
                     f"(proposed by {self.proposer_slug}): {handoff.reason}"

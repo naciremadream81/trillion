@@ -100,31 +100,34 @@ class TestEnvIsStripped(unittest.TestCase):
 
 class TestStreamParsing(unittest.TestCase):
     def test_a_tool_use_becomes_a_progress_event(self):
-        event = parse_event(
+        events = parse_event(
             '{"type":"assistant","message":{"content":['
             '{"type":"tool_use","name":"Read","input":{"file_path":"design.md"}}]}}'
         )
-        self.assertEqual(event, {"type": "tool", "name": "Read", "target": "design.md"})
+        self.assertEqual(
+            events,
+            [{"type": "tool", "name": "Read", "target": "design.md"}],
+        )
 
     def test_a_result_carries_cost_and_turns(self):
         event = parse_event(
             '{"type":"result","is_error":false,"result":"done",'
             '"total_cost_usd":1.23,"num_turns":7,"duration_ms":4200}'
-        )
+        )[0]
         self.assertEqual(event["total_cost_usd"], 1.23)
         self.assertEqual(event["num_turns"], 7)
 
     def test_an_error_result_is_flagged(self):
-        self.assertTrue(parse_event('{"type":"result","is_error":true,"result":"boom"}')["is_error"])
+        self.assertTrue(parse_event('{"type":"result","is_error":true,"result":"boom"}')[0]["is_error"])
 
     def test_malformed_lines_never_raise(self):
         # A single bad line must not kill a twenty-minute build.
         for line in ("", "   ", "garbage", "{", "[]", "null", '{"type":"unknown"}'):
             with self.subTest(line=line):
-                self.assertIsNone(parse_event(line))
+                self.assertEqual(parse_event(line), [])
 
     def test_an_oversized_result_is_bounded(self):
-        event = parse_event('{"type":"result","result":"' + "x" * 9000 + '"}')
+        event = parse_event('{"type":"result","result":"' + "x" * 9000 + '"}')[0]
         self.assertLessEqual(len(event["result"]), 2000)
 
 
@@ -181,7 +184,7 @@ class TestCompositionPrompt(unittest.TestCase):
         self.assertIn("/api/design/p/preview/assets/f/backdrop.png", prompt)
 
     def test_it_forbids_installing_uncatalogued_libraries(self):
-        self.assertIn("not installable", self.prompt)
+        self.assertIn("component_catalog.md", self.prompt)
 
     def test_the_premium_bar_differs_from_standard(self):
         standard = build_composition_prompt(
@@ -318,7 +321,7 @@ class TestCostCeilingIsEnforcedNotJustReserved(unittest.TestCase):
             '{"type":"assistant","message":{"model":"claude-sonnet-4-6","usage":'
             '{"input_tokens":1200,"output_tokens":300,"cache_read_input_tokens":900,'
             '"cache_creation_input_tokens":50}}}'
-        )
+        )[0]
         self.assertEqual(event["type"], "usage")
         self.assertEqual(event["input_tokens"], 1200)
         self.assertEqual(event["output_tokens"], 300)
@@ -331,20 +334,32 @@ class TestCostCeilingIsEnforcedNotJustReserved(unittest.TestCase):
         event = parse_event(
             '{"type":"assistant","message":{"content":[{"type":"tool_use",'
             '"name":"Write","input":{"file_path":"page.tsx"}}]}}'
-        )
+        )[0]
         self.assertEqual(event["type"], "tool")
 
-    def test_usage_present_alongside_a_tool_use_still_reports_the_tool(self):
-        # Regression: real assistant turns often carry message.usage on
-        # every turn AND a tool_use block in the same event. If usage were
-        # checked first, the tool progress event would be silently dropped
-        # on every turn that also calls a tool — breaking live progress.
-        event = parse_event(
+    def test_usage_present_alongside_a_tool_use_reports_both(self):
+        # Real assistant turns often carry message.usage on every turn AND a
+        # tool_use block in the same event. Both must surface so live progress
+        # and mid-flight cost tracking stay accurate.
+        events = parse_event(
             '{"type":"assistant","message":{"model":"claude-sonnet-4-6","usage":'
             '{"input_tokens":1200,"output_tokens":300},"content":['
             '{"type":"tool_use","name":"Read","input":{"file_path":"design.md"}}]}}'
         )
-        self.assertEqual(event, {"type": "tool", "name": "Read", "target": "design.md"})
+        self.assertEqual(
+            events,
+            [
+                {"type": "tool", "name": "Read", "target": "design.md"},
+                {
+                    "type": "usage",
+                    "model": "claude-sonnet-4-6",
+                    "input_tokens": 1200,
+                    "output_tokens": 300,
+                    "cache_write_tokens": 0,
+                    "cache_read_tokens": 0,
+                },
+            ],
+        )
 
     def test_the_runner_accepts_a_ceiling(self):
         import inspect

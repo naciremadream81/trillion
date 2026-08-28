@@ -117,39 +117,34 @@ def build_command(
     return argv
 
 
-def parse_event(line: str) -> dict | None:
+def parse_event(line: str) -> list[dict]:
     """
-    One NDJSON line from the stream into a small shape for the UI.
+    One NDJSON line from the stream into small shapes for the UI and budget.
 
     Claude Code's stream carries far more than a progress display needs, so
     this narrows rather than forwarding raw events: the playbook wants Sean
     to see "[CC] Read design.md", "[CC] npm run build" as it happens, not a
-    firehose. Unparseable lines return None rather than raising — a single
+    firehose. Unparseable lines return [] rather than raising — a single
     malformed line must not kill a twenty-minute build.
+
+    Real assistant events often carry both a tool_use block and message.usage
+    on the same turn. Both are returned so live progress and mid-flight cost
+    tracking stay accurate on tool-heavy composition runs.
     """
     line = (line or "").strip()
     if not line:
-        return None
+        return []
     try:
         data = json.loads(line)
     except (ValueError, TypeError):
-        return None
+        return []
     if not isinstance(data, dict):
-        return None
+        return []
 
     kind = data.get("type")
     if kind == "assistant":
         message = data.get("message") or {}
-        # Check for a tool_use content block FIRST. Real assistant events
-        # often carry message.usage on every turn (see below), so if usage
-        # were checked first, any turn that also calls a tool would never
-        # surface its {"type": "tool", ...} progress event — silently
-        # breaking the live-progress feature this module exists for. An
-        # assistant turn that both calls a tool AND carries usage reports
-        # the tool event and skips that one usage sample; that's fine, the
-        # mid-flight cost figure is explicitly an estimate and the
-        # authoritative total_cost_usd still arrives on the final "result"
-        # event regardless.
+        events: list[dict] = []
         for block in (message.get("content") or []):
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 name = block.get("name", "tool")
@@ -160,7 +155,7 @@ def parse_event(line: str) -> dict | None:
                         args.get("file_path") or args.get("path")
                         or args.get("command") or args.get("pattern") or ""
                     )[:120]
-                return {"type": "tool", "name": name, "target": target}
+                events.append({"type": "tool", "name": name, "target": target})
         usage = message.get("usage")
         if isinstance(usage, dict):
             # Confirmed against the real CLI: assistant events carry
@@ -168,27 +163,31 @@ def parse_event(line: str) -> dict | None:
             # makes a mid-flight cost ceiling possible at all — total_cost_usd
             # only arrives on the final result event, which is far too late to
             # stop a run that is already over budget.
-            return {
-                "type": "usage",
-                "model": str(message.get("model") or ""),
-                "input_tokens": int(usage.get("input_tokens") or 0),
-                "output_tokens": int(usage.get("output_tokens") or 0),
-                "cache_write_tokens": int(usage.get("cache_creation_input_tokens") or 0),
-                "cache_read_tokens": int(usage.get("cache_read_input_tokens") or 0),
-            }
-        return None
+            events.append(
+                {
+                    "type": "usage",
+                    "model": str(message.get("model") or ""),
+                    "input_tokens": int(usage.get("input_tokens") or 0),
+                    "output_tokens": int(usage.get("output_tokens") or 0),
+                    "cache_write_tokens": int(usage.get("cache_creation_input_tokens") or 0),
+                    "cache_read_tokens": int(usage.get("cache_read_input_tokens") or 0),
+                }
+            )
+        return events
     if kind == "result":
-        return {
-            "type": "result",
-            "is_error": bool(data.get("is_error")),
-            "result": str(data.get("result") or "")[:2000],
-            "total_cost_usd": float(data.get("total_cost_usd") or 0.0),
-            "num_turns": int(data.get("num_turns") or 0),
-            "duration_ms": int(data.get("duration_ms") or 0),
-        }
+        return [
+            {
+                "type": "result",
+                "is_error": bool(data.get("is_error")),
+                "result": str(data.get("result") or "")[:2000],
+                "total_cost_usd": float(data.get("total_cost_usd") or 0.0),
+                "num_turns": int(data.get("num_turns") or 0),
+                "duration_ms": int(data.get("duration_ms") or 0),
+            }
+        ]
     if kind == "system" and data.get("subtype") == "init":
-        return {"type": "start", "model": str(data.get("model") or "")}
-    return None
+        return [{"type": "start", "model": str(data.get("model") or "")}]
+    return []
 
 
 async def spawn_claude_code(
@@ -256,43 +255,41 @@ async def spawn_claude_code(
     async def drain() -> None:
         assert process.stdout is not None
         async for raw in process.stdout:
-            event = parse_event(raw.decode("utf-8", "replace"))
-            if event is None:
-                continue
-            result.events.append(event)
-            if event["type"] == "usage":
-                result.estimated_cost_usd += compute_cost(
-                    event["model"] or (model or ""),
-                    input_tokens=event["input_tokens"],
-                    output_tokens=event["output_tokens"],
-                    cache_write_tokens=event["cache_write_tokens"],
-                    cache_read_tokens=event["cache_read_tokens"],
-                )
-                if max_cost_usd is not None and result.estimated_cost_usd > max_cost_usd:
-                    result.over_budget = True
-                    result.error = (
-                        f"stopped at an estimated ${result.estimated_cost_usd:.2f}, "
-                        f"over the ${max_cost_usd:.2f} per-dispatch ceiling"
+            for event in parse_event(raw.decode("utf-8", "replace")):
+                result.events.append(event)
+                if event["type"] == "usage":
+                    result.estimated_cost_usd += compute_cost(
+                        event["model"] or (model or ""),
+                        input_tokens=event["input_tokens"],
+                        output_tokens=event["output_tokens"],
+                        cache_write_tokens=event["cache_write_tokens"],
+                        cache_read_tokens=event["cache_read_tokens"],
                     )
+                    if max_cost_usd is not None and result.estimated_cost_usd > max_cost_usd:
+                        result.over_budget = True
+                        result.error = (
+                            f"stopped at an estimated ${result.estimated_cost_usd:.2f}, "
+                            f"over the ${max_cost_usd:.2f} per-dispatch ceiling"
+                        )
+                        try:
+                            process.kill()
+                        except ProcessLookupError:
+                            pass
+                        return
+                if event["type"] == "result":
+                    result.result_text = event["result"]
+                    result.total_cost_usd = event["total_cost_usd"]
+                    result.num_turns = event["num_turns"]
+                    result.duration_seconds = event["duration_ms"] / 1000.0
+                    if event["is_error"]:
+                        result.error = event["result"] or "claude reported an error"
+                if on_event is not None:
                     try:
-                        process.kill()
-                    except ProcessLookupError:
+                        on_event(event)
+                    except Exception:
+                        # An observer that throws must never take down the run —
+                        # orchestration.md Tier 3, fire-and-forget side effects.
                         pass
-                    return
-            if event["type"] == "result":
-                result.result_text = event["result"]
-                result.total_cost_usd = event["total_cost_usd"]
-                result.num_turns = event["num_turns"]
-                result.duration_seconds = event["duration_ms"] / 1000.0
-                if event["is_error"]:
-                    result.error = event["result"] or "claude reported an error"
-            if on_event is not None:
-                try:
-                    on_event(event)
-                except Exception:
-                    # An observer that throws must never take down the run —
-                    # orchestration.md Tier 3, fire-and-forget side effects.
-                    pass
 
     try:
         await asyncio.wait_for(asyncio.gather(drain(), drain_stderr()), timeout=timeout_seconds)
