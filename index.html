@@ -2906,6 +2906,12 @@
         : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '');
       mediaRecorder = mimeType ? new MediaRecorder(mediaStream, { mimeType }) : new MediaRecorder(mediaStream);
       sttReset();
+      // Close any socket left over from a previous turn BEFORE opening a
+      // new one. startListening used to just overwrite sttSocket, which
+      // leaked the old Deepgram relay (and its paid stream) whenever an
+      // early-return path forgot closeSttSocket — tap-tap cancel, then
+      // hands-free re-arm, stacked one live socket per empty turn.
+      if (sttSocket) closeSttSocket();
       sttSocket = openSttSocket();
       mediaRecorder.ondataavailable = (e) => {
         if (!e.data || e.data.size <= 0) return;
@@ -2988,7 +2994,15 @@
         handsFreeAdvance('empty');
         return;
       }
-      if (blob.size < 500) { setHint(idleHintText()); handsFreeAdvance('empty'); return; } // tap-tap with no speech = cancel
+      if (blob.size < 500) {
+        // Same early-return class as vadNoSpeechAbort above: without this
+        // the streaming socket leaks per tap-tap cancel, then stacks when
+        // hands-free re-arms startListening().
+        closeSttSocket();
+        setHint(idleHintText());
+        handsFreeAdvance('empty');
+        return;
+      } // tap-tap with no speech = cancel
       window.setStatus('processing');
       setHint('Transcribing…');
 

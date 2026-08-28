@@ -13,6 +13,7 @@ Tier 6: the confirmation gate sits between tool selection and tool execution.
 The rule: one core, many adapters. Never fork the logic for voice vs text.
 """
 
+import asyncio
 import contextvars
 from typing import AsyncIterator
 
@@ -71,6 +72,14 @@ class Agent:
         self.gate = gate
         self.history: list[dict] = []
         self._memory_facts = memory_facts or []
+        # One turn at a time per Agent. serve.py reuses one Agent per browser
+        # session, and barge-in (index.html abort + a new POST) routinely
+        # starts the next /api/chat before the previous handler has aclose()'d.
+        # Without this lock both turn()s mutate self.history at once, then the
+        # cancelled turn's rollback (`del history[turn_start_index:]`) can
+        # wipe the live one. Serializing here is the whole defense — callers
+        # do not have to remember.
+        self._turn_lock = asyncio.Lock()
 
         # A spawned Factory specialist (agent/factory/dispatch.py's
         # ConfigDrivenAgent) passes its own spawned_agents row's prompt here
@@ -126,7 +135,26 @@ class Agent:
         In Tier 2, this loop also handles tool calls: if the model requests
         a tool, execute it, feed the result back, and keep going until the
         model is done — all transparently.
+
+        Overlapping callers (barge-in, two tabs sharing a session cookie)
+        wait their turn rather than interleaving history writes.
         """
+        async with self._turn_lock:
+            inner = self._run_turn(user_input)
+            try:
+                async for chunk in inner:
+                    yield chunk
+            finally:
+                # aclose() on this wrapper throws GeneratorExit at `yield`
+                # above; without an explicit inner aclose the inner
+                # generator's rollback `finally` may run later (or never)
+                # and slice history from a stale turn_start_index after the
+                # next turn has already written. Hold the lock until that
+                # unwind finishes so the next caller sees a clean history.
+                await inner.aclose()
+
+    async def _run_turn(self, user_input: str) -> AsyncIterator[str]:
+        """The body of one turn. Caller holds `_turn_lock`."""
         # Tier 5: if the user is just signing off, don't take the last word.
         # Runs before anything is recorded or sent — a goodbye costs nothing.
         # Only ends a conversation the assistant has actually been part of.
