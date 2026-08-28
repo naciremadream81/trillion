@@ -22,9 +22,13 @@ noted at its function:
     always binds *some* host), so the three spec states collapse to two:
     bound loopback (the safe default) or bound publicly (guarded against
     at startup by startup_guard.check_bind_safety).
-csrf-origin-gate reports "absent" rather than being silently built here —
-no origin-check middleware exists in this codebase yet (see the playbooks
-plan's P7 notes); the shield's job is to surface that gap, not paper over it.
+  - csrf-origin-gate: agent/security/origin.py now exists and is wired into
+    serve.py, so this no longer hard-reports "absent". It is checked by
+    running check_origin() against a forged cross-origin POST and requiring
+    a refusal — see _csrf_origin_gate for why existence alone is too weak a
+    test for a rail whose job is to say no.
+  - csp-status: read from the header that actually gets stamped, not from
+    the TRILLION_CSP_ENFORCE flag, for the same reason.
 """
 
 from __future__ import annotations
@@ -159,11 +163,34 @@ def _hardline_blocklist() -> Signal:
     return Signal("hardline-blocklist", "Hardline blocklist", "0 patterns", -20, "critical")
 
 
-def _csp_status() -> Signal:
-    # agent/security/headers.py ships CSP_REPORT_ONLY_POLICY unconditionally
-    # via Content-Security-Policy-Report-Only; there is no enforcing mode
-    # wired up yet (see that module's docstring).
-    return Signal("csp-status", "CSP status", "report-only", -10, "info")
+def _csp_status(settings) -> Signal:
+    # Follows _csrf_origin_gate's standard rather than the weaker "does the
+    # setting say yes" check: actually stamp a header dict in the configured
+    # mode and look at what came out. A flag that's on while the enforcing
+    # header never ships would otherwise score as hardened.
+    try:
+        from .headers import apply_security_headers
+
+        headers: dict = {}
+        apply_security_headers(headers, settings.csp_enforce)
+    except Exception:
+        return Signal(
+            "csp-status", "CSP status", "disabled", -20, "warning",
+            "Security headers could not be applied.",
+        )
+
+    if "Content-Security-Policy" in headers:
+        return Signal("csp-status", "CSP status", "enforcing", 0, "ok")
+    if "Content-Security-Policy-Report-Only" in headers:
+        return Signal(
+            "csp-status", "CSP status", "report-only", -10, "info",
+            "Read GET /api/security/csp-violations, widen the policy by what "
+            "actually got blocked, then set TRILLION_CSP_ENFORCE=true.",
+        )
+    return Signal(
+        "csp-status", "CSP status", "disabled", -20, "warning",
+        "No CSP header is being sent at all.",
+    )
 
 
 def _token_scope_audit() -> Signal:
@@ -262,7 +289,7 @@ def collect_signals(settings, registry) -> list[Signal]:
         _log_redaction(),
         _subprocess_envs(),
         _hardline_blocklist(),
-        _csp_status(),
+        _csp_status(settings),
         _token_scope_audit(),
         _db_readonly_role(),
         _cve_scan(),

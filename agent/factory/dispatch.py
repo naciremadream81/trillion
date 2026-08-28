@@ -101,12 +101,35 @@ def get_dispatch_activity() -> DispatchActivity:
 class ConfigDrivenAgent:
     """A spawned specialist, fully specified by a spawned_agents row."""
 
-    def __init__(self, row: dict, provider, base_registry) -> None:
+    def __init__(
+        self, row: dict, provider, base_registry, safety_repo=None, factory_repo=None
+    ) -> None:
         self.slug = row["slug"]
         self.name = row["name"]
         restricted_registry = (
             base_registry.subset(row["tool_allowlist"]) if base_registry else None
         )
+        # orchestration.md Tier 5. Granted outside the row's tool_allowlist on
+        # purpose: proposing a handoff executes nothing, and every specialist
+        # should be able to say "someone else should take this from here". It
+        # needs both repos — safety_repo to park the proposal, factory_repo to
+        # check the target is a real active agent — so an incomplete wiring
+        # (either repo missing) simply means no handoffs, never a half-working
+        # one that parks proposals nobody can approve.
+        if restricted_registry is not None and safety_repo is not None and factory_repo is not None:
+            from ..core import current_agent_history
+            from .handoff import ProposeHandoffTool
+
+            restricted_registry.register(
+                ProposeHandoffTool(
+                    safety_repo=safety_repo,
+                    history_provider=lambda: current_agent_history() or [],
+                    active_agents_provider=lambda: {
+                        r["slug"] for r in factory_repo.list_active_agents()
+                    },
+                    proposer_slug=self.slug,
+                )
+            )
         # No gate on a spawned specialist, by construction rather than by
         # oversight: its allowlist is intersected with factory_allowed at mint
         # time, and every tool that isn't read-only is factory_allowed = False.
@@ -114,6 +137,41 @@ class ConfigDrivenAgent:
         # it must not be able to approve one either, since its history isn't
         # Sean's conversation. Tier 6's untrusted-content pass belongs at the
         # registry for exactly this reason: that one *does* need to reach here.
+        # orchestration.md Tier 2, "a declared model per agent". NULL means
+        # "use Trillion's" — the overwhelmingly common case, and the reason
+        # this builds a second provider only when a model is actually
+        # declared rather than always. Falls back to the shared provider if
+        # the override can't be built (an unknown model name, a missing SDK):
+        # a specialist running on the default model is a far better failure
+        # than a specialist that won't run at all.
+        # Captured before the possible reassignment below, so `_owns_provider`
+        # can tell "built our own client" apart from "fell back to the shared
+        # one" purely by identity — see aclose().
+        shared_provider = provider
+        declared_model = (row.get("model") or "").strip()
+        if declared_model:
+            try:
+                # Same provider *family* as the main agent, different model.
+                # Rebuilt from the shared instance's own class rather than
+                # from TRILLION_PROVIDER, because main.py's --provider flag
+                # can override that env var — reading the env here would
+                # silently put a specialist on a different provider than the
+                # conversation that dispatched it.
+                provider = type(provider)(declared_model)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "specialist %s declares model %r but it could not be built (%s); "
+                    "falling back to the default model",
+                    self.slug, declared_model, e,
+                )
+
+        # True only when this instance built its own provider (its own SDK
+        # client, its own connection pool) rather than falling back to the
+        # shared one main.py/the caller owns. Guards aclose() below: closing
+        # the shared provider out from under the main agent or a sibling
+        # specialist would be a bug, not a fix.
+        self._owns_provider = provider is not shared_provider
+
         self._agent = Agent(
             provider=provider,
             tool_registry=restricted_registry,
@@ -125,6 +183,11 @@ class ConfigDrivenAgent:
         async for chunk in self._agent.turn(message):
             reply += chunk
         return reply
+
+    async def aclose(self) -> None:
+        """Close the provider's connection, but only if we built it ourselves."""
+        if self._owns_provider:
+            await self._agent.provider.aclose()
 
 
 class DispatchTool:
@@ -146,7 +209,9 @@ class DispatchTool:
     risk = LOW
     requires_confirmation = None
 
-    def __init__(self, row: dict, provider, base_registry) -> None:
+    def __init__(
+        self, row: dict, provider, base_registry, safety_repo=None, factory_repo=None
+    ) -> None:
         self.name = dispatch_tool_name(row["slug"])
         self.description = (
             f"Delegate to the '{row['name']}' specialist agent. {row['system_prompt'][:200]}"
@@ -156,7 +221,9 @@ class DispatchTool:
             "properties": {"message": {"type": "string", "description": "What to ask the specialist."}},
             "required": ["message"],
         }
-        self._sub_agent = ConfigDrivenAgent(row, provider, base_registry)
+        self._sub_agent = ConfigDrivenAgent(
+            row, provider, base_registry, safety_repo=safety_repo, factory_repo=factory_repo
+        )
 
     def definition(self) -> dict:
         return {"name": self.name, "description": self.description, "input_schema": self.input_schema}
@@ -172,6 +239,9 @@ class DispatchTool:
         finally:
             activity.mark_finished(self._sub_agent.slug)
 
+    async def aclose(self) -> None:
+        await self._sub_agent.aclose()
+
 
 class RegistryWatcher:
     """
@@ -180,8 +250,15 @@ class RegistryWatcher:
     ones that were disabled or removed.
     """
 
-    def __init__(self, repo: FactoryRepo, provider, registry, base_registry=None) -> None:
+    def __init__(
+        self, repo: FactoryRepo, provider, registry, base_registry=None, safety_repo=None
+    ) -> None:
         self.repo = repo
+        # Passed through to every DispatchTool this builds, so a specialist can
+        # reach propose_handoff (orchestration.md Tier 5). None means handoffs
+        # are simply unavailable — the same best-effort posture serve.py takes
+        # with the gate itself.
+        self.safety_repo = safety_repo
         self.provider = provider
         self.registry = registry
         # The registry a spawned agent's own tools are drawn from — defaults
@@ -190,29 +267,59 @@ class RegistryWatcher:
         self.base_registry = base_registry if base_registry is not None else registry
         self._known: dict[str, str] = {}  # slug -> system_prompt, to detect changes
 
-    def sync_once(self) -> None:
+    async def sync_once(self) -> None:
         active = self.repo.list_active_agents()
         active_by_slug = {row["slug"]: row for row in active}
 
         # Unregister anything we previously registered that's no longer active.
+        # Close its provider (if it owned one) BEFORE unregistering, so a
+        # superseded specialist's connection pool never leaks.
         for slug in list(self._known):
             if slug not in active_by_slug:
+                existing = self.registry.get(dispatch_tool_name(slug))
+                if existing is not None:
+                    await existing.aclose()
                 self.registry.unregister(dispatch_tool_name(slug))
                 del self._known[slug]
 
         # Register new agents, or re-register ones whose prompt/tools changed.
         for slug, row in active_by_slug.items():
-            fingerprint = row["system_prompt"] + "|" + ",".join(row["tool_allowlist"])
+            # The fingerprint must cover everything DispatchTool bakes in at
+            # construction, or a change to that field silently never takes
+            # effect on the live tool. `model` is in here for exactly that
+            # reason: the provider instance is built once, in
+            # ConfigDrivenAgent.__init__, so a model change has to force a
+            # rebuild rather than relying on a caller remembering to
+            # invalidate.
+            fingerprint = "|".join(
+                (
+                    row["system_prompt"],
+                    ",".join(row["tool_allowlist"]),
+                    row.get("model") or "",
+                )
+            )
             if self._known.get(slug) == fingerprint:
                 continue
-            tool = DispatchTool(row, self.provider, self.base_registry)
+            # The fingerprint changed — the tool we're about to overwrite may
+            # hold its own provider (a declared-model specialist). Close it
+            # before registering its replacement, same reasoning as above.
+            existing = self.registry.get(dispatch_tool_name(slug))
+            if existing is not None:
+                await existing.aclose()
+            tool = DispatchTool(
+                row,
+                self.provider,
+                self.base_registry,
+                safety_repo=self.safety_repo,
+                factory_repo=self.repo,
+            )
             self.registry.register(tool)
             self._known[slug] = fingerprint
 
     async def run_forever(self, poll_interval: float = 30.0) -> None:
         while True:
             try:
-                self.sync_once()
+                await self.sync_once()
             except Exception:  # noqa: BLE001 — a broken poll must never kill the watcher
                 logger.exception("RegistryWatcher.sync_once failed")
             await asyncio.sleep(poll_interval)

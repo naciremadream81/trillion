@@ -30,6 +30,12 @@ _PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "<redacted-api-key>"),
     # JWT-shaped strings: three base64url segments separated by dots.
     (re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"), "<redacted-jwt>"),
+    # Bitcoin payout addresses — playbooks/btc-mining-tracker.md's privacy
+    # guardrail. Not a credential, but it is Sean's financial identity: an
+    # address in a log line ties this machine to a public ledger of every
+    # payout he has ever received. bech32 (bc1...), plus legacy P2PKH/P2SH.
+    (re.compile(r"\bbc1[023456789acdefghjklmnpqrstuvwxyz]{11,71}\b"), "<redacted-btc-address>"),
+    (re.compile(r"\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b"), "<redacted-btc-address>"),
     # Connection-string passwords: scheme://user:pass@host -> mask only pass.
     (
         re.compile(r"(\b[a-zA-Z][a-zA-Z0-9+.-]*://[^:/\s@]+:)([^@/\s]+)(@)"),

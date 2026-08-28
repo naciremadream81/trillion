@@ -187,8 +187,39 @@ class Settings:
     # routes by agent/security/auth.py's bearer_auth_middleware, so rotating
     # it immediately revokes anyone holding the old value. When it's empty
     # (the loopback-only default) that middleware is a no-op.
+    # ── Design agent (playbooks/design-subagent.md) ─────────────────────────
+    # Off unless enabled: it spawns Claude Code, which writes files and spends
+    # money, so it should not appear in the registry by accident. Requires the
+    # `claude` CLI on PATH.
+    design_agent_enabled: bool = False
+    design_per_dispatch_usd: float = 5.0
+    design_daily_usd: float = 15.0
+    # Model for the composition subprocess. None = Claude Code's own default.
+    design_compose_model: str = ""
+
+    # ── Mining tracker (playbooks/btc-mining-tracker.md) ────────────────────
+    # The payout address the tracker follows. Empty disables the feature
+    # entirely — build_mining_checks() returns nothing rather than erroring,
+    # mirroring how the Code Sentinel self-skips without a GitHub token.
+    # This is financial data: agent/security/log_redact.py masks it, and it
+    # is never put in a prompt.
+    mining_wallet: str = ""
+    mining_retention_days: int = 30
+
     web_host: str = "127.0.0.1"
     web_auth_token: str = ""
+    # §2.1 rotation overlap: the outgoing token, accepted alongside the
+    # current one for as long as this is set. Empty in the steady state —
+    # it exists only for the window in which callers are being moved over
+    # one at a time. agent/security/auth.py::is_authorized honours it;
+    # startup_guard deliberately does not, because a bind is only safe on
+    # the strength of the *current* token.
+    web_auth_token_prev: str = ""
+    # §2.2: CSP enforcement. Off means report-only, which is where a policy
+    # starts and stays until GET /api/security/csp-violations shows a clean
+    # session. Flipping this is the last step of that process, never the
+    # first — see agent/security/headers.py.
+    csp_enforce: bool = False
 
     def builds_paused(self) -> bool:
         """
@@ -235,6 +266,14 @@ def get_settings() -> Settings:
         github_token=os.getenv("GITHUB_TOKEN", ""),
         github_username=os.getenv("GITHUB_USERNAME", ""),
         github_watched_repos=_env_list("TRILLION_GITHUB_WATCHED_REPOS"),
+        design_agent_enabled=_env_bool("TRILLION_DESIGN_AGENT"),
+        design_per_dispatch_usd=float(os.getenv("TRILLION_DESIGN_PER_DISPATCH_USD", "5") or 5),
+        design_daily_usd=float(os.getenv("TRILLION_DESIGN_DAILY_USD", "15") or 15),
+        design_compose_model=os.getenv("TRILLION_DESIGN_COMPOSE_MODEL", "").strip(),
+        mining_wallet=os.getenv("TRILLION_MINING_WALLET", "").strip(),
+        mining_retention_days=int(os.getenv("TRILLION_MINING_RETENTION_DAYS", "30") or 30),
         web_host=os.getenv("TRILLION_WEB_HOST", "127.0.0.1"),
         web_auth_token=os.getenv("TRILLION_WEB_AUTH_TOKEN", ""),
+        web_auth_token_prev=os.getenv("TRILLION_WEB_AUTH_TOKEN_PREV", ""),
+        csp_enforce=_env_bool("TRILLION_CSP_ENFORCE"),
     )

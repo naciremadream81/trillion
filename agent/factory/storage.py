@@ -21,7 +21,10 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+
+from .. import storage_utils
 from datetime import datetime, timedelta, timezone
+
 
 # Terminal/non-terminal states for the spawn_tasks state machine. Kept here
 # (not just in code that reads this module) so storage and pipeline agree on
@@ -140,10 +143,16 @@ class FactoryRepo:
 
     # ── Connection / schema ───────────────────────────────────────────────────
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _connect(self):
+        """
+        Connection context manager — see agent/storage_utils.py.
+
+        Was a bare `sqlite3.connect(...)` returned raw. Every call site wraps
+        it in `with`, and sqlite3's own context manager commits without
+        closing, so each request leaked a connection. Same call-site shape,
+        with the close that was missing.
+        """
+        return storage_utils.connect(self.db_path)
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
@@ -362,6 +371,28 @@ class FactoryRepo:
             self.update_status(task_id, FAILED, failure_reason="max revision rounds exceeded")
             return FAILED
         return PENDING
+
+    def set_agent_model(self, slug: str, model: str | None) -> bool:
+        """
+        Declare (or clear) the model a spawned specialist runs on.
+
+        orchestration.md Tier 2 wants a model per agent so cheap work runs on
+        a cheap model. None/"" clears the override back to Trillion's own
+        model. Returns whether a row was actually updated, so a caller can
+        tell a typo'd slug from a successful change.
+
+        Deliberately not validated against a list of known model names: the
+        set of valid names is the provider's business and changes without
+        this code changing. agent/factory/dispatch.py falls back to the
+        default model and logs if the name turns out to be unusable, which
+        is the right place for that to surface.
+        """
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE spawned_agents SET model = ? WHERE slug = ?",
+                ((model or "").strip() or None, slug),
+            )
+            return bool(cur.rowcount)
 
     def list_active_agents(self) -> list[dict]:
         with self._connect() as conn:

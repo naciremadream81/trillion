@@ -100,3 +100,15 @@ class BaseProvider(ABC):
     def model_name(self) -> str:
         """Human-readable model identifier, for logs and the system prompt."""
         ...
+
+    async def aclose(self) -> None:
+        """
+        Release any persistent connection the provider holds.
+
+        Providers with no persistent connection (e.g. one that opens a fresh
+        session per request) can leave this as a no-op — it is deliberately
+        not abstract, so existing and future providers keep working without
+        overriding it. Providers that construct a persistent SDK client in
+        __init__ (ClaudeProvider, OpenAIProvider) override this to close it.
+        """
+        return None

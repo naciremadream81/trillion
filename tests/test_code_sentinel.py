@@ -50,6 +50,7 @@ class FakeClient:
         self.events = {}
         self.error_repos = set()
         self.check_runs_calls = []
+        self.repo_events_calls = []
 
     async def get_default_branch(self, repo):
         if repo in self.error_repos:
@@ -62,6 +63,7 @@ class FakeClient:
         return self.commits.get((repo, sha), {})
 
     async def list_repo_events(self, repo):
+        self.repo_events_calls.append(repo)
         if repo in self.error_repos:
             raise RuntimeError("boom")
         return self.events.get(repo, [])
@@ -286,6 +288,23 @@ class TestHotfixPushCheck(unittest.TestCase):
         self.assertEqual(notices, [])
         # Still tracked, so the same push isn't re-fetched/re-evaluated next tick.
         self.assertEqual(cursor["owner/repo"]["hotfix/urgent-fix"], "abc123")
+
+    def test_repo_events_fetched_once_per_repo_even_with_multiple_hotfix_branches(self):
+        # list_repo_events is repo-scoped, not branch-scoped, so its result is
+        # identical for every hotfix branch checked in the same repo on the
+        # same tick. Fetching it per-branch burns GitHub API rate limit for
+        # no benefit — it should be fetched at most once per repo per run().
+        client = FakeClient()
+        client.branches["owner/repo"] = [
+            {"name": "hotfix/urgent-fix", "commit": {"sha": "abc123"}},
+            {"name": "rollback/urgent-fix", "commit": {"sha": "def456"}},
+        ]
+        client.events["owner/repo"] = [push_event("sean", "hotfix/urgent-fix", "abc123")]
+        check = HotfixPushCheck(client, ["owner/repo"], cadence_seconds=60.0, username="sean")
+        notices, _ = run(check.run({}))
+        self.assertEqual(len(notices), 1)
+        self.assertIn("rollback/urgent-fix", notices[0].message)
+        self.assertEqual(client.repo_events_calls, ["owner/repo"])
 
     def test_someone_elses_hotfix_push_still_notified_when_username_set(self):
         client = FakeClient()

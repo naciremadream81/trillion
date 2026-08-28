@@ -90,6 +90,16 @@ EXEMPT_PATHS = frozenset({"/api/security/csp-report"})
 
 # GET/HEAD/OPTIONS are not gated: they're supposed to be side-effect free, and
 # every GET route here is a read.
+#
+# WITH ONE EXCEPTION — a WebSocket upgrade. It arrives as a GET, so it would
+# sail through the rule above, and unlike fetch() it is NOT subject to the
+# same-origin policy: any page on the internet can open a socket to
+# ws://localhost:8123 and the browser will neither block it nor ask for CORS
+# permission. /api/transcribe/stream relays audio to a paid Deepgram account
+# and returns the transcript, so an ungated upgrade is a stranger spending
+# Sean's credits and reading what his microphone hears. Upgrades are
+# therefore guarded on the same three signals as a POST — see
+# _is_websocket_upgrade below.
 GUARDED_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 # Sec-Fetch-Site values that mean "this request did not originate from a page
@@ -139,6 +149,22 @@ def _hostname_of(value: str) -> str:
     return (hostname or "").lower()
 
 
+def _is_websocket_upgrade(headers) -> bool:
+    """
+    Whether this request is a WebSocket handshake.
+
+    `Connection` is a comma-separated list of tokens ("keep-alive, Upgrade"),
+    so this is a membership test rather than an equality one — matching on
+    the whole header value would miss real handshakes from real browsers.
+    Both header values are case-insensitive per RFC 6455 §4.1.
+    """
+    upgrade = (headers.get("Upgrade") or "").strip().lower()
+    if upgrade != "websocket":
+        return False
+    connection = (headers.get("Connection") or "").lower()
+    return "upgrade" in {token.strip() for token in connection.split(",")}
+
+
 def check_origin(
     method: str,
     path: str,
@@ -153,7 +179,7 @@ def check_origin(
     headers.py's apply_security_headers() — so the decision can be tested
     against a plain dict, with no aiohttp Request and no event loop.
     """
-    if method.upper() not in GUARDED_METHODS:
+    if method.upper() not in GUARDED_METHODS and not _is_websocket_upgrade(headers):
         return None
     if not path.startswith(PROTECTED_PREFIX) or path in EXEMPT_PATHS:
         return None

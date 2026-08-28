@@ -77,7 +77,7 @@ class TestFactoryCliCommands(unittest.TestCase):
             factory = main_module.FactoryContext(
                 repo=self.repo, provider=provider, registry=self.registry, background_tasks=set()
             )
-            main_module.handle_slash(
+            await main_module.handle_slash(
                 "/spawn a specialist that reviews SQL migrations", None, "claude", factory
             )
             self.assertEqual(len(factory.background_tasks), 1)
@@ -87,7 +87,7 @@ class TestFactoryCliCommands(unittest.TestCase):
             self.assertEqual(len(pending), 1)
             task_id = pending[0]["id"]
 
-            main_module.handle_slash(f"/approve {task_id}", None, "claude", factory)
+            await main_module.handle_slash(f"/approve {task_id}", None, "claude", factory)
             active = self.repo.list_active_agents()
             self.assertEqual(len(active), 1)
             self.assertEqual(active[0]["slug"], "sql-migration-review")
@@ -102,13 +102,15 @@ class TestFactoryCliCommands(unittest.TestCase):
             factory = main_module.FactoryContext(
                 repo=self.repo, provider=provider, registry=self.registry, background_tasks=set()
             )
-            main_module.handle_slash(
+            await main_module.handle_slash(
                 "/spawn a specialist that reviews SQL migrations", None, "claude", factory
             )
             await asyncio.gather(*factory.background_tasks)
             task_id = self.repo.list_pending_approval()[0]["id"]
 
-            main_module.handle_slash(f"/reject {task_id} needs more detail on tool usage", None, "claude", factory)
+            await main_module.handle_slash(
+                f"/reject {task_id} needs more detail on tool usage", None, "claude", factory
+            )
             self.assertEqual(len(factory.background_tasks), 1)  # revision scheduled
             await asyncio.gather(*factory.background_tasks)
 
@@ -123,18 +125,18 @@ class TestFactoryCliCommands(unittest.TestCase):
             repo=self.repo, provider=FakeProvider([]), registry=self.registry, background_tasks=set()
         )
         # Should not raise — errors are caught and printed.
-        main_module.handle_slash("/approve 999", None, "claude", factory)
+        asyncio.run(main_module.handle_slash("/approve 999", None, "claude", factory))
 
     def test_reject_without_feedback_shows_usage_not_crash(self):
         factory = main_module.FactoryContext(
             repo=self.repo, provider=FakeProvider([]), registry=self.registry, background_tasks=set()
         )
-        main_module.handle_slash("/reject 1", None, "claude", factory)
+        asyncio.run(main_module.handle_slash("/reject 1", None, "claude", factory))
         self.assertEqual(len(factory.background_tasks), 0)
 
     def test_factory_commands_without_factory_context_dont_crash(self):
-        main_module.handle_slash("/pending", None, "claude", None)
-        main_module.handle_slash("/spawn something", None, "claude", None)
+        asyncio.run(main_module.handle_slash("/pending", None, "claude", None))
+        asyncio.run(main_module.handle_slash("/spawn something", None, "claude", None))
 
 
 if __name__ == "__main__":

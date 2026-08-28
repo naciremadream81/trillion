@@ -155,9 +155,14 @@ static assets requires a matching `Authorization: Bearer <token>` header
 whenever `TRILLION_WEB_AUTH_TOKEN` is set. Rotating the token immediately
 revokes anyone holding the old value.
 
+**Fast path — a leak is an emergency, so cut the old token dead:**
+
 1. Generate a new token: `python -c "import secrets;
    print(secrets.token_urlsafe(32))"`.
-2. Update `TRILLION_WEB_AUTH_TOKEN` in `.env` in dev and prod.
+2. Update `TRILLION_WEB_AUTH_TOKEN` in `.env` in dev and prod. Leave
+   `TRILLION_WEB_AUTH_TOKEN_PREV` **empty** — this is the one case where you
+   do *not* want an overlap window, because the value you'd be keeping alive
+   is the leaked one.
 3. Restart Trillion (`trillion serve` / `python serve.py`). The old token
    stops working immediately; any client still using it gets `401`.
 4. If `web_host` is bound non-loopback, this is the meaningful fix — the
@@ -168,6 +173,29 @@ revokes anyone holding the old value.
    `Authorization` header (the stock `index.html` doesn't), don't rely on
    the token alone for a public bind — keep `web_host` at loopback, or put a
    reverse proxy in front that injects the header.
+
+**Planned rotation — not a leak, just hygiene.** Use the overlap window
+(`agent-security.md` §2.1) so callers move over one at a time instead of all
+at once:
+
+1. Generate the new token as above.
+2. Set `TRILLION_WEB_AUTH_TOKEN_PREV` to the *current* value, and
+   `TRILLION_WEB_AUTH_TOKEN` to the new one. Restart. Both now authenticate.
+3. Move each caller (reverse proxy, scripts, anything holding the header)
+   onto the new value. Nothing breaks mid-flight, because the old value is
+   still accepted.
+4. Clear `TRILLION_WEB_AUTH_TOKEN_PREV` and restart. The old value is dead.
+   Confirm with a request carrying it: it must now return `401`.
+
+Keep the window short — hours, not weeks. Two live tokens is twice the
+surface, and step 4 is the one that's easy to forget.
+
+**On lockouts.** Ten failed attempts from one address inside five minutes
+lock that address out for fifteen minutes (`429` + `Retry-After`). If *you*
+are locked out mid-incident, don't disable the limiter — wait it out, or
+restart the process, which clears the in-memory state. Note that behind a
+reverse proxy every client shares the proxy's bucket, so a lockout during an
+attack can shut you out too; that's the deliberate fail-closed direction.
 
 ## After
 

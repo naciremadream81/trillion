@@ -73,7 +73,7 @@ class TestSoftwareFactoryCliCommands(unittest.TestCase):
             sf = main_module.SoftwareFactoryContext(
                 repo=self.repo, provider=provider, settings=self.settings, background_tasks=set()
             )
-            main_module.handle_slash(
+            await main_module.handle_slash(
                 "/build a CLI that converts markdown tables to CSV", None, "claude", None, sf
             )
             self.assertEqual(len(sf.background_tasks), 1)
@@ -82,7 +82,7 @@ class TestSoftwareFactoryCliCommands(unittest.TestCase):
             task = self.repo.get_build_task(1)
             self.assertEqual(task["status"], BUILT)
 
-            main_module.handle_slash("/builds", None, "claude", None, sf)  # should not crash
+            await main_module.handle_slash("/builds", None, "claude", None, sf)  # should not crash
 
         asyncio.run(scenario())
 
@@ -94,13 +94,13 @@ class TestSoftwareFactoryCliCommands(unittest.TestCase):
             sf = main_module.SoftwareFactoryContext(
                 repo=self.repo, provider=provider, settings=self.settings, background_tasks=set()
             )
-            main_module.handle_slash(
+            await main_module.handle_slash(
                 "/build a CLI that converts markdown tables to CSV", None, "claude", None, sf
             )
             await asyncio.gather(*sf.background_tasks)
 
             with main_module.console.capture() as capture:
-                main_module.handle_slash("/builds", None, "claude", None, sf)
+                await main_module.handle_slash("/builds", None, "claude", None, sf)
             self.assertIn("tasks: 1/1 passed, 0 blocked", capture.get())
 
         asyncio.run(scenario())
@@ -109,7 +109,7 @@ class TestSoftwareFactoryCliCommands(unittest.TestCase):
         sf = main_module.SoftwareFactoryContext(
             repo=self.repo, provider=FakeProvider([]), settings=self.settings, background_tasks=set()
         )
-        main_module.handle_slash("/build", None, "claude", None, sf)
+        asyncio.run(main_module.handle_slash("/build", None, "claude", None, sf))
         self.assertEqual(len(sf.background_tasks), 0)
 
     def test_build_refused_when_paused_reports_error_not_crash(self):
@@ -122,7 +122,7 @@ class TestSoftwareFactoryCliCommands(unittest.TestCase):
         sf = main_module.SoftwareFactoryContext(
             repo=self.repo, provider=FakeProvider([]), settings=paused_settings, background_tasks=set()
         )
-        main_module.handle_slash("/build a project", None, "claude", None, sf)
+        asyncio.run(main_module.handle_slash("/build a project", None, "claude", None, sf))
         self.assertEqual(len(sf.background_tasks), 0)
         self.assertEqual(self.repo.count_builds_today(), 0)
 
@@ -130,11 +130,11 @@ class TestSoftwareFactoryCliCommands(unittest.TestCase):
         sf = main_module.SoftwareFactoryContext(
             repo=self.repo, provider=FakeProvider([]), settings=self.settings, background_tasks=set()
         )
-        main_module.handle_slash("/builds", None, "claude", None, sf)
+        asyncio.run(main_module.handle_slash("/builds", None, "claude", None, sf))
 
     def test_software_factory_commands_without_context_dont_crash(self):
-        main_module.handle_slash("/build something", None, "claude", None, None)
-        main_module.handle_slash("/builds", None, "claude", None, None)
+        asyncio.run(main_module.handle_slash("/build something", None, "claude", None, None))
+        asyncio.run(main_module.handle_slash("/builds", None, "claude", None, None))
 
 
 if __name__ == "__main__":

@@ -144,6 +144,48 @@ def build_registry(settings) -> ToolRegistry:
     from .email import DraftEmailTool
     from .notes import SearchNotesTool
 
+    # Mining tracker — registered only when a wallet is configured, same
+    # posture as the analytics and search tools above.
+    if getattr(settings, "mining_wallet", ""):
+        from ..mining.storage import MiningRepo
+        from .mining import QueryMiningTool
+
+        registry.register(QueryMiningTool(MiningRepo(), settings.mining_wallet))
+
+    # Design agent — off by default and additionally gated on the claude CLI
+    # actually being installed, since generate_mockup is useless without it
+    # and a registered-but-broken tool is worse than an absent one.
+    if getattr(settings, "design_agent_enabled", False):
+        from ..design.budget import DesignBudget
+        from ..design.claude_code_runner import claude_binary
+        from .design import GenerateMockupTool, ListDesignProjectsTool
+
+        if claude_binary():
+            registry.register(
+                GenerateMockupTool(
+                    settings,
+                    budget=DesignBudget(
+                        per_dispatch_usd=settings.design_per_dispatch_usd,
+                        daily_usd=settings.design_daily_usd,
+                    ),
+                )
+            )
+            registry.register(ListDesignProjectsTool(settings))
+
+            # Tier 5 — only when it can actually run. Same posture as the
+            # design agent itself: absent beats registered-and-broken.
+            from ..design.image_gen import is_available as image_gen_available
+
+            if image_gen_available():
+                from .design import GenerateImageTool
+
+                registry.register(GenerateImageTool(settings))
+        else:
+            print(
+                "Design agent enabled but the `claude` CLI is not on PATH; "
+                "design tools not registered."
+            )
+
     registry.register(SearchNotesTool(settings.notes_index_path))
     registry.register(DraftEmailTool())
 

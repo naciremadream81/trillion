@@ -15,7 +15,13 @@ from aiohttp.test_utils import AioHTTPTestCase
 
 import serve as serve_module
 from agent.providers.base import BaseProvider, ProviderResponse, TextChunk, TokenUsage
-from agent.security.headers import SECURITY_HEADERS, apply_security_headers
+from agent.security.headers import (
+    DESIGN_PREVIEW_CSP,
+    SECURITY_HEADERS,
+    apply_design_preview_headers,
+    apply_security_headers,
+    is_design_preview_path,
+)
 from agent.tools.registry import ToolRegistry
 
 
@@ -58,6 +64,30 @@ class TestApplySecurityHeaders(unittest.TestCase):
         self.assertIn("/api/security/csp-report", headers["Reporting-Endpoints"])
 
 
+class TestDesignPreviewHeaders(unittest.TestCase):
+    def test_preview_path_detection(self):
+        self.assertTrue(
+            is_design_preview_path("/api/design/demo-project/preview/landing/hero/")
+        )
+        self.assertTrue(is_design_preview_path("/api/design/demo-project/preview/"))
+        self.assertFalse(is_design_preview_path("/api/design/demo-project/docs/"))
+        self.assertFalse(is_design_preview_path("/api/usage"))
+
+    def test_preview_headers_enforce_sandboxed_csp(self):
+        headers = {}
+        apply_design_preview_headers(headers)
+        for name, value in SECURITY_HEADERS.items():
+            self.assertEqual(headers[name], value)
+        self.assertEqual(headers["Content-Security-Policy"], DESIGN_PREVIEW_CSP)
+        self.assertNotIn("Content-Security-Policy-Report-Only", headers)
+
+    def test_preview_csp_blocks_network_and_forms(self):
+        self.assertIn("connect-src 'none'", DESIGN_PREVIEW_CSP)
+        self.assertIn("form-action 'none'", DESIGN_PREVIEW_CSP)
+        self.assertIn("sandbox allow-scripts", DESIGN_PREVIEW_CSP)
+        self.assertNotIn("allow-same-origin", DESIGN_PREVIEW_CSP)
+
+
 class TestServeSecurityHeaders(AioHTTPTestCase):
     async def get_application(self):
         self.tmp = tempfile.mkdtemp()
@@ -73,6 +103,7 @@ class TestServeSecurityHeaders(AioHTTPTestCase):
                 "TRILLION_NOTES_VAULT_PATH",
                 "TRILLION_NOTES_INDEX_PATH",
                 "TRILLION_HEARTBEAT_DB",
+                "TRILLION_CSP_REPORT_DB",
                 "GITHUB_TOKEN",
                 "TRILLION_GITHUB_WATCHED_REPOS",
             )
@@ -81,6 +112,7 @@ class TestServeSecurityHeaders(AioHTTPTestCase):
         os.environ["TRILLION_NOTES_VAULT_PATH"] = os.path.join(self.tmp, "vault")
         os.environ["TRILLION_NOTES_INDEX_PATH"] = os.path.join(self.tmp, "notes_index.db")
         os.environ["TRILLION_HEARTBEAT_DB"] = os.path.join(self.tmp, "heartbeat.db")
+        os.environ["TRILLION_CSP_REPORT_DB"] = os.path.join(self.tmp, "csp_reports.db")
         os.environ.pop("GITHUB_TOKEN", None)
         os.environ.pop("TRILLION_GITHUB_WATCHED_REPOS", None)
 

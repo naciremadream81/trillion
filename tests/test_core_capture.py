@@ -109,6 +109,71 @@ class TestCoreCapture(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(repo.calls), 0)
 
 
+class _SlowProvider(BaseProvider):
+    """Yields one text chunk, then hangs on a second yield forever — long
+    enough for a caller to cancel the turn() generator mid-stream via
+    aclose() before the round (and the turn) ever completes."""
+
+    @property
+    def model_name(self) -> str:
+        return "fake"
+
+    async def stream(self, messages, system, tools=None) -> AsyncIterator:
+        yield TextChunk(text="partial")
+        # Suspend here indefinitely; aclose() on the consuming generator
+        # throws GeneratorExit at this await, unwinding the turn() loop
+        # without ever reaching the assistant append.
+        import asyncio
+
+        await asyncio.Event().wait()
+        yield ProviderResponse(text="partial", usage=None, model="fake")  # pragma: no cover
+
+
+class TestTurnCancellation(unittest.IsolatedAsyncioTestCase):
+    """
+    Regression test: serve.py's /api/chat handler cancels turn() via
+    `await turn.aclose()` on client disconnect (barge-in). Before the fix,
+    the pre-loop `self.history.append({"role": "user", ...})` at the top of
+    turn() survived a cancellation, so the next turn() call on the same
+    Agent (serve.py reuses one per session) appended a second consecutive
+    "user" entry — breaking every provider's alternating-role requirement.
+    """
+
+    async def test_cancelled_turn_leaves_history_unchanged(self):
+        agent = Agent(provider=_SlowProvider())
+        pre_turn_history = list(agent.history)
+
+        turn = agent.turn("hello")
+        chunk = await turn.__anext__()
+        self.assertEqual(chunk, "partial")
+
+        await turn.aclose()
+
+        self.assertEqual(agent.history, pre_turn_history)
+        self.assertEqual(len(agent.history), len(pre_turn_history))
+
+    async def test_turn_after_cancellation_does_not_double_up_user_roles(self):
+        # A second, normal turn on the same (reused) Agent after a
+        # cancelled one must not start with two consecutive "user" entries.
+        agent = Agent(provider=StubProvider(usage=None))
+
+        cancelled = agent.turn("first, cancelled")
+        # StubProvider finishes fast, but we cancel before consuming it —
+        # still exercises the same cleanup path regardless of timing.
+        await cancelled.aclose()
+        self.assertEqual(agent.history, [])
+
+        reply = ""
+        async for c in agent.turn("second, completes"):
+            reply += c
+
+        self.assertEqual(reply, "hello world")
+        roles = [m["role"] for m in agent.history]
+        # No two consecutive "user" entries anywhere in history.
+        for a, b in zip(roles, roles[1:]):
+            self.assertFalse(a == "user" == b, f"consecutive user roles: {roles}")
+
+
 class _ToolThenTextProvider(BaseProvider):
     """Round 1: calls a tool. Round 2: finishes with plain text. Records the
     `system` prompt it was handed on each round, for asserting freshness."""
