@@ -12,12 +12,19 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from aiohttp.test_utils import AioHTTPTestCase
 
 import serve as serve_module
 from agent.providers.base import BaseProvider, ProviderResponse, TextChunk, TokenUsage
-from agent.security.auth import AuthRateLimiter, bearer_auth_middleware, is_authorized
+from agent.security.auth import (
+    AuthRateLimiter,
+    UNKNOWN_CLIENT_ADDRESS,
+    bearer_auth_middleware,
+    client_address,
+    is_authorized,
+)
 from agent.security.headers import SECURITY_HEADERS
 from agent.tools.registry import ToolRegistry
 
@@ -185,10 +192,24 @@ class TestAuthRateLimiter(unittest.TestCase):
             limiter.record_failure(f"10.0.{i // 256}.{i % 256}")
         self.assertLessEqual(len(limiter._failures), 64)
 
-    def test_empty_address_is_ignored(self):
-        for _ in range(20):
-            self.limiter.record_failure("")
-        self.assertIsNone(self.limiter.retry_after(""))
+    def test_empty_address_uses_a_shared_bucket(self):
+        for _ in range(10):
+            self.limiter.record_failure(UNKNOWN_CLIENT_ADDRESS)
+        self.assertEqual(self.limiter.retry_after(UNKNOWN_CLIENT_ADDRESS), 900)
+
+
+class TestClientAddress(unittest.TestCase):
+    def test_x_forwarded_for_is_ignored(self):
+        request = mock.MagicMock()
+        request.remote = "10.0.0.1"
+        request.headers = {"X-Forwarded-For": "1.2.3.4"}
+        self.assertEqual(client_address(request), "10.0.0.1")
+
+    def test_empty_remote_maps_to_the_shared_unknown_bucket(self):
+        request = mock.MagicMock()
+        request.remote = None
+        request.headers = {}
+        self.assertEqual(client_address(request), UNKNOWN_CLIENT_ADDRESS)
 
 
 class TestServeBearerAuth(AioHTTPTestCase):
@@ -282,6 +303,10 @@ class TestServeBearerAuth(AioHTTPTestCase):
             json={"csp-report": {"violated-directive": "script-src"}},
         )
         self.assertEqual(resp.status, 204)
+
+    async def test_csp_violations_requires_auth_when_token_configured(self):
+        resp = await self.client.request("GET", "/api/security/csp-violations")
+        self.assertEqual(resp.status, 401)
 
     async def test_static_ui_routes_exempt_even_with_token_configured(self):
         resp = await self.client.request("GET", "/")
@@ -455,6 +480,24 @@ class TestServeAuthRateLimit(AioHTTPTestCase):
             json={"csp-report": {"violated-directive": "script-src"}},
         )
         self.assertEqual(resp.status, 204)
+
+    async def test_different_xff_values_share_the_same_lockout_bucket(self):
+        for i in range(10):
+            resp = await self.client.request(
+                "GET",
+                "/api/usage",
+                headers={
+                    "Authorization": "Bearer wrong",
+                    "X-Forwarded-For": f"1.2.3.{i}",
+                },
+            )
+            self.assertEqual(resp.status, 401)
+        resp = await self.client.request(
+            "GET",
+            "/api/usage",
+            headers={"Authorization": "Bearer wrong", "X-Forwarded-For": "9.9.9.9"},
+        )
+        self.assertEqual(resp.status, 429)
 
 
 class TestServeRotationOverlap(AioHTTPTestCase):

@@ -200,6 +200,15 @@ class TestWebSocketOriginGate(unittest.TestCase):
         )
         self.assertIsNotNone(reason)
 
+    def test_null_origin_upgrade_is_refused(self):
+        reason = check_origin(
+            "GET",
+            "/api/transcribe/stream",
+            self._headers(Origin="null"),
+            "127.0.0.1",
+        )
+        self.assertEqual(reason, "Origin: null")
+
     def test_connection_header_is_parsed_as_a_token_list(self):
         # Real browsers send "keep-alive, Upgrade". Matching the whole header
         # value would miss every real handshake.

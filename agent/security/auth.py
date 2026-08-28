@@ -54,6 +54,10 @@ LOCKOUT_SECONDS = 900.0
 # Expired entries are pruned first; only if that isn't enough do we evict.
 MAX_TRACKED_ADDRESSES = 4096
 
+# request.remote can be empty behind some transports. Keying the limiter on ""
+# would bypass it entirely, so unknown peers share one bucket instead.
+UNKNOWN_CLIENT_ADDRESS = "__unknown__"
+
 
 def _matches(candidate: str, token: str) -> bool:
     """
@@ -237,7 +241,7 @@ def client_address(request: web.Request) -> str:
     the proxy can lock Sean out too. That's the fail-closed direction of the
     trade, and a lockout is 15 minutes rather than permanent.
     """
-    return request.remote or ""
+    return request.remote or UNKNOWN_CLIENT_ADDRESS
 
 
 def bearer_auth_middleware(token: str, prev_token: str = "", limiter: AuthRateLimiter | None = None):

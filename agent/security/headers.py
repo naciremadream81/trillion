@@ -50,6 +50,27 @@ CSP_POLICY = (
     "report-to csp-endpoint"
 )
 
+# Enforcing policy for /api/design/{project}/preview/* only. Claude-composed
+# mockup HTML/JS is attacker-shaped in principle: same-origin with the agent
+# APIs, so prompt-injected script could otherwise fetch('/api/chat'). The
+# sandbox directive drops allow-same-origin so the document gets an opaque
+# origin; connect-src 'none' and form-action 'none' block the remaining
+# exfil paths even if a browser quirk mis-classifies a relative URL.
+DESIGN_PREVIEW_CSP = (
+    "sandbox allow-scripts; "
+    "default-src 'none'; "
+    "script-src 'unsafe-inline' *; "
+    "style-src 'unsafe-inline' *; "
+    "img-src data: blob: *; "
+    "font-src data: *; "
+    "media-src data: blob: *; "
+    "connect-src 'none'; "
+    "form-action 'none'; "
+    "base-uri 'none'; "
+    "object-src 'none'; "
+    "frame-ancestors 'none'"
+)
+
 # The policy is one string used in both modes, so the old name is now only
 # half-true. Kept as an alias rather than churned through every call site.
 CSP_REPORT_ONLY_POLICY = CSP_POLICY
@@ -65,6 +86,33 @@ SECURITY_HEADERS = {
         "interest-cohort=()"
     ),
 }
+
+
+def is_design_preview_path(path: str) -> bool:
+    """
+    True for routes served by serve.py's design_preview handler:
+    /api/design/<project>/preview/ and everything under it.
+    """
+    parts = path.split("/")
+    return (
+        len(parts) >= 5
+        and parts[1] == "api"
+        and parts[2] == "design"
+        and parts[4] == "preview"
+    )
+
+
+def apply_design_preview_headers(headers) -> None:
+    """
+    Stamp the fixed headers plus an *enforcing* preview-only CSP. Unlike the
+    main UI shell, mockup HTML is model-generated and must not share an origin
+    with privileged /api/ routes.
+    """
+    for name, value in SECURITY_HEADERS.items():
+        headers[name] = value
+    headers["Content-Security-Policy"] = DESIGN_PREVIEW_CSP
+    headers.pop("Content-Security-Policy-Report-Only", None)
+    headers.pop("Reporting-Endpoints", None)
 
 
 def apply_security_headers(headers, enforce: bool = False) -> None:
@@ -98,7 +146,10 @@ def security_headers_middleware_factory(enforce: bool = False):
     @web.middleware
     async def middleware(request: web.Request, handler):
         response = await handler(request)
-        apply_security_headers(response.headers, enforce)
+        if is_design_preview_path(request.path):
+            apply_design_preview_headers(response.headers)
+        else:
+            apply_security_headers(response.headers, enforce)
         return response
 
     return middleware

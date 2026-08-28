@@ -323,6 +323,16 @@ class TestPreviewServing(unittest.IsolatedAsyncioTestCase):
         resp = await self.client.get("/api/design/no-such-project/preview/landing/hero/")
         self.assertEqual(resp.status, 404)
 
+    async def test_preview_responses_emit_enforcing_sandboxed_csp(self):
+        from agent.security.headers import DESIGN_PREVIEW_CSP
+
+        resp = await self.client.get("/api/design/demo-project/preview/landing/hero/")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.headers.get("Content-Security-Policy"), DESIGN_PREVIEW_CSP)
+        self.assertNotIn("Content-Security-Policy-Report-Only", resp.headers)
+        self.assertIn("connect-src 'none'", resp.headers.get("Content-Security-Policy", ""))
+        self.assertNotIn("allow-same-origin", resp.headers.get("Content-Security-Policy", ""))
+
 
 if __name__ == "__main__":
     unittest.main()
