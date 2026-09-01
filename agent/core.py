@@ -15,6 +15,7 @@ The rule: one core, many adapters. Never fork the logic for voice vs text.
 
 import asyncio
 import contextvars
+from collections.abc import Callable
 from typing import AsyncIterator
 
 from .cost.recorder import record_usage
@@ -124,7 +125,12 @@ class Agent:
 
     # ── Public interface ──────────────────────────────────────────────────────
 
-    async def turn(self, user_input: str) -> AsyncIterator[str]:
+    async def turn(
+        self,
+        user_input: str,
+        *,
+        should_abort: Callable[[], bool] | None = None,
+    ) -> AsyncIterator[str]:
         """
         Process one turn of conversation.
 
@@ -138,8 +144,19 @@ class Agent:
 
         Overlapping callers (barge-in, two tabs sharing a session cookie)
         wait their turn rather than interleaving history writes.
+
+        `should_abort`, when set, is checked after the lock is acquired and
+        before this turn writes history or calls the provider. Rapid barge-in
+        queues a POST that the browser then aborts; without this check the
+        abandoned utterance still ran — including tool rounds that yield no
+        text, so serve.py's `_client_gone` never saw them — after the lock
+        released. remember_fact and dispatch_to_* are LOW and execute in
+        smart mode; a cancelled "remember that…" would persist, then roll
+        back history so it looked like nothing happened.
         """
         async with self._turn_lock:
+            if should_abort is not None and should_abort():
+                return
             inner = self._run_turn(user_input)
             try:
                 async for chunk in inner:
