@@ -8,6 +8,7 @@ Run from the project root:
     python -m unittest tests.test_core_capture
 """
 
+import asyncio
 import unittest
 from typing import AsyncIterator
 
@@ -172,6 +173,78 @@ class TestTurnCancellation(unittest.IsolatedAsyncioTestCase):
         # No two consecutive "user" entries anywhere in history.
         for a, b in zip(roles, roles[1:]):
             self.assertFalse(a == "user" == b, f"consecutive user roles: {roles}")
+
+
+class _HangOnceThenReply(BaseProvider):
+    """First stream hangs after one chunk (the barge-in window). Later
+    streams complete normally — models the next turn after aclose()."""
+
+    def __init__(self):
+        self.calls = 0
+
+    @property
+    def model_name(self) -> str:
+        return "fake"
+
+    async def stream(self, messages, system, tools=None) -> AsyncIterator:
+        self.calls += 1
+        if self.calls == 1:
+            yield TextChunk(text="partial")
+            await asyncio.Event().wait()
+            yield ProviderResponse(text="partial", usage=None, model="fake")  # pragma: no cover
+        else:
+            yield TextChunk(text="hello world")
+            yield ProviderResponse(text="hello world", usage=None, model="fake")
+
+
+class TestOverlappingTurnsDoNotCorruptHistory(unittest.IsolatedAsyncioTestCase):
+    """
+    Barge-in aborts /api/chat and immediately POSTs the next utterance on
+    the same session Agent. Two overlapping turn() calls used to interleave
+    history writes, then the cancelled turn's rollback sliced from its own
+    turn_start_index to the end — wiping the live turn, including its user
+    message.
+    """
+
+    async def test_a_new_turn_waits_for_the_cancelled_one_to_roll_back(self):
+        agent = Agent(provider=_HangOnceThenReply())
+        cancelled = agent.turn("first, cancelled")
+        self.assertEqual(await cancelled.__anext__(), "partial")
+
+        chunks: list[str] = []
+
+        async def run_next() -> None:
+            async for piece in agent.turn("second, completes"):
+                chunks.append(piece)
+
+        next_turn = asyncio.create_task(run_next())
+        await asyncio.sleep(0.05)
+        self.assertFalse(next_turn.done(), "next turn started before the in-flight one released")
+
+        await cancelled.aclose()
+        await asyncio.wait_for(next_turn, timeout=1)
+
+        self.assertEqual("".join(chunks), "hello world")
+        roles = [m["role"] for m in agent.history]
+        self.assertEqual(roles, ["user", "assistant"])
+        self.assertEqual(agent.history[0]["content"], "second, completes")
+        self.assertEqual(agent.history[1]["content"], "hello world")
+
+    async def test_two_concurrent_completing_turns_stay_alternating(self):
+        agent = Agent(provider=StubProvider(usage=None))
+
+        async def run(text: str) -> str:
+            out = ""
+            async for piece in agent.turn(text):
+                out += piece
+            return out
+
+        await asyncio.gather(run("alpha"), run("beta"))
+        roles = [m["role"] for m in agent.history]
+        self.assertEqual(roles, ["user", "assistant", "user", "assistant"])
+        for a, b in zip(roles, roles[1:]):
+            self.assertFalse(a == "user" == b, f"consecutive user roles: {roles}")
+            self.assertFalse(a == "assistant" == b, f"consecutive assistant roles: {roles}")
 
 
 class _ToolThenTextProvider(BaseProvider):

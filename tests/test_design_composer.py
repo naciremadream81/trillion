@@ -16,6 +16,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from agent.design.budget import BudgetExceeded, DesignBudget
 from agent.design.claude_code_runner import (
@@ -24,6 +25,8 @@ from agent.design.claude_code_runner import (
     build_command,
     claude_binary,
     parse_event,
+    spawn_claude_code,
+    usage_from_event,
 )
 from agent.design.composer import build_composition_prompt
 from agent.design.design_tokens import default_tokens_yaml, parse_tokens
@@ -344,12 +347,28 @@ class TestCostCeilingIsEnforcedNotJustReserved(unittest.TestCase):
             '{"input_tokens":1200,"output_tokens":300},"content":['
             '{"type":"tool_use","name":"Read","input":{"file_path":"design.md"}}]}}'
         )
-        self.assertEqual(event, {"type": "tool", "name": "Read", "target": "design.md"})
+        self.assertEqual(event["type"], "tool")
+        self.assertEqual(event["name"], "Read")
+        self.assertEqual(event["target"], "design.md")
+        # Composition is almost entirely tool turns. Dropping usage here
+        # used to leave estimated_cost_usd at $0 so the mid-flight kill
+        # never fired.
+        self.assertEqual(event["usage"]["input_tokens"], 1200)
+        self.assertEqual(event["usage"]["output_tokens"], 300)
+        self.assertEqual(event["usage"]["model"], "claude-sonnet-4-6")
+
+    def test_tool_use_usage_is_visible_to_the_running_estimate(self):
+        event = parse_event(
+            '{"type":"assistant","message":{"model":"claude-sonnet-4-6","usage":'
+            '{"input_tokens":1200,"output_tokens":300},"content":['
+            '{"type":"tool_use","name":"Read","input":{"file_path":"design.md"}}]}}'
+        )
+        usage = usage_from_event(event)
+        self.assertIsNotNone(usage)
+        self.assertEqual(usage["input_tokens"], 1200)
 
     def test_the_runner_accepts_a_ceiling(self):
         import inspect
-
-        from agent.design.claude_code_runner import spawn_claude_code
 
         self.assertIn("max_cost_usd", inspect.signature(spawn_claude_code).parameters)
 
@@ -367,6 +386,70 @@ class TestCostCeilingIsEnforcedNotJustReserved(unittest.TestCase):
 
         source = inspect.getsource(GenerateMockupTool.run)
         self.assertIn("max(result.total_cost_usd, result.estimated_cost_usd)", source)
+
+
+class _FakeStream:
+    def __init__(self, lines):
+        self._lines = [line.encode() if isinstance(line, str) else line for line in lines]
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._lines:
+            raise StopAsyncIteration
+        return self._lines.pop(0)
+
+
+class _FakeProcess:
+    def __init__(self, stdout_lines):
+        self.stdout = _FakeStream(stdout_lines)
+        self.stderr = _FakeStream([])
+        self.returncode = 0
+        self.killed = False
+
+    def kill(self):
+        self.killed = True
+        self.stdout._lines.clear()
+
+    async def wait(self):
+        return 0
+
+
+class TestCostCeilingKillsToolTurns(unittest.IsolatedAsyncioTestCase):
+    """
+    Composition runs are almost entirely tool_use assistant events. Those
+    still carry message.usage; skipping it left estimated_cost_usd at $0
+    and the mid-flight kill never fired.
+    """
+
+    async def test_a_tool_use_event_with_usage_trips_the_ceiling(self):
+        # claude-sonnet-4 input is $3/MTok → 20_000 tokens ≈ $0.06
+        line = (
+            '{"type":"assistant","message":{"model":"claude-sonnet-4-6","usage":'
+            '{"input_tokens":20000,"output_tokens":0},"content":['
+            '{"type":"tool_use","name":"Read","input":{"file_path":"design.md"}}]}}\n'
+        )
+        fake = _FakeProcess([
+            line,
+            '{"type":"result","total_cost_usd":9.99,"num_turns":20,"duration_ms":1000}\n',
+        ])
+
+        async def fake_exec(*args, **kwargs):
+            return fake
+
+        with patch(
+            "agent.design.claude_code_runner.build_command",
+            return_value=["claude", "-p", "x"],
+        ), patch("asyncio.create_subprocess_exec", fake_exec):
+            result = await spawn_claude_code("prompt", cwd=".", max_cost_usd=0.01)
+
+        self.assertTrue(fake.killed)
+        self.assertTrue(result.over_budget)
+        self.assertGreater(result.estimated_cost_usd, 0.01)
+        # Killed before the result event, so the authoritative total stays 0
+        # — GenerateMockupTool records the estimate instead.
+        self.assertEqual(result.total_cost_usd, 0.0)
 
 
 class TestStaleOutputIsNotSuccess(unittest.IsolatedAsyncioTestCase):

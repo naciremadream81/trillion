@@ -117,6 +117,37 @@ def build_command(
     return argv
 
 
+def _usage_from_message(message: dict) -> dict | None:
+    """Token counts from an assistant event, or None if the event has none."""
+    usage = message.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    return {
+        "model": str(message.get("model") or ""),
+        "input_tokens": int(usage.get("input_tokens") or 0),
+        "output_tokens": int(usage.get("output_tokens") or 0),
+        "cache_write_tokens": int(usage.get("cache_creation_input_tokens") or 0),
+        "cache_read_tokens": int(usage.get("cache_read_input_tokens") or 0),
+    }
+
+
+def usage_from_event(event: dict) -> dict | None:
+    """
+    Token counts to add to the running estimate.
+
+    Composition turns are almost entirely tool_use. Those events still carry
+    message.usage, so the mid-flight ceiling has to read it off the tool
+    progress event — dropping it (to keep live progress) left estimated
+    cost near $0 and never killed the subprocess.
+    """
+    if event.get("type") == "usage":
+        return event
+    nested = event.get("usage")
+    if isinstance(nested, dict) and "input_tokens" in nested:
+        return nested
+    return None
+
+
 def parse_event(line: str) -> dict | None:
     """
     One NDJSON line from the stream into a small shape for the UI.
@@ -140,16 +171,12 @@ def parse_event(line: str) -> dict | None:
     kind = data.get("type")
     if kind == "assistant":
         message = data.get("message") or {}
-        # Check for a tool_use content block FIRST. Real assistant events
-        # often carry message.usage on every turn (see below), so if usage
-        # were checked first, any turn that also calls a tool would never
-        # surface its {"type": "tool", ...} progress event — silently
-        # breaking the live-progress feature this module exists for. An
-        # assistant turn that both calls a tool AND carries usage reports
-        # the tool event and skips that one usage sample; that's fine, the
-        # mid-flight cost figure is explicitly an estimate and the
-        # authoritative total_cost_usd still arrives on the final "result"
-        # event regardless.
+        # Tool progress first so a turn that both calls a tool AND carries
+        # usage still surfaces the live "[CC] Read …" line. Usage is
+        # attached to that same event rather than dropped — composition
+        # runs are almost entirely tool turns, and the mid-flight dollar
+        # ceiling is computed from these samples.
+        usage = _usage_from_message(message)
         for block in (message.get("content") or []):
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 name = block.get("name", "tool")
@@ -160,22 +187,17 @@ def parse_event(line: str) -> dict | None:
                         args.get("file_path") or args.get("path")
                         or args.get("command") or args.get("pattern") or ""
                     )[:120]
-                return {"type": "tool", "name": name, "target": target}
-        usage = message.get("usage")
-        if isinstance(usage, dict):
+                event = {"type": "tool", "name": name, "target": target}
+                if usage is not None:
+                    event["usage"] = usage
+                return event
+        if usage is not None:
             # Confirmed against the real CLI: assistant events carry
             # message.usage with input/output/cache token counts. This is what
             # makes a mid-flight cost ceiling possible at all — total_cost_usd
             # only arrives on the final result event, which is far too late to
             # stop a run that is already over budget.
-            return {
-                "type": "usage",
-                "model": str(message.get("model") or ""),
-                "input_tokens": int(usage.get("input_tokens") or 0),
-                "output_tokens": int(usage.get("output_tokens") or 0),
-                "cache_write_tokens": int(usage.get("cache_creation_input_tokens") or 0),
-                "cache_read_tokens": int(usage.get("cache_read_input_tokens") or 0),
-            }
+            return {"type": "usage", **usage}
         return None
     if kind == "result":
         return {
@@ -260,13 +282,14 @@ async def spawn_claude_code(
             if event is None:
                 continue
             result.events.append(event)
-            if event["type"] == "usage":
+            usage = usage_from_event(event)
+            if usage is not None:
                 result.estimated_cost_usd += compute_cost(
-                    event["model"] or (model or ""),
-                    input_tokens=event["input_tokens"],
-                    output_tokens=event["output_tokens"],
-                    cache_write_tokens=event["cache_write_tokens"],
-                    cache_read_tokens=event["cache_read_tokens"],
+                    usage["model"] or (model or ""),
+                    input_tokens=usage["input_tokens"],
+                    output_tokens=usage["output_tokens"],
+                    cache_write_tokens=usage["cache_write_tokens"],
+                    cache_read_tokens=usage["cache_read_tokens"],
                 )
                 if max_cost_usd is not None and result.estimated_cost_usd > max_cost_usd:
                     result.over_budget = True

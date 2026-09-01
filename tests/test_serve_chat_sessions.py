@@ -159,3 +159,53 @@ class TestChatCancellation(AioHTTPTestCase):
             60,
             "server kept generating (and billing) after the client dropped",
         )
+
+
+class _SlowThenOkProvider(BaseProvider):
+    """Sleeps at the start of every stream so two overlapping /api/chat
+    requests on the same session actually overlap in the event loop."""
+
+    @property
+    def model_name(self):
+        return "fake-model"
+
+    async def stream(self, messages, system, tools=None):
+        await asyncio.sleep(0.05)
+        yield TextChunk(text="ok")
+        yield ProviderResponse(text="ok", tool_calls=[], usage=TokenUsage(), model=self.model_name)
+
+
+class TestOverlappingChatPostsSerialize(AioHTTPTestCase):
+    """
+    Two tabs (or barge-in) share the trillion_session cookie, so they share
+    one Agent. Overlapping POSTs used to interleave history into consecutive
+    same-role messages that every provider then rejects.
+    """
+
+    async def get_application(self):
+        serve_module._provider = _SlowThenOkProvider()
+        serve_module._registry = ToolRegistry()
+        serve_module._agent_sessions.clear()
+        return serve_module.build_app()
+
+    def tearDown(self):
+        super().tearDown()
+        serve_module._provider = None
+        serve_module._registry = None
+        serve_module._agent_sessions.clear()
+
+    async def test_overlapping_posts_on_one_session_keep_alternating_roles(self):
+        async def post(message: str) -> str:
+            resp = await self.client.post(
+                "/api/chat",
+                json={"message": message},
+                headers={"Cookie": "trillion_session=same-session"},
+            )
+            return await resp.text()
+
+        await asyncio.gather(post("alpha"), post("beta"))
+        agent = serve_module._agent_sessions["same-session"]
+        roles = [m["role"] for m in agent.history]
+        self.assertEqual(roles, ["user", "assistant", "user", "assistant"])
+        contents = [m["content"] for m in agent.history if m["role"] == "user"]
+        self.assertEqual(sorted(contents), ["alpha", "beta"])
