@@ -1,5 +1,5 @@
 """
-Reference images — playbooks/design-subagent.md, Tier 7, which the playbook
+Reference images — playbook/design-subagent.md, Tier 7, which the playbook
 calls the single biggest quality lever. "Words describe a vibe. An image
 fixes it."
 

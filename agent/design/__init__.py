@@ -1,1 +1,1 @@
-"""Head-of-Design sub-agent (playbooks/design-subagent.md)."""
+"""Head-of-Design sub-agent (playbook/design-subagent.md)."""

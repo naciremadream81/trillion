@@ -1,5 +1,5 @@
 """
-Spawning Claude Code as a subprocess — playbooks/design-subagent.md, Tier 3.
+Spawning Claude Code as a subprocess — playbook/design-subagent.md, Tier 3.
 
 The split this tier rests on: the *planning* agent stays cheap, and the
 *composition* step shells out to Claude Code, which runs in the project root

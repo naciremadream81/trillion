@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import socket
 import uuid
@@ -135,7 +136,26 @@ def _get_registry():
         from agent.config import get_settings
         from agent.tools.registry import build_registry
 
-        _registry = build_registry(get_settings())
+        settings = get_settings()
+        _registry = build_registry(settings)
+
+        # playbook/cloud-to-local.md Tier 3. Registered AFTER build_registry,
+        # and only for names it did not produce — on the machine that has the
+        # real tool every name is already taken and this registers nothing.
+        # That absence check IS the no-double-fire guarantee: which process
+        # holds which tool, not a flag anyone can set wrong.
+        if getattr(settings, "remote_proxy_enabled", False):
+            try:
+                from agent.remote.proxy import register_proxies
+                from agent.remote.storage import RemoteQueue
+
+                added = register_proxies(
+                    _registry, RemoteQueue(), settings.remote_worker_role
+                )
+                if added:
+                    print(f"Remote dispatch proxies registered: {', '.join(added)}")
+            except Exception as e:  # noqa: BLE001
+                print(f"Remote proxies unavailable ({e}); continuing.")
     return _registry
 
 
@@ -364,7 +384,7 @@ def _piper_model_path() -> str:
 async def _warm_piper_voice(app: web.Application) -> None:
     """
     Load Piper's ~63MB voice model at boot instead of on the first spoken
-    reply (smooth-voice_2 Tier 4).
+    reply (smooth-voice Tier 4).
 
     Measured cold, that load plus its first inference cost ~4s — the single
     largest number in the Tier 1 latency breakdown, and one every voice turn
@@ -435,6 +455,9 @@ async def _start_heartbeat_scheduler(app: web.Application) -> None:
             build_code_sentinel_checks(settings)
             + build_mining_checks(settings)  # empty unless TRILLION_MINING_WALLET is set
             + [cve_check]
+            + _build_board_review_checks(settings)
+            + _build_remote_completion_checks(settings)
+            + _build_revenue_checks(settings)
         )
         scheduler = HeartbeatScheduler(
             checks, repo, settings, background_tasks=app["heartbeat_background_tasks"]
@@ -442,6 +465,179 @@ async def _start_heartbeat_scheduler(app: web.Application) -> None:
         app["heartbeat_task"] = asyncio.create_task(scheduler.run_forever())
     except Exception as e:  # noqa: BLE001
         print(f"Heartbeat unavailable ({e}); continuing.")
+
+
+def _build_revenue_checks(settings) -> list:
+    """The payment poll — off entirely without a Stripe key, which is the
+    same posture every other integration here takes."""
+    api_key = os.getenv("STRIPE_API_KEY", "")
+    if not api_key:
+        return []
+    try:
+        from agent.heartbeat.checks.revenue import RevenuePollCheck
+
+        return [RevenuePollCheck(api_key)]
+    except Exception as e:  # noqa: BLE001
+        print(f"Revenue polling unavailable ({e}); continuing.")
+        return []
+
+
+def _build_remote_completion_checks(settings) -> list:
+    """
+    Tier 6's ping. Registered on the PROXY side — the machine that asked for
+    the work is the one that wants telling when it finished. On the worker
+    machine the local UI already showed the whole run (Tier 5), so a notice
+    there would be announcing something Sean just watched happen.
+    """
+    if not getattr(settings, "remote_proxy_enabled", False):
+        return []
+    try:
+        from agent.heartbeat.checks.remote_completions import RemoteCompletionCheck
+        from agent.remote.storage import RemoteQueue
+
+        return [RemoteCompletionCheck(RemoteQueue(), settings.remote_worker_role)]
+    except Exception as e:  # noqa: BLE001
+        print(f"Remote completion pings unavailable ({e}); continuing.")
+        return []
+
+
+def _build_board_review_checks(settings) -> list:
+    """
+    The board's monthly standing review — playbook/the-board.md Tier 7.
+
+    Registered HERE and nowhere else, deliberately. Trillion runs in two
+    processes (main.py's terminal chat and this server) and a scheduled job
+    needs the surface that is actually awake at 8am, not the one that's
+    asleep. Registering it in both would convene twice — four paid model
+    calls each — on any day both happen to be running.
+
+    Three gates, all of which must pass, because this spends money without
+    being asked: the feature is on, the review is on, and there is a roster.
+    """
+    if not (getattr(settings, "board_enabled", False)
+            and getattr(settings, "board_standing_review", False)):
+        return []
+    try:
+        from agent.board.ask import make_ask_model
+        from agent.board.convene import load_seats
+        from agent.heartbeat.checks.board_review import BoardStandingReviewCheck
+
+        if not load_seats():
+            print("Board standing review is on but no seats are configured; skipping it.")
+            return []
+        return [BoardStandingReviewCheck(
+            make_ask_model(_get_provider()),
+            brief_provider=_business_brief,
+            ceiling_usd=settings.board_meeting_ceiling_usd,
+        )]
+    except Exception as e:  # noqa: BLE001 — never let this take down the heartbeat
+        print(f"Board standing review unavailable ({e}); continuing.")
+        return []
+
+
+def _business_brief() -> str:
+    """
+    The live figures the chair reads — and the seats see a short slice of.
+
+    Read fresh on every meeting, never from a file. A board that argues about
+    the business without seeing the business is a party trick, and a number
+    written down somewhere is a number that was true once.
+
+    Best-effort per source: a board reasoning from three of four figures is
+    far better than no meeting at all, so a broken source is omitted rather
+    than fatal.
+    """
+    settings = get_settings()
+    lines = []
+
+    def source(label, fn):
+        """Run one source. A failure omits its line and SAYS SO — silently
+        swallowing it would leave the chair permanently half-blind with
+        nothing anywhere to show why."""
+        try:
+            value = fn()
+        except Exception as e:  # noqa: BLE001
+            print(f"Board brief: {label} unavailable ({type(e).__name__}: {e})")
+            return
+        if value:
+            lines.append(value)
+
+    def spend():
+        from agent.cost.aggregate import UsageDashboard
+        from agent.cost.storage import UsageRepo
+
+        payload = UsageDashboard(UsageRepo()).payload()
+        return f"API spend month-to-date: ${float(payload.get('month_to_date_usd', 0)):.2f}"
+
+    def factory():
+        from agent.factory.software.storage import BuildRepo
+
+        repo = BuildRepo()
+        parts = [
+            f"Software factory: {len(repo.list_recent_builds(limit=10))} recent builds, "
+            f"{repo.count_builds_today()} today"
+        ]
+        repeats = repo.repeat_sightings(5)
+        if repeats:
+            parts.append(
+                "Problems the scout has seen more than once: "
+                + "; ".join(f"{r['problem']} ({r['times_seen']}x)" for r in repeats)
+            )
+        return "\n".join(parts)
+
+    def mining():
+        if not settings.mining_wallet:
+            return ""
+        from agent.mining.storage import MiningRepo
+
+        summary = MiningRepo().summary(settings.mining_wallet).to_dict()
+        # The payout address is deliberately not included — see
+        # agent/tools/mining.py. It is Sean's financial identity and the
+        # board has no use for it.
+        return (
+            f"Mining: {summary.get('workers_online', 0)} workers online, "
+            f"{summary.get('workers_offline', 0)} offline"
+        )
+
+    source("API spend", spend)
+    source("software factory", factory)
+    source("mining", mining)
+    return "\n".join(lines)
+
+
+async def _start_remote_worker(app: web.Application) -> None:
+    """
+    Drain the cross-machine queue — playbook/cloud-to-local.md Tiers 1, 2, 5.
+
+    Runs in THIS process on purpose. The worker invokes the real local tool
+    instance out of the shared registry, so a remotely-dispatched run emits
+    exactly the same lifecycle events a locally-initiated one does and the
+    local UI lights up natively, with no new UI code (Tier 5). A separate
+    worker process would need those events bridged back.
+    """
+    app["remote_worker_task"] = None
+    settings = get_settings()
+    if not getattr(settings, "remote_worker_enabled", False):
+        return
+    try:
+        from agent.remote.runners import build_deps, build_runners
+        from agent.remote.storage import RemoteQueue
+        from agent.remote.worker import RemoteWorker
+
+        registry = _get_registry()
+        worker = RemoteWorker(
+            RemoteQueue(),
+            worker_role=settings.remote_worker_role,
+            runners=build_runners(),
+            deps=build_deps(settings, registry),
+        )
+        app["remote_worker_task"] = asyncio.create_task(worker.run_forever())
+    except Exception as e:  # noqa: BLE001
+        print(f"Remote worker unavailable ({e}); continuing.")
+
+
+async def _stop_remote_worker(app: web.Application) -> None:
+    await _stop_task(app, "remote_worker_task")
 
 
 async def _stop_heartbeat_scheduler(app: web.Application) -> None:
@@ -512,13 +708,39 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
         return web.json_response(dash.payload())
 
     async def index(_request: web.Request) -> web.FileResponse:
-        return web.FileResponse(os.path.join(PROJECT_ROOT, "index.html"))
+        # no-store on the shell — playbook/mobile-pwa.md §7. iOS PWA cache is
+        # sticky enough that without this an installed home-screen app can
+        # keep serving a shell from a previous deploy for days, with no
+        # reload gesture available in a standalone window to escape it.
+        return web.FileResponse(
+            os.path.join(PROJECT_ROOT, "index.html"),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def service_worker(_request: web.Request) -> web.FileResponse:
+        # Served from the root so its scope covers the whole origin — a
+        # worker under /static/ could only control /static/. It caches
+        # nothing (see sw.js); no-store here keeps the worker script itself
+        # from becoming the stale thing.
+        return web.FileResponse(
+            os.path.join(PROJECT_ROOT, "sw.js"),
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Type": "application/javascript; charset=utf-8",
+            },
+        )
+
+    async def web_manifest(_request: web.Request) -> web.FileResponse:
+        return web.FileResponse(
+            os.path.join(PROJECT_ROOT, "static", "manifest.json"),
+            headers={"Content-Type": "application/manifest+json"},
+        )
 
     def _client_gone(request: web.Request) -> bool:
         """
         Whether the browser has dropped this request.
 
-        smooth-voice_2 Tier 6 / README's "not done yet": an aborted /api/chat
+        smooth-voice Tier 6 / README's "not done yet": an aborted /api/chat
         used to keep generating until a write happened to hit the dropped
         connection. aiohttp buffers, so that can be the whole rest of the
         reply — every token of it billed, for a turn nobody will ever read.
@@ -602,7 +824,7 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
 
     async def transcribe_stream(request: web.Request) -> web.WebSocketResponse:
         """
-        Streaming STT relay (smooth-voice_2 Tier 2).
+        Streaming STT relay (smooth-voice Tier 2).
 
         The browser sends audio chunks as MediaRecorder produces them and
         gets back normalized events — interim transcripts, and crucially the
@@ -768,7 +990,7 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
 
     async def design_preview(request: web.Request) -> web.StreamResponse:
         """
-        Serve a project's exported mockups — playbooks/design-subagent.md
+        Serve a project's exported mockups — playbook/design-subagent.md
         Tier 2's serving endpoint.
 
         generate_mockup hands back URLs under this prefix, and the exported
@@ -856,6 +1078,193 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
                 if row["tool_name"].startswith(DISPATCH_PREFIX)
             ]
             return web.json_response({"handoffs": rows})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"error": f"{type(e).__name__}: {e}"}, status=500)
+
+    # ── Revenue celebration (money-celebration.md Phase 2) ───────────────────
+
+    async def revenue_catchup(_request: web.Request) -> web.Response:
+        """
+        What this screen should celebrate right now.
+
+        Called on every connect and reconnect, which is the whole fix for
+        the "nobody was watching" gap: a payment that landed with the tab
+        closed is still uncelebrated, so it finally gets its moment when a
+        screen next opens. `withheld` is how many are being left in history
+        rather than replayed, so a burst is never a silent truncation.
+        """
+        try:
+            from agent.revenue.storage import RevenueRepo
+
+            return web.json_response(RevenueRepo().read_catchup())
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"error": f"{type(e).__name__}: {e}"}, status=500)
+
+    async def revenue_celebrated(request: web.Request) -> web.Response:
+        """
+        Mark payments as shown.
+
+        Both the live path and the catch-up path post here, which is what
+        keeps them in agreement — a payment celebrated live is not replayed
+        on the next reload because the live path recorded it too.
+        """
+        try:
+            body = await request.json()
+            ids = body.get("charge_ids")
+            if not isinstance(ids, list):
+                return web.json_response({"error": "expected charge_ids: []"}, status=400)
+
+            from agent.revenue.storage import RevenueRepo
+
+            return web.json_response({"marked": RevenueRepo().mark_celebrated(ids)})
+        except json.JSONDecodeError:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"error": f"{type(e).__name__}: {e}"}, status=500)
+
+    async def revenue_test(request: web.Request) -> web.Response:
+        """
+        Fire a test celebration at a given amount.
+
+        The playbook calls a manual trigger invaluable and it is right: every
+        tier of the animation, the sound, and the orb reaction is otherwise
+        only testable by taking real money. Writes a real (test-marked) row
+        so it travels the exact same catch-up path a Stripe charge does —
+        a trigger that bypasses the pipeline tests nothing about it.
+        """
+        try:
+            body = await request.json() if request.can_read_body else {}
+            amount = int(body.get("amount_minor", 130000))
+
+            from agent.revenue.storage import RevenueRepo
+
+            charge_id = f"test_{uuid.uuid4().hex[:16]}"
+            RevenueRepo().record_payment(
+                charge_id=charge_id, amount_minor=amount,
+                currency=str(body.get("currency", "usd")),
+                customer_label="Test celebration",
+            )
+            return web.json_response({"charge_id": charge_id, "amount_minor": amount})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"error": f"{type(e).__name__}: {e}"}, status=500)
+
+    async def board_meetings(_request: web.Request) -> web.Response:
+        """
+        Stored meetings, newest first — playbook/the-board.md Tier 6.
+
+        A read surface, not a new channel: a meeting Sean asked for already
+        reaches him through the conversation, and the standing review reaches
+        him as a heartbeat notice. This exists so a meeting from three weeks
+        ago is still readable, and it renders from the citations snapshotted
+        onto the meeting rather than from a dossier that may have changed.
+        """
+        try:
+            from agent.board.storage import BoardRepo
+
+            return web.json_response({"meetings": BoardRepo().recent_meetings(20)})
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"error": f"{type(e).__name__}: {e}"}, status=500)
+
+    # ── Scout doctrine (opportunity-scout.md Tiers 5 and 7) ──────────────────
+
+    def _scout_repo_and_overrides():
+        """A BuildRepo plus a document cache over it.
+
+        Built per request rather than held on the app: these are cheap SQLite
+        handles, and a request that builds its own cannot serve another
+        request's stale snapshot after an edit."""
+        from agent.factory.software.doctrine import DocumentOverrides
+        from agent.factory.software.storage import BuildRepo
+
+        repo = BuildRepo()
+        return repo, DocumentOverrides(repo)
+
+    async def scout_documents(_request: web.Request) -> web.Response:
+        """Every editable scout document, with its effective and default text."""
+        try:
+            from agent.factory.software.doctrine import active_lanes, all_document_states
+
+            repo, overrides = _scout_repo_and_overrides()
+            documents = all_document_states(overrides)
+            return web.json_response({
+                "documents": documents,
+                # The broad question — "does the scout have ANY override?" —
+                # answered separately from each document's own is_overridden,
+                # because the two drive different controls.
+                "any_overridden": any(d["is_overridden"] for d in documents),
+                "lanes": [
+                    {"label": lane.label, "title": lane.title} for lane in active_lanes(overrides)
+                ],
+                "repeats": repo.repeat_sightings(10),
+            })
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"error": f"{type(e).__name__}: {e}"}, status=500)
+
+    async def save_scout_documents(request: web.Request) -> web.Response:
+        """
+        Save one or more scout document overrides.
+
+        Validates EVERY document before writing ANY of them. A save that
+        writes the first textarea and then rejects the second leaves the
+        operator with no idea which half landed.
+        """
+        try:
+            from agent.factory.software.doctrine import find_editable, validate_document
+
+            body = await request.json()
+            updates = body.get("documents")
+            if not isinstance(updates, dict) or not updates:
+                return web.json_response({"error": "expected a non-empty 'documents' object"}, status=400)
+
+            # Pass 1 — resolve and validate. Routing is by the registry, not
+            # by the key the caller sent, so an unknown key is refused rather
+            # than written into the same table under a name nothing reads.
+            resolved = []
+            errors = {}
+            for key, text in updates.items():
+                document = find_editable(key)
+                if document is None:
+                    errors[key] = "not an editable document"
+                    continue
+                if not isinstance(text, str):
+                    errors[key] = "expected a string"
+                    continue
+                problem = validate_document(key, text)
+                if problem:
+                    errors[key] = problem
+                    continue
+                resolved.append((document, text))
+            if errors:
+                return web.json_response({"error": "validation failed", "errors": errors}, status=400)
+
+            # Pass 2 — write.
+            repo, overrides = _scout_repo_and_overrides()
+            for document, text in resolved:
+                repo.set_document(document.key, text)
+            # The writing process shouldn't have to wait out its own TTL.
+            overrides.refresh()
+            return web.json_response({"saved": [d.key for d, _ in resolved]})
+        except json.JSONDecodeError:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+        except Exception as e:  # noqa: BLE001
+            return web.json_response({"error": f"{type(e).__name__}: {e}"}, status=500)
+
+    async def revert_scout_document(request: web.Request) -> web.Response:
+        """Drop one document's override so the shipped file default returns."""
+        try:
+            from agent.factory.software.doctrine import find_editable
+
+            body = await request.json()
+            document = find_editable(str(body.get("key", "")))
+            if document is None:
+                return web.json_response({"error": "not an editable document"}, status=400)
+
+            repo, overrides = _scout_repo_and_overrides()
+            repo.delete_document(document.key)
+            overrides.refresh()
+            return web.json_response({"reverted": document.key})
+        except json.JSONDecodeError:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
         except Exception as e:  # noqa: BLE001
             return web.json_response({"error": f"{type(e).__name__}: {e}"}, status=500)
 
@@ -986,6 +1395,13 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
     app.router.add_get("/api/design/{project}/preview/{tail:.*}", design_preview)
     app.router.add_get("/api/mining", mining_status)
     app.router.add_get("/api/handoffs", pending_handoffs)
+    app.router.add_get("/api/revenue/catchup", revenue_catchup)
+    app.router.add_post("/api/revenue/celebrated", revenue_celebrated)
+    app.router.add_post("/api/revenue/test", revenue_test)
+    app.router.add_get("/api/board/meetings", board_meetings)
+    app.router.add_get("/api/scout/documents", scout_documents)
+    app.router.add_post("/api/scout/documents", save_scout_documents)
+    app.router.add_post("/api/scout/documents/revert", revert_scout_document)
     app.router.add_get("/api/heartbeat/notices", heartbeat_notices)
     app.router.add_post("/api/heartbeat/dismiss", dismiss_notice)
     app.router.add_post("/api/security/csp-report", csp_report)
@@ -998,16 +1414,23 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
     # Vendored Three.js (see vendor/three/) — served locally instead of the
     # unpkg CDN so the UI works offline and P7's CSP doesn't need a
     # third-party script-src origin.
+    # PWA surface (playbook/mobile-pwa.md). All three are public for the same
+    # reason index.html is: they are markup and icons, not a capability.
+    app.router.add_get("/sw.js", service_worker)
+    app.router.add_get("/manifest.json", web_manifest)
+    app.router.add_static("/static/", os.path.join(PROJECT_ROOT, "static"))
     app.router.add_static("/vendor/", os.path.join(PROJECT_ROOT, "vendor"))
     app.on_startup.append(_start_cost_tracking)
     app.on_startup.append(_start_factory_watcher)
     app.on_startup.append(_build_notes_index)
     app.on_startup.append(_start_software_factory)
+    app.on_startup.append(_start_remote_worker)
     app.on_startup.append(_start_heartbeat_scheduler)
     app.on_startup.append(_warm_piper_voice)
     app.on_cleanup.append(_stop_factory_watcher)
     app.on_cleanup.append(_stop_software_factory)
     app.on_cleanup.append(_stop_heartbeat_scheduler)
+    app.on_cleanup.append(_stop_remote_worker)
     app.on_cleanup.append(_stop_piper_warmup)
     return app
 

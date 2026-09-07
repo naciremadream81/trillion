@@ -1,5 +1,5 @@
 """
-BTC/USD price, cached — playbooks/btc-mining-tracker.md, "Data sources".
+BTC/USD price, cached — playbook/btc-mining-tracker.md, "Data sources".
 
 The playbook asks for a reputable keyless feed, a short TTL (~60s), and an
 in-memory lock to avoid stampedes. The lock is the part that is easy to skip

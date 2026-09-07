@@ -56,3 +56,13 @@ voices/*.onnx.json
 csp_reports.db
 mining.db
 design.db
+
+# Board of advisors, cross-machine queue, revenue celebration (all SQLite —
+# *.db above already covers them, listed for discoverability).
+board.db
+remote.db
+revenue.db
+
+# The desktop app's own virtualenv and build output.
+desktop/.venv/
+desktop/dist/

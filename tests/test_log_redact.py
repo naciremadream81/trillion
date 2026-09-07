@@ -20,6 +20,36 @@ class TestRedact(unittest.TestCase):
         self.assertIn("Authorization: Bearer <redacted>", result)
         self.assertNotIn("abc123", result)
 
+    def test_redacts_x_auth_token_header(self):
+        result = redact("X-Auth-Token: s3cret-value-here")
+        self.assertIn("X-Auth-Token: <redacted>", result)
+        self.assertNotIn("s3cret-value-here", result)
+
+    def test_redacts_token_query_param(self):
+        # playbook/mobile-pwa.md §6 puts a live credential in the request
+        # line, which is exactly the sort of thing that ends up in a log.
+        result = redact('GET /api/tts/abc?token=s3cret-value-here HTTP/1.1')
+        self.assertNotIn("s3cret-value-here", result)
+        self.assertIn("token=<redacted>", result)
+
+    def test_redacts_token_param_mid_query_without_eating_the_rest(self):
+        result = redact("/api/tts?turn=42&token=s3cret&format=mp3")
+        self.assertNotIn("s3cret", result)
+        self.assertIn("turn=42", result)
+        self.assertIn("format=mp3", result)
+
+    def test_redacts_access_token_aliases(self):
+        for name in ("access_token", "auth_token"):
+            with self.subTest(name=name):
+                result = redact(f"https://example.test/x?{name}=s3cret-value-here")
+                self.assertNotIn("s3cret-value-here", result)
+                self.assertIn(f"{name}=<redacted>", result)
+
+    def test_leaves_unrelated_params_named_like_tokens_alone(self):
+        # `tokens` is not `token` — a usage log line should survive intact.
+        result = redact("/api/usage?tokens=1200")
+        self.assertIn("tokens=1200", result)
+
     def test_redacts_anthropic_api_key(self):
         result = redact("key is sk-ant-api03-abcdefghijklmnop")
         self.assertNotIn("abcdefghijklmnop", result)

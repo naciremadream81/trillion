@@ -1,5 +1,5 @@
 """
-Mining heartbeat checks — playbooks/btc-mining-tracker.md, "Two polling
+Mining heartbeat checks — playbook/btc-mining-tracker.md, "Two polling
 cadences" and "Alerting".
 
 Two Checks implementing the protocol in agent/heartbeat/checks/base.py, so

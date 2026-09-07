@@ -116,6 +116,75 @@ class TestRotationOverlap(unittest.TestCase):
         self.assertTrue(is_authorized({}, "", "old"))
 
 
+class TestAlternateCredentialChannels(unittest.TestCase):
+    """
+    playbook/mobile-pwa.md §6 — an `<audio src>` element and a WebSocket
+    upgrade cannot set a header, so the token has to be accepted three ways.
+    """
+
+    def test_x_auth_token_header_is_accepted(self):
+        self.assertTrue(is_authorized({"X-Auth-Token": "secret"}, "secret"))
+
+    def test_x_auth_token_header_is_still_checked(self):
+        self.assertFalse(is_authorized({"X-Auth-Token": "nope"}, "secret"))
+
+    def test_x_auth_token_takes_no_bearer_prefix(self):
+        # It is a raw value, not an Authorization header — the scheme word
+        # is part of the credential and therefore simply wrong.
+        self.assertFalse(is_authorized({"X-Auth-Token": "Bearer secret"}, "secret"))
+
+    def test_query_param_is_accepted(self):
+        self.assertTrue(is_authorized({}, "secret", "", {"token": "secret"}))
+
+    def test_query_param_is_still_checked(self):
+        self.assertFalse(is_authorized({}, "secret", "", {"token": "nope"}))
+
+    def test_query_param_honours_rotation_overlap(self):
+        self.assertTrue(is_authorized({}, "new", "old", {"token": "old"}))
+
+    def test_query_is_ignored_when_not_passed(self):
+        # Every caller that isn't the middleware checks headers only; a
+        # `token` key that never reaches is_authorized cannot authorize.
+        self.assertFalse(is_authorized({}, "secret"))
+
+    def test_a_good_channel_wins_over_a_bad_one(self):
+        self.assertTrue(
+            is_authorized({"Authorization": "Bearer wrong"}, "secret", "", {"token": "secret"})
+        )
+        self.assertTrue(
+            is_authorized({"X-Auth-Token": "secret"}, "secret", "", {"token": "wrong"})
+        )
+
+    def test_all_channels_wrong_is_rejected(self):
+        self.assertFalse(
+            is_authorized(
+                {"Authorization": "Bearer a", "X-Auth-Token": "b"},
+                "secret",
+                "",
+                {"token": "c"},
+            )
+        )
+
+    def test_empty_values_do_not_authorize(self):
+        for headers, query in (
+            ({"X-Auth-Token": ""}, None),
+            ({}, {"token": ""}),
+            ({"Authorization": "Bearer "}, {"token": ""}),
+        ):
+            with self.subTest(headers=headers, query=query):
+                self.assertFalse(is_authorized(headers, "secret", "", query))
+
+    def test_hostile_values_do_not_raise(self):
+        # Same surrogateescape hazard as the Authorization header, now on
+        # two more channels.
+        for headers, query in (
+            ({"X-Auth-Token": "tok\udce9n"}, None),
+            ({}, {"token": "tok\udce9n"}),
+        ):
+            with self.subTest(headers=headers, query=query):
+                self.assertFalse(is_authorized(headers, "secret", "", query))
+
+
 class FakeClock:
     """Monotonic-shaped clock the limiter tests advance by hand."""
 
@@ -295,6 +364,22 @@ class TestServeBearerAuth(AioHTTPTestCase):
             "GET", "/api/usage", headers={"Authorization": f"Bearer {self.AUTH_TOKEN}"}
         )
         self.assertEqual(resp.status, 200)
+
+    async def test_api_route_accepts_x_auth_token_header(self):
+        resp = await self.client.request(
+            "GET", "/api/usage", headers={"X-Auth-Token": self.AUTH_TOKEN}
+        )
+        self.assertEqual(resp.status, 200)
+
+    async def test_api_route_accepts_token_query_param(self):
+        # The channel an `<audio src>` element has to use — it cannot set a
+        # header at all (playbook/mobile-pwa.md §6).
+        resp = await self.client.request("GET", "/api/usage", params={"token": self.AUTH_TOKEN})
+        self.assertEqual(resp.status, 200)
+
+    async def test_api_route_rejects_wrong_token_query_param(self):
+        resp = await self.client.request("GET", "/api/usage", params={"token": "wrong-token"})
+        self.assertEqual(resp.status, 401)
 
     async def test_csp_report_endpoint_exempt_even_with_token_configured(self):
         resp = await self.client.request(

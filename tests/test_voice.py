@@ -42,7 +42,7 @@ class TestPiperGuard(unittest.TestCase):
 
 class TestPiperWarmUp(unittest.TestCase):
     """
-    smooth-voice_2 Tier 4: loading the ~63MB ONNX model lazily meant the first
+    smooth-voice Tier 4: loading the ~63MB ONNX model lazily meant the first
     spoken reply after every restart paid ~4s for it. warm_up() moves that to
     server startup. Loading a real model needs the (gitignored) voice file, so
     these cover the contract around it — the cache check and the failure mode —

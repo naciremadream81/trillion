@@ -15,7 +15,7 @@ Synthesis is CPU-bound and blocking, so callers should run it in a thread
 
 That "loaded once" is lazy, which used to mean the *first* voice turn
 after every process restart paid the load cost — measured at ~4s on this
-Pi, and by far the largest single number in the smooth-voice_2 Tier 1
+Pi, and by far the largest single number in the smooth-voice Tier 1
 breakdown. warm_up() moves that cost to server startup, where nobody is
 waiting on it; serve.py calls it in the background at boot.
 """

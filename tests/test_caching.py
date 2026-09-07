@@ -58,7 +58,7 @@ class TestApplyPromptCaching(unittest.TestCase):
 
 class TestCachedPrefixStaysStable(unittest.TestCase):
     """
-    smooth-voice_2 Tier 3's named failure mode: caching is switched on, but
+    smooth-voice Tier 3's named failure mode: caching is switched on, but
     something that changes every turn sits inside the cached prefix, so the
     whole thing is re-read from scratch each turn and replies creep slower
     the deeper the conversation goes.

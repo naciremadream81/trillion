@@ -229,7 +229,7 @@ threshold: a layered fast/slow pair was built, measured, and deliberately remove
 to mean "they said a lot", not "they finished", so it cut people off mid-sentence;
 the full history is commented above `VAD_DEFAULTS` in `index.html`). And it
 protects pauses strictly *shorter* than its value — 1200ms leaves roughly 200ms of
-margin over the ~1s mid-thought pause `playbooks/smooth-voice_2.md` warns about.
+margin over the ~1s mid-thought pause `playbook/smooth-voice.md` warns about.
 Lowering it trades directly against getting cut off while thinking.
 
 Poisoned values self-heal: a non-finite or missing tunable falls back to the
@@ -381,7 +381,7 @@ Paste this into the chat:
 
 > "We're building Trillion. Read README.md for what's built, AGENT.md for the
 > product and safety spec, and HANDOFF.md for how we got here. All six tiers,
-> self-knowledge, cosmic-orb UI tiers 4-6, and smooth-voice_2 Tiers 1-6 are done,
+> self-knowledge, cosmic-orb UI tiers 4-6, and smooth-voice Tiers 1-6 are done,
 > measured and verified against the deployed Pi itself. Remaining voice work:
 > streaming STT (which would give end-of-turn detection a real recognizer signal
 > instead of audio energy), acoustic barge-in, and server-side cancellation on

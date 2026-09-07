@@ -15,7 +15,12 @@ which the browser's Reporting API POSTs automatically with no way to attach
 a custom header. The static UI shell (/, /index.html, /vendor/) stays
 public — it's markup and vendored JS, not a capability — so the page still
 loads; whoever calls /api/chat (etc.) from a non-loopback deployment is
-responsible for attaching the header themselves.
+responsible for presenting the token themselves.
+
+Three channels carry it: `Authorization: Bearer`, an `X-Auth-Token` header,
+and a `?token=` query param. The third exists only because an `<audio src>`
+element and a WebSocket upgrade cannot set a header at all
+(playbook/mobile-pwa.md §6) — see _presented_credentials().
 
 When settings.web_auth_token is empty (the loopback-only default), this
 middleware is a no-op — mirrors audit.py's _bearer_token() "not required
@@ -80,17 +85,64 @@ def _matches(candidate: str, token: str) -> bool:
     )
 
 
-def is_authorized(headers, token: str, prev_token: str = "") -> bool:
+def _presented_credentials(headers, query=None) -> list[str]:
     """
-    True if `headers` (a Mapping — aiohttp's CIMultiDict or a plain dict in
-    tests) carries a matching `Authorization: Bearer <token>` header. An
-    empty token means auth isn't configured at all, so every request is
-    authorized — split out like headers.py's apply_security_headers() so
-    the logic is testable without an aiohttp Request or event loop.
+    Every credential the request presents, in no particular order.
 
-    The scheme is matched case-insensitively (RFC 7235 §2.1: auth scheme
-    names are case-insensitive, so `bearer <token>` is as valid as
-    `Bearer <token>`).
+    Three channels, because the browser cannot use one of them everywhere
+    (playbook/mobile-pwa.md §6):
+
+      Authorization: Bearer <token>   the normal path, whenever JS fetches
+      X-Auth-Token: <token>           alternate header, same reachability
+      ?token=<token>                  the ONLY channel available to an
+                                      `<audio src>` element and to the
+                                      WebSocket upgrade handshake, neither
+                                      of which can carry a custom header
+
+    The query param is the weakest of the three — a token in a URL lands in
+    access logs, `Referer`, and browser history — so it is deliberately last
+    resort rather than the documented default. agent/security/log_redact.py
+    masks `token=` in anything this process logs; a reverse proxy in front
+    of a non-loopback deployment needs the same treatment in its own access
+    log (see docs/incident-runbook.md).
+
+    A malformed or absent Authorization header contributes nothing rather
+    than contributing an empty string: _matches() rejects an empty candidate
+    against an empty configured token, but keeping junk out of the candidate
+    list keeps the comparison count tied to what was actually sent.
+    """
+    presented: list[str] = []
+
+    scheme, _, value = headers.get("Authorization", "").partition(" ")
+    if scheme.lower() == "bearer" and value:
+        presented.append(value)
+
+    alt = headers.get("X-Auth-Token", "")
+    if alt:
+        presented.append(alt)
+
+    if query is not None:
+        qval = query.get("token", "")
+        if qval:
+            presented.append(qval)
+
+    return presented
+
+
+def is_authorized(headers, token: str, prev_token: str = "", query=None) -> bool:
+    """
+    True if the request presents a matching credential on any of the three
+    channels in _presented_credentials(). `headers` is a Mapping (aiohttp's
+    CIMultiDict, or a plain dict in tests) and `query` is the same shape;
+    passing no `query` checks headers only, which is what every caller that
+    isn't the middleware wants. An empty token means auth isn't configured
+    at all, so every request is authorized — split out like headers.py's
+    apply_security_headers() so the logic is testable without an aiohttp
+    Request or event loop.
+
+    The Authorization scheme is matched case-insensitively (RFC 7235 §2.1:
+    auth scheme names are case-insensitive, so `bearer <token>` is as valid
+    as `Bearer <token>`).
 
     §2.1 rotation overlap: `prev_token`, when set, is accepted as well as
     `token`, through the same constant-time comparison. This is what makes a
@@ -101,18 +153,19 @@ def is_authorized(headers, token: str, prev_token: str = "") -> bool:
     extra: _matches() returns False on an empty token rather than treating it
     as a wildcard.
 
-    Both comparisons run even when the first one matches. Short-circuiting on
-    the current token would make "matched current" measurably faster than
-    "matched previous", which leaks which of the two a caller is holding.
+    Every comparison runs even once one has matched. Short-circuiting would
+    make "matched current" measurably faster than "matched previous", and
+    "matched on the header" faster than "matched on the query param" — both
+    of which leak which credential a caller is holding.
     """
     if not token:
         return True
-    scheme, _, value = headers.get("Authorization", "").partition(" ")
-    if scheme.lower() != "bearer":
-        return False
-    current_ok = _matches(value, token)
-    prev_ok = _matches(value, prev_token)
-    return current_ok or prev_ok
+    ok = False
+    for candidate in _presented_credentials(headers, query):
+        current_ok = _matches(candidate, token)
+        prev_ok = _matches(candidate, prev_token)
+        ok = ok or current_ok or prev_ok
+    return ok
 
 
 class AuthRateLimiter:
@@ -280,7 +333,7 @@ def bearer_auth_middleware(token: str, prev_token: str = "", limiter: AuthRateLi
                 headers={"Retry-After": str(retry_after)},
             )
 
-        if not is_authorized(request.headers, token, prev_token):
+        if not is_authorized(request.headers, token, prev_token, request.query):
             limiter.record_failure(address)
             return web.json_response({"error": "unauthorized"}, status=401)
 

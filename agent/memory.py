@@ -3,7 +3,7 @@ Persistent memory store (Tier 4).
 
 Markdown is the source of truth, not SQLite — Tier 4 explicitly wants facts
 Sean can read and edit by hand, and that means zero migration burden if the
-storage seam ever changes (see playbooks/hybrid-model.md). One fact per
+storage seam ever changes (see playbook/hybrid-model.md). One fact per
 line, as a plain markdown bullet:
 
     - Sean's co-founder for Trillion, works from a Pi 5 and a laptop.

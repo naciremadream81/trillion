@@ -10,7 +10,7 @@ Trillion is a **single-user** Python agent: chat in the terminal or browser, swa
 
 Self-knowledge (`agent/selfknowledge/`, generating `context/self/trillion.md`) and cosmic-orb UI tiers 4-6 (sub-agent constellation, dispatch beams/rings, performance mode, `prefers-reduced-motion`) are built — the orb UI change couldn't be visually verified against a real WebGL context in this session's sandboxed preview browser (no GPU there), so treat it as code-reviewed and unit-tested but not yet eyeballed running; check it in a real browser before relying on it.
 
-Voice latency instrumentation (smooth-voice_2 Tier 1, measure-only) is built into `index.html`'s voice flow: `console.log`s a per-turn breakdown (stop speaking → transcript final → first model token → first audio byte → first sound playing) and leaves it at `window.trillionVoiceLatency`. Real numbers, measured against the actual deployed `trillion-orb.service` on the Pi 5 itself (not a separate dev machine — a prior pass through this README mistakenly assumed otherwise):
+Voice latency instrumentation (smooth-voice Tier 1, measure-only) is built into `index.html`'s voice flow: `console.log`s a per-turn breakdown (stop speaking → transcript final → first model token → first audio byte → first sound playing) and leaves it at `window.trillionVoiceLatency`. Real numbers, measured against the actual deployed `trillion-orb.service` on the Pi 5 itself (not a separate dev machine — a prior pass through this README mistakenly assumed otherwise):
 
 | Leg | Real, measured |
 |---|---|
@@ -338,7 +338,7 @@ trillion/
 │   ├── mining/             # Ocean pool client, snapshot storage, BTC price
 │   ├── design/             # Head-of-Design: docs, tokens, scaffold, catalog, composer, images, references
 │   └── factory/            # Agent Factory + software/ builds + Tier 5 handoffs
-├── playbooks/              # Design notes and feature prompts
+├── playbook/              # Design notes and feature prompts
 ├── docs/                   # Incident runbook, handoff records
 ├── context/                # Docs injected into the system prompt
 │   └── _manifest.toml      # Authoritative list of which ones load
@@ -385,7 +385,7 @@ After that, every `git commit` runs gitleaks plus a few hygiene checks (private 
 |-----|------|
 | [`AGENT.md`](AGENT.md) | Identity, tone, safety, stack decisions |
 | [`HANDOFF.md`](HANDOFF.md) | Resume notes for a new coding session |
-| [`playbooks/`](playbooks/) | Feature design (agent factory, voice, UI, etc.) |
-| [`playbooks/start-here.md`](playbooks/start-here.md) | Original voice-first build playbook |
+| [`playbook/`](playbook/) | Feature design (agent factory, voice, UI, etc.) |
+| [`playbook/start-here.md`](playbook/start-here.md) | Original voice-first build playbook |
 | [`context/analytics-supabase-schema.md`](context/analytics-supabase-schema.md) | Analytics schema notes |
 | [`.env.example`](.env.example) | Full commented env template |

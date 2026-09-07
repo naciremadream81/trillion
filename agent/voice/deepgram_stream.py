@@ -1,5 +1,5 @@
 """
-Deepgram streaming speech-to-text (smooth-voice_2 Tier 2, the real signal).
+Deepgram streaming speech-to-text (smooth-voice Tier 2, the real signal).
 
 The batch sibling (deepgram_stt.py) posts a finished recording and gets a
 transcript back. That is correct for push-to-talk, where the stop-tap *is*

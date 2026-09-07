@@ -1,1 +1,1 @@
-"""Bitcoin mining tracker (playbooks/btc-mining-tracker.md)."""
+"""Bitcoin mining tracker (playbook/btc-mining-tracker.md)."""

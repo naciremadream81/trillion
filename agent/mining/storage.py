@@ -1,5 +1,5 @@
 """
-Mining tracker storage — playbooks/btc-mining-tracker.md, "Storage shape".
+Mining tracker storage — playbook/btc-mining-tracker.md, "Storage shape".
 
 Four tables, following the playbook's shape adapted to this codebase's
 SQLite conventions (see agent/cost/storage.py and agent/safety/storage.py):

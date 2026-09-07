@@ -74,6 +74,32 @@ class Settings:
     factory_autonomous_themes: list[str] = field(default_factory=list)
     factory_autonomous_interval_hours: float = 24.0
 
+    # ── Board of advisors (playbook/the-board.md) ─────────────────────────
+    # Off unless a roster exists — see agent/board/seats/README.md. The
+    # ceiling is per meeting, and a meeting is one router call plus one call
+    # per seat plus a chair call, so it is a real number rather than a
+    # formality. Zero means the board never convenes, and the check runs
+    # BEFORE anything is spent (agent/board/meeting.py).
+    board_enabled: bool = False
+    board_meeting_ceiling_usd: float = 0.75
+    # The monthly standing review (Tier 7). Owned by serve.py alone —
+    # registering it in main.py too would double-convene, at four paid calls
+    # a time, on any day both processes happen to be running.
+    board_standing_review: bool = False
+
+    # ── Cross-machine dispatch (playbook/cloud-to-local.md) ───────────────
+    # Two roles, and a process may hold either, both, or neither:
+    #   worker  — this machine HAS the local capability and drains the queue.
+    #   proxy   — this machine does NOT, so laptop-only tools are replaced by
+    #             enqueueing doppelgangers with the same name and schema.
+    # Enabling both in one process is legal and useful only for testing; in
+    # normal use exactly one machine is the worker. The no-double-fire
+    # guarantee doesn't depend on these flags — a proxy is only ever built
+    # for a tool the registry does not already have.
+    remote_worker_enabled: bool = False
+    remote_proxy_enabled: bool = False
+    remote_worker_role: str = "local_primary"
+
     # Voice V1: Deepgram STT (cloud) + a selectable TTS provider.
     # TTS_PROVIDER picks between "piper" (local, offline, free — the default,
     # and what every existing deployment keeps using unless this is set
@@ -82,7 +108,7 @@ class Settings:
     # alike). Both are real options now that Sean has a paid ElevenLabs plan;
     # see docs/superpowers/specs/2026-08-17-elevenlabs-tts-provider-design.md
     # for why Piper stays the default (never swap the active voice provider
-    # without asking first — playbooks/smooth-voice_2.md, line 19).
+    # without asking first — playbook/smooth-voice.md, line 19).
     # An unrecognized TTS_PROVIDER value (a typo, e.g. "elevenlab") is not
     # rejected — it silently falls through to the Piper path in serve.py's
     # synthesize_speech(), same as unset. That's deliberate per the design
@@ -187,7 +213,7 @@ class Settings:
     # routes by agent/security/auth.py's bearer_auth_middleware, so rotating
     # it immediately revokes anyone holding the old value. When it's empty
     # (the loopback-only default) that middleware is a no-op.
-    # ── Design agent (playbooks/design-subagent.md) ─────────────────────────
+    # ── Design agent (playbook/design-subagent.md) ─────────────────────────
     # Off unless enabled: it spawns Claude Code, which writes files and spends
     # money, so it should not appear in the registry by accident. Requires the
     # `claude` CLI on PATH.
@@ -197,7 +223,7 @@ class Settings:
     # Model for the composition subprocess. None = Claude Code's own default.
     design_compose_model: str = ""
 
-    # ── Mining tracker (playbooks/btc-mining-tracker.md) ────────────────────
+    # ── Mining tracker (playbook/btc-mining-tracker.md) ────────────────────
     # The payout address the tracker follows. Empty disables the feature
     # entirely — build_mining_checks() returns nothing rather than erroring,
     # mirroring how the Code Sentinel self-skips without a GitHub token.
@@ -236,6 +262,12 @@ class Settings:
 def get_settings() -> Settings:
     return Settings(
         supabase_analytics_url=os.getenv("SUPABASE_ANALYTICS_URL", ""),
+        remote_worker_enabled=_env_bool("TRILLION_REMOTE_WORKER"),
+        remote_proxy_enabled=_env_bool("TRILLION_REMOTE_PROXY"),
+        remote_worker_role=os.getenv("TRILLION_REMOTE_WORKER_ROLE", "local_primary"),
+        board_enabled=_env_bool("TRILLION_BOARD_ENABLED"),
+        board_meeting_ceiling_usd=_env_float("TRILLION_BOARD_CEILING_USD", 0.75),
+        board_standing_review=_env_bool("TRILLION_BOARD_STANDING_REVIEW"),
         software_factory_root=os.getenv("TRILLION_SOFTWARE_FACTORY_ROOT", "generated-projects"),
         factory_daily_build_cap=_env_int("TRILLION_FACTORY_DAILY_BUILD_CAP", 3),
         factory_daily_budget_usd=_env_float("TRILLION_FACTORY_DAILY_BUDGET_USD", None),
