@@ -14,6 +14,13 @@ venv/
 env/
 dist/
 build/
+# ...but NOT the vendored Three.js build. The bare `build/` above matches
+# vendor/three/build/ too, which silently kept three.module.js out of every
+# commit — so the import map's "three" specifier 404'd and the whole 3D
+# scene failed to initialise in a fresh clone. Vendoring exists precisely so
+# the UI works offline and the CSP needs no third-party script-src; a
+# vendored file that was never committed does neither.
+!vendor/three/build/
 *.egg-info/
 .eggs/
 
