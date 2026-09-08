@@ -96,7 +96,7 @@ class TestChatCancellation(AioHTTPTestCase):
     """
     An aborted /api/chat must stop generating, not keep billing.
 
-    smooth-voice_2 Tier 6: barge-in aborts the fetch on the client every time
+    smooth-voice Tier 6: barge-in aborts the fetch on the client every time
     Sean talks over Trillion, so this is a hot path, not an edge case. Before
     this, an aborted request kept generating until a write happened to hit
     the dropped connection — and aiohttp buffers, so that could be the whole

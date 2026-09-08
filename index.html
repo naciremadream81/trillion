@@ -2,7 +2,19 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<!-- viewport-fit=cover — playbook/mobile-pwa.md §8. Without it iOS letterboxes
+     the page inside the safe area and the full-bleed canvas stops being
+     full-bleed. Anything that must clear the notch or the home indicator uses
+     the env(safe-area-inset-*) values this unlocks. -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<meta name="theme-color" content="#0E0F13" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Trillion" />
+<link rel="manifest" href="/manifest.json" />
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png" />
+<link rel="icon" href="/static/icons/orb-192.png" type="image/png" />
 <title>Trillion</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -33,7 +45,13 @@
     position: fixed;
     inset: 0;
     width: 100vw;
+    /* 100vh is the mobile-Safari trap: it means the viewport with the URL
+       bar *hidden*, so the canvas is taller than the visible area and its
+       bottom is cut off until you scroll. 100dvh tracks the live viewport
+       instead (playbook/mobile-pwa.md §8). The 100vh line stays as the
+       fallback for engines that don't know dvh. */
     height: 100vh;
+    height: 100dvh;
     display: block;
     z-index: 1;
     pointer-events: auto; /* canvas is the base interactive layer */
@@ -78,7 +96,7 @@
   /* ============ ICON-BUTTON "ON" STATE (perf mode + hands-free voice) ==
      Shared accent style for any header icon-button toggle, not just perf
      mode (the name stuck from when perf mode was the only one). Reused
-     as-is for tr-handsfree (smooth-voice_2 Tier 2/6) rather than adding a
+     as-is for tr-handsfree (smooth-voice Tier 2/6) rather than adding a
      near-duplicate rule. ======================================== */
   .tr-icon-btn.perf-on { color: var(--accent); }
 
@@ -485,6 +503,142 @@
     transition: background 0.2s var(--ease), color 0.2s var(--ease);
   }
   .tr-notice-dismiss:hover { background: rgba(255, 255, 255, 0.06); color: #ff6b6b; }
+
+  /* ===================== HANDOFF PROPOSALS (orchestration Tier 5) =====================
+     Read-only on purpose. Tier 5 makes the human the circuit-breaker, and
+     agent/factory/handoff.py parks a proposal as a pending action that only
+     confirm_action can execute — which needs a genuine human turn in the main
+     conversation. An Approve button here would be a second code path around
+     that defense, so there isn't one: Sean answers out loud, like any other
+     confirmation. This panel exists so the offer isn't buried in a transcript
+     he has scrolled past. */
+  .tr-handoff-row {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 8px 0; border-bottom: 1px solid var(--border);
+  }
+  .tr-handoff-row:last-child { border-bottom: none; }
+  .tr-handoff-mark {
+    flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%;
+    margin-top: 5px; background: var(--purple);
+  }
+  .tr-handoff-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .tr-handoff-target {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.3px;
+    color: var(--purple);
+  }
+  .tr-handoff-task {
+    font-size: 12px; color: var(--text); line-height: 1.4;
+    overflow-wrap: anywhere;
+  }
+  .tr-handoff-meta { font-size: 10px; color: var(--text-dim); }
+
+  /* ============ SCOUT DOCTRINE PANEL (opportunity-scout.md Tier 5) ============
+     Wider than the read-only panels because the operator is editing prose
+     here, not glancing at a number. Every textarea renders POPULATED with
+     the document that is actually in force — an empty box next to "no
+     default available" reads as "this feature doesn't exist" and the
+     operator stops looking. */
+  .tr-scout-panel { width: min(560px, calc(100vw - 32px)); max-height: 78vh; }
+  .tr-scout-body { overflow-y: auto; }
+  .tr-scout-body::-webkit-scrollbar { width: 6px; }
+  .tr-scout-body::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.08); border-radius: 3px; }
+  .tr-scout-doc-head {
+    display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 6px;
+  }
+  .tr-scout-doc-label {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.6px;
+    text-transform: uppercase; color: var(--text);
+  }
+  .tr-scout-flag {
+    font-size: 9px; font-weight: 600; letter-spacing: 0.8px; text-transform: uppercase;
+    padding: 2px 6px; border-radius: 4px;
+    background: rgba(124, 77, 255, 0.18); color: #b39dff;
+  }
+  .tr-scout-doc-desc { font-size: 11px; color: var(--text-dim); margin: 0 0 8px; line-height: 1.45; }
+  .tr-scout-doc-head .tr-scout-revert { margin-left: auto; }
+  .tr-scout-ta {
+    width: 100%; min-height: 150px; resize: vertical;
+    padding: 10px; border-radius: 8px;
+    border: 1px solid var(--border-strong);
+    background: rgba(0, 0, 0, 0.28); color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px; line-height: 1.5;
+  }
+  .tr-scout-ta:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .tr-scout-btn {
+    padding: 6px 12px; border-radius: 7px;
+    border: 1px solid var(--border-strong); background: rgba(255, 255, 255, 0.03);
+    color: var(--text); font-family: inherit; font-size: 11px; font-weight: 600;
+    cursor: pointer; transition: background 0.2s var(--ease);
+  }
+  .tr-scout-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.09); }
+  .tr-scout-btn:disabled { opacity: 0.4; cursor: default; }
+  .tr-scout-btn.primary { border-color: var(--accent); color: var(--accent); }
+  .tr-scout-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .tr-scout-msg { font-size: 11px; color: var(--text-dim); flex: 1; min-width: 0; }
+  .tr-scout-msg.error { color: #ff8080; }
+  .tr-scout-msg.ok { color: var(--accent); }
+  .tr-scout-lanes { display: flex; flex-wrap: wrap; gap: 5px; }
+  .tr-scout-lane {
+    font-size: 10px; padding: 3px 7px; border-radius: 5px;
+    background: rgba(255, 255, 255, 0.05); color: var(--text-dim);
+  }
+  .tr-scout-lane.today { background: rgba(45, 212, 168, 0.15); color: var(--accent); }
+  .tr-scout-repeat { display: flex; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .tr-scout-repeat:last-child { border-bottom: none; }
+  .tr-scout-repeat-n {
+    flex: 0 0 auto; font-size: 10px; font-weight: 600; color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+  .tr-scout-repeat-t { font-size: 11px; color: var(--text-dim); line-height: 1.4; min-width: 0; }
+
+  /* ============ REVENUE CELEBRATION (money-celebration.md Phase 3) ============
+     An overlay that never disrupts whatever Sean is doing: pointer-events
+     none, above everything, and it removes itself when it finishes. The
+     amount is the hero — the number is the point, the particles are the
+     frame around it. */
+  .tr-cel {
+    position: fixed; inset: 0; z-index: 90;
+    pointer-events: none;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 4px;
+  }
+  .tr-cel canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .tr-cel-amount {
+    position: relative;
+    font-size: clamp(48px, 11vw, 132px);
+    font-weight: 700; letter-spacing: -0.04em;
+    color: var(--accent);
+    text-shadow: 0 0 40px rgba(45, 212, 168, 0.55), 0 0 120px rgba(45, 212, 168, 0.3);
+    font-variant-numeric: tabular-nums;
+    animation: tr-cel-pop 2400ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+  .tr-cel-who {
+    position: relative;
+    font-size: 13px; letter-spacing: 0.4px; color: var(--text-dim);
+    white-space: nowrap;
+    animation: tr-cel-fade 2400ms ease forwards;
+  }
+  @keyframes tr-cel-pop {
+    0%   { transform: scale(0.6); opacity: 0; }
+    12%  { transform: scale(1.06); opacity: 1; }
+    22%  { transform: scale(1); opacity: 1; }
+    78%  { transform: scale(1); opacity: 1; }
+    100% { transform: scale(1.04); opacity: 0; }
+  }
+  @keyframes tr-cel-fade {
+    0%, 14% { opacity: 0; } 26%, 74% { opacity: 1; } 100% { opacity: 0; }
+  }
+  /* Reduced motion: the number still arrives, it just stops performing.
+     Toning it down rather than removing it keeps the signal. */
+  @media (prefers-reduced-motion: reduce) {
+    .tr-cel canvas { display: none; }
+    .tr-cel-amount { animation: tr-cel-fade 2600ms ease forwards; text-shadow: none; }
+  }
+  .tr-cel-more {
+    position: absolute; bottom: 12%; left: 50%; transform: translateX(-50%);
+    font-size: 11px; color: var(--text-dim);
+  }
 </style>
 </head>
 <body>
@@ -544,7 +698,7 @@
           <path d="M14 19a2 2 0 0 1-4 0"/>
         </svg>
       </button>
-      <button class="tr-icon-btn" title="Settings" aria-label="Settings">
+      <button class="tr-icon-btn" id="tr-settings" title="Scout settings" aria-label="Scout settings" aria-expanded="false" aria-haspopup="dialog">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"/>
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
@@ -637,12 +791,26 @@
   </div>
 
   <!-- ==================== HEARTBEAT NOTICES EXPAND PANEL ==================== -->
-  <div class="tr-cost-panel" id="tr-notices-panel" role="dialog" aria-label="Heartbeat notices">
+  <div class="tr-cost-panel" id="tr-notices-panel" role="dialog" aria-label="Alerts and handoff proposals">
     <div class="tr-cost-phead">
       <div class="tr-cost-plabel">Alerts</div>
     </div>
+    <div class="tr-cost-sec" id="tr-handoffs-sec" hidden>
+      <h4>Waiting on you</h4>
+      <div id="tr-handoffs-list"></div>
+    </div>
     <div class="tr-cost-sec">
       <div id="tr-notices-list"><div class="tr-cost-empty">No active notices.</div></div>
+    </div>
+  </div>
+
+  <!-- ==================== SCOUT DOCTRINE PANEL (Tier 5) ==================== -->
+  <div class="tr-cost-panel tr-scout-panel" id="tr-scout-panel" role="dialog" aria-label="Scout doctrine and hunting lanes">
+    <div class="tr-cost-phead">
+      <div class="tr-cost-plabel">Opportunity scout</div>
+    </div>
+    <div class="tr-scout-body" id="tr-scout-body">
+      <div class="tr-cost-sec"><div class="tr-cost-empty">Loading…</div></div>
     </div>
   </div>
 
@@ -719,7 +887,7 @@
     <!-- Static pre-JS fallback text only — the voice IIFE below overwrites
          this via idleHintText() on load and on every mode change. Used to
          say 'Tap or say "Hey Trillion"', advertising a wake word that has
-         never existed anywhere in this codebase (smooth-voice_2 Tier 2/6
+         never existed anywhere in this codebase (smooth-voice Tier 2/6
          fix). Matches IDLE_HINT; hands-free's own wording only applies
          once JS has read the localStorage flag. -->
     <div class="tr-mic-hint">Tap to speak</div>
@@ -1835,7 +2003,7 @@
     // for why this needs to be an explicit id, not a re-read of shared state.
     let recordingStopTurnId = null;
 
-    // ================= Hands-free voice mode toggle (smooth-voice_2 Tier 2/6) =================
+    // ================= Hands-free voice mode toggle (smooth-voice Tier 2/6) =================
     // OPT-IN, default OFF. Mirrors the tr-perf header toggle's exact shape —
     // localStorage-backed state, a reflect() that syncs the button's visual
     // + aria-pressed state, a window.set*() console hook, and a
@@ -1848,7 +2016,7 @@
     // group in the header than its logic does.
     let handsFree = localStorage.getItem('trillion-voice-handsfree') === '1';
 
-    // ============ Streaming STT (smooth-voice_2 Tier 2, the real signal) ============
+    // ============ Streaming STT (smooth-voice Tier 2, the real signal) ============
     // The VAD block below has a long comment explaining that Tier 2 assumes
     // you can lean on the recognizer's own end-of-utterance signal, and that
     // we couldn't, because /api/transcribe is batch Deepgram. This is that
@@ -2214,7 +2382,7 @@
       }, window.trillionVoiceVad.rearmDelayMs);
     }
 
-    // ============= Voice latency instrumentation (smooth-voice_2 Tier 1) =============
+    // ============= Voice latency instrumentation (smooth-voice Tier 1) =============
     // Measures, doesn't fix: breaks one real turn into the checkpoints the
     // playbook asks for — stop speaking, transcript final, first model
     // token, first audio byte, first sound actually playing. Logged to the
@@ -2261,7 +2429,7 @@
       voiceLatency = null; // one report per turn; the next tap starts fresh
     }
 
-    // ================= Turn lifecycle & barge-in (smooth-voice_2 Tier 6) =================
+    // ================= Turn lifecycle & barge-in (smooth-voice Tier 6) =================
     // A "turn" is one listen -> think -> speak cycle. Before this block, the
     // only thing barge-in did was pause the current <audio> and reset the
     // local speech queue (see cancelSpeech below) — it never touched the
@@ -2326,7 +2494,7 @@
     }
     function isCurrent(id) { return id !== 0 && id === activeTurnId; }
 
-    // ================= Hands-free silence detection (smooth-voice_2 Tier 2) =================
+    // ================= Hands-free silence detection (smooth-voice Tier 2) =================
     // WHY THIS SHAPE: the playbook's Tier 2 says "lean on the recognizer's
     // end-of-utterance signal" when you have one. We don't. /api/transcribe
     // is batch Deepgram — the browser records the WHOLE clip with
@@ -2374,7 +2542,7 @@
       onsetFrames: 3,                 // consecutive above-threshold frames (150ms at 20Hz) required to confirm speech onset — a single loud transient (door slam, keyboard clack) must not arm the endpointer
       // ONE silence threshold, deliberately. This started as a layered
       // fast/slow pair (700ms when "confident", 1500ms otherwise) straight
-      // out of smooth-voice_2's Tier 2, and it was removed after measurement,
+      // out of smooth-voice's Tier 2, and it was removed after measurement,
       // not after argument. The history is worth keeping, because the
       // layered design is genuinely the right idea when you can support it:
       //
@@ -2579,7 +2747,7 @@
         // silenceMs and nothing at or beyond it. The original reproduction
         // used a 1200ms pause, which now sits exactly ON the threshold and
         // therefore DOES end the turn (see the next case). What 1200ms buys
-        // is protection of the ~1s mid-thought pause smooth-voice_2 actually
+        // is protection of the ~1s mid-thought pause smooth-voice actually
         // warns about, with ~200ms of margin — not protection of arbitrarily
         // long pauses, which no silence-based endpointer can offer without
         // making every turn feel sluggish.
@@ -2961,7 +3129,7 @@
       clearBareMaxUtteranceTimer();
       if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
       setMic(false);
-      // smooth-voice_2 Tier 1: push-to-talk means "tap to stop" IS "stopped
+      // smooth-voice Tier 1: push-to-talk means "tap to stop" IS "stopped
       // speaking". Set synchronously, before the 'stop' event (which fires
       // onRecordingStopped) — see recordingStopTurnId's declaration.
       //
@@ -3055,7 +3223,7 @@
 
     mic.addEventListener('click', () => { listening ? stopListening() : startListening(); });
 
-    // ================= Sentence splitter (smooth-voice_2 Tier 3/4) =================
+    // ================= Sentence splitter (smooth-voice Tier 3/4) =================
     // The old splitter was `/[^.!?]+[.!?]+(\s|$)/`, applied to whatever had
     // accumulated in the streaming buffer so far. Two real bugs in that:
     //
@@ -3458,7 +3626,7 @@
       handsFreeAdvance(kind);
     }
 
-    // DEFECT 3 (hold-one-ahead, smooth-voice_2 Tier 4): GATED on the queue
+    // DEFECT 3 (hold-one-ahead, smooth-voice Tier 4): GATED on the queue
     // being busy. Unconditionally holding the newest sentence is wrong and
     // deliberately not done here — it would delay sentence N's synthesis
     // until sentence N+1 has fully streamed in (roughly 0.5-1.5s on this
@@ -3825,15 +3993,26 @@
       return Math.round(hours / 24) + 'd ago';
     }
 
-    function render(notices) {
-      if (badge) {
-        if (notices.length) {
-          badge.textContent = notices.length > 9 ? '9+' : String(notices.length);
-          badge.style.display = '';
-        } else {
-          badge.style.display = 'none';
-        }
+    // The badge counts alerts AND handoff proposals — both are "something is
+    // waiting for you", and a proposal expires on a TTL, so it is the more
+    // time-sensitive of the two.
+    let noticeCount = 0;
+    let handoffCount = 0;
+
+    function updateBadge() {
+      if (!badge) return;
+      const n = noticeCount + handoffCount;
+      if (n) {
+        badge.textContent = n > 9 ? '9+' : String(n);
+        badge.style.display = '';
+      } else {
+        badge.style.display = 'none';
       }
+    }
+
+    function render(notices) {
+      noticeCount = notices.length;
+      updateBadge();
 
       if (!notices.length) {
         list.innerHTML = '<div class="tr-cost-empty">No active notices.</div>';
@@ -3863,6 +4042,57 @@
       }
     }
 
+    function expiresIn(iso) {
+      const then = new Date(iso).getTime();
+      if (isNaN(then)) return '';
+      const mins = Math.round((then - Date.now()) / 60000);
+      if (mins <= 0) return 'expiring now';
+      if (mins < 60) return 'expires in ' + mins + 'm';
+      const hours = Math.round(mins / 60);
+      return 'expires in ' + hours + 'h';
+    }
+
+    function renderHandoffs(handoffs) {
+      handoffCount = handoffs.length;
+      updateBadge();
+
+      const sec = document.getElementById('tr-handoffs-sec');
+      const box = document.getElementById('tr-handoffs-list');
+      if (!sec || !box) return;
+
+      sec.hidden = !handoffs.length;
+      if (!handoffs.length) { box.innerHTML = ''; return; }
+
+      box.innerHTML = handoffs.map((h) =>
+        '<div class="tr-handoff-row">'
+        + '<span class="tr-handoff-mark"></span>'
+        + '<span class="tr-handoff-body">'
+        + '<span class="tr-handoff-target">' + escapeHtml(h.target) + '</span>'
+        + '<span class="tr-handoff-task">' + escapeHtml(h.task || h.summary || '') + '</span>'
+        + '<span class="tr-handoff-meta">' + escapeHtml(expiresIn(h.expires_at))
+        + ' &middot; say yes to send it</span>'
+        + '</span>'
+        + '</div>'
+      ).join('');
+    }
+
+    async function fetchHandoffs() {
+      try {
+        const res = await fetch('/api/handoffs', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        renderHandoffs(data.handoffs || []);
+      } catch (err) {
+        // Same posture as the notices fetch: degrade quietly rather than
+        // stack an error on top of whatever already went wrong.
+      }
+    }
+
+    function refresh() {
+      fetchHeartbeatNotices();
+      fetchHandoffs();
+    }
+
     async function dismissNotice(id) {
       try {
         const res = await fetch('/api/heartbeat/dismiss', {
@@ -3890,7 +4120,7 @@
       e.stopPropagation();
       const open = panel.classList.toggle('open');
       btn.setAttribute('aria-expanded', String(open));
-      if (open) fetchHeartbeatNotices(); // refresh on open
+      if (open) refresh(); // refresh on open
     });
     // Close on outside click / Escape.
     document.addEventListener('click', (e) => {
@@ -3910,13 +4140,13 @@
     let timer = null;
     function startPolling() {
       if (timer) return;
-      timer = setInterval(() => { if (!document.hidden) fetchHeartbeatNotices(); }, POLL_MS);
+      timer = setInterval(() => { if (!document.hidden) refresh(); }, POLL_MS);
     }
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) fetchHeartbeatNotices(); // catch up on return
+      if (!document.hidden) refresh(); // catch up on return
     });
 
-    fetchHeartbeatNotices(); // initial load
+    refresh(); // initial load
     startPolling();
   })();
   </script>
@@ -4020,7 +4250,7 @@
   })();
 
   // ==================== MINING PILL + PANEL ====================
-  // playbooks/btc-mining-tracker.md Step 3. Reads GET /api/mining, which
+  // playbook/btc-mining-tracker.md Step 3. Reads GET /api/mining, which
   // serves the last poll the heartbeat recorded — the browser deliberately
   // never calls Ocean itself, or opening two tabs would double the load on
   // a public API that the heartbeat is already polling on a schedule.
@@ -4149,6 +4379,443 @@
 
     window.trillionMining = { refresh: fetchMining, render: render }; // console-hook convention
     fetchMining();
+  })();
+  </script>
+
+  <!-- ==================== SCOUT DOCTRINE PANEL (Tier 5) ==================== -->
+  <script>
+  (function () {
+    const btn   = document.getElementById('tr-settings');
+    const panel = document.getElementById('tr-scout-panel');
+    const body  = document.getElementById('tr-scout-body');
+    if (!btn || !panel || !body) return;
+
+    let documents = [];   // as the server describes them
+    let loaded = false;
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    function say(text, kind) {
+      const el = document.getElementById('tr-scout-msg');
+      if (!el) return;
+      el.textContent = text || '';
+      el.className = 'tr-scout-msg' + (kind ? ' ' + kind : '');
+    }
+
+    function render(payload) {
+      documents = payload.documents || [];
+      const lanes = payload.lanes || [];
+      const repeats = payload.repeats || [];
+
+      // Today's lane, computed the same way the scheduler does: positional,
+      // modulo the live count, so the badge can't disagree with the run.
+      const todayIndex = lanes.length ? (new Date().getUTCDay() + 6) % 7 % lanes.length : -1;
+
+      const docHtml = documents.map((d) =>
+        '<div class="tr-cost-sec">'
+        + '<div class="tr-scout-doc-head">'
+        + '<span class="tr-scout-doc-label">' + escapeHtml(d.label) + '</span>'
+        // Per-document, NOT the panel-wide any_overridden — this badge sits
+        // next to the button that reverts this one document.
+        + (d.is_overridden ? '<span class="tr-scout-flag">edited</span>' : '')
+        + '<button class="tr-scout-btn tr-scout-revert" data-key="' + escapeHtml(d.key) + '"'
+        + (d.is_overridden ? '' : ' disabled') + '>Revert</button>'
+        + '</div>'
+        + '<p class="tr-scout-doc-desc">' + escapeHtml(d.description) + '</p>'
+        + '<textarea class="tr-scout-ta" id="ta-' + escapeHtml(d.key) + '" spellcheck="false"'
+        + ' aria-label="' + escapeHtml(d.label) + '">' + escapeHtml(d.effective) + '</textarea>'
+        + '</div>'
+      ).join('');
+
+      const laneHtml = lanes.length
+        ? '<div class="tr-cost-sec"><h4>Rotation</h4><div class="tr-scout-lanes">'
+          + lanes.map((lane, i) =>
+              '<span class="tr-scout-lane' + (i === todayIndex ? ' today' : '') + '">'
+              + escapeHtml(lane.title) + '</span>').join('')
+          + '</div></div>'
+        : '';
+
+      const repeatHtml = repeats.length
+        ? '<div class="tr-cost-sec"><h4>Seen more than once</h4>'
+          + repeats.map((r) =>
+              '<div class="tr-scout-repeat">'
+              + '<span class="tr-scout-repeat-n">' + escapeHtml(String(r.times_seen)) + '&times;</span>'
+              + '<span class="tr-scout-repeat-t">' + escapeHtml(r.problem || '') + '</span>'
+              + '</div>').join('')
+          + '</div>'
+        : '';
+
+      body.innerHTML = docHtml + laneHtml + repeatHtml
+        + '<div class="tr-cost-sec"><div class="tr-scout-actions">'
+        + '<button class="tr-scout-btn primary" id="tr-scout-save">Save</button>'
+        + '<span class="tr-scout-msg" id="tr-scout-msg"></span>'
+        + '</div></div>';
+    }
+
+    async function load() {
+      try {
+        const res = await fetch('/api/scout/documents', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        render(await res.json());
+        loaded = true;
+      } catch (err) {
+        body.innerHTML = '<div class="tr-cost-sec"><div class="tr-cost-empty">'
+          + 'Scout settings are unavailable right now.</div></div>';
+      }
+    }
+
+    async function save() {
+      const payload = {};
+      for (const d of documents) {
+        const ta = document.getElementById('ta-' + d.key);
+        if (ta && ta.value !== d.effective) payload[d.key] = ta.value;
+      }
+      if (!Object.keys(payload).length) { say('Nothing changed.'); return; }
+
+      const button = document.getElementById('tr-scout-save');
+      if (button) button.disabled = true;
+      say('Saving…');
+      try {
+        const res = await fetch('/api/scout/documents', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ documents: payload }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          // The server validates every document before writing any, so a
+          // rejection means nothing was saved — say so plainly, and name
+          // which document was the problem.
+          const first = data.errors ? Object.values(data.errors)[0] : data.error;
+          say(first || 'Save failed. Nothing was changed.', 'error');
+          return;
+        }
+        await load();
+        say('Saved. The next run uses this.', 'ok');
+      } catch (err) {
+        say('Could not reach the server. Nothing was changed.', 'error');
+      } finally {
+        const b = document.getElementById('tr-scout-save');
+        if (b) b.disabled = false;
+      }
+    }
+
+    async function revert(key) {
+      say('Reverting…');
+      try {
+        const res = await fetch('/api/scout/documents/revert', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: key }),
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        await load();
+        say('Back to the shipped default.', 'ok');
+      } catch (err) {
+        say('Could not revert. Nothing was changed.', 'error');
+      }
+    }
+
+    body.addEventListener('click', (e) => {
+      if (e.target.id === 'tr-scout-save') { save(); return; }
+      const rev = e.target.closest('.tr-scout-revert');
+      if (rev && !rev.disabled) revert(rev.getAttribute('data-key'));
+    });
+
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = panel.classList.toggle('open');
+      btn.setAttribute('aria-expanded', String(open));
+      if (open && !loaded) load();
+    });
+    document.addEventListener('click', (e) => {
+      if (panel.classList.contains('open') && !panel.contains(e.target) && e.target !== btn) {
+        panel.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && panel.classList.contains('open')) {
+        panel.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+    });
+  })();
+  </script>
+
+  <!-- ================== REVENUE CELEBRATION (Phase 2 + 3) ================== -->
+  <script>
+  (function () {
+    // playbook/money-celebration.md. The live push is the easy half; the
+    // catch-up on connect is the half that makes it feel reliable. A payment
+    // that lands while this tab is closed stays uncelebrated server-side and
+    // gets its moment the next time a screen opens.
+    const POLL_MS = 45000;
+
+    // Tiers. Deliberately easy to find and change — this is the number Sean
+    // will want to tune once he sees it against his real revenue.
+    const TIERS = [
+      { min: 0,       particles: 60,  spread: 0.55, ms: 1800 },
+      { min: 10000,   particles: 140, spread: 0.75, ms: 2400 },  // $100+
+      { min: 100000,  particles: 320, spread: 1.0,  ms: 3200 },  // $1,000+
+    ];
+    const REDUCED = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const MUTE_KEY = 'trillion.celebrate.mute';
+    const OFF_KEY  = 'trillion.celebrate.off';
+
+    function stored(key) {
+      // localStorage throws outright in some embedded contexts. A missing
+      // preference must never take the celebration with it.
+      try { return localStorage.getItem(key) === '1'; } catch (e) { return false; }
+    }
+
+    function tierFor(minor) {
+      let tier = TIERS[0];
+      for (const t of TIERS) if (minor >= t.min) tier = t;
+      return tier;
+    }
+
+    function money(minor, currency) {
+      const value = (minor || 0) / 100;
+      // en-US explicitly, not the browser locale. The amount is the hero of
+      // this animation and a locale-resolved USD renders as "US$1,300" in
+      // most of them, which reads as a currency-conversion table rather than
+      // a win. Non-USD currencies still get their own symbol.
+      try {
+        return new Intl.NumberFormat('en-US', {
+          style: 'currency', currency: (currency || 'usd').toUpperCase(),
+          maximumFractionDigits: value % 1 === 0 ? 0 : 2,
+        }).format(value);
+      } catch (e) {
+        return '$' + value.toFixed(0);
+      }
+    }
+
+    // ---- sound -------------------------------------------------------------
+    // Loaded and decoded ONCE, then reused. Autoplay policy means this is
+    // silent until Sean has interacted with the page at least once, so the
+    // visual is the primary signal and sound is an enhancement — a blocked
+    // or missing file must never break the animation.
+    let audioCtx = null, buffer = null, loadFailed = false;
+
+    async function sound() {
+      if (loadFailed || buffer) return buffer;
+      try {
+        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        const res = await fetch('/static/celebrate.mp3', { cache: 'force-cache' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        buffer = await audioCtx.decodeAudioData(await res.arrayBuffer());
+        return buffer;
+      } catch (e) {
+        // Sean supplies his own file; until then there simply is no sound.
+        loadFailed = true;
+        return null;
+      }
+    }
+
+    async function play() {
+      if (stored(MUTE_KEY)) return null;
+      const buf = await sound();
+      if (!buf || !audioCtx) return null;
+      try {
+        if (audioCtx.state === 'suspended') await audioCtx.resume();
+        const src = audioCtx.createBufferSource();
+        src.buffer = buf;
+        // An analyser purely so the orb can react to the real amplitude.
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 256;
+        src.connect(analyser); analyser.connect(audioCtx.destination);
+        src.start();
+        return analyser;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    // ---- the orb reacts, COSMETICALLY --------------------------------------
+    // Drive only the visual. Flipping the app into its real "assistant is
+    // speaking" state would clear UI, interrupt a live conversation, and
+    // confuse the turn logic — it has to LOOK like a reaction without
+    // actually being one.
+    function reactOrb(analyser, ms) {
+      if (!analyser || REDUCED) return;
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const until = performance.now() + ms;
+      (function frame() {
+        analyser.getByteFrequencyData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) sum += data[i];
+        const level = Math.min(1, (sum / data.length) / 128);
+        // The scene reads this if it's there; if it isn't, nothing happens
+        // and the celebration is unaffected.
+        if (window.trillionScene && typeof window.trillionScene.setCosmeticLevel === 'function') {
+          window.trillionScene.setCosmeticLevel(level);
+        }
+        if (performance.now() < until) requestAnimationFrame(frame);
+        else if (window.trillionScene && window.trillionScene.setCosmeticLevel) {
+          window.trillionScene.setCosmeticLevel(0);
+        }
+      })();
+    }
+
+    // ---- the overlay -------------------------------------------------------
+    function burst(payment, opts) {
+      opts = opts || {};
+      const tier = tierFor(payment.amount_minor);
+      const root = document.createElement('div');
+      root.className = 'tr-cel';
+
+      const amount = document.createElement('div');
+      amount.className = 'tr-cel-amount';
+      amount.textContent = '+' + money(payment.amount_minor, payment.currency);
+      root.appendChild(amount);
+
+      if (payment.customer_label) {
+        const who = document.createElement('div');
+        who.className = 'tr-cel-who';
+        who.textContent = payment.customer_label;
+        root.appendChild(who);
+      }
+      if (opts.withheld) {
+        // Never a silent truncation.
+        const more = document.createElement('div');
+        more.className = 'tr-cel-more';
+        more.textContent = '+ ' + opts.withheld + ' more while you were away — in history';
+        root.appendChild(more);
+      }
+
+      if (!REDUCED) {
+        const canvas = document.createElement('canvas');
+        root.appendChild(canvas);
+        confetti(canvas, tier);
+      }
+      document.body.appendChild(root);
+      setTimeout(() => root.remove(), tier.ms + 700);
+      return tier;
+    }
+
+    function confetti(canvas, tier) {
+      const ctx = canvas.getContext('2d');
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const w = canvas.width = window.innerWidth * dpr;
+      const h = canvas.height = window.innerHeight * dpr;
+      const colors = ['#2DD4A8', '#3B6FE0', '#7C4DFF', '#ffffff'];
+      const parts = [];
+      for (let i = 0; i < tier.particles; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = (2 + Math.random() * 9) * tier.spread * dpr;
+        parts.push({
+          x: w / 2, y: h * 0.52,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed - 4 * dpr,
+          size: (2 + Math.random() * 4) * dpr,
+          color: colors[(Math.random() * colors.length) | 0],
+          spin: (Math.random() - 0.5) * 0.3,
+          rot: Math.random() * Math.PI,
+        });
+      }
+      const start = performance.now();
+      (function frame(now) {
+        const t = now - start;
+        if (t > tier.ms) { ctx.clearRect(0, 0, w, h); return; }
+        ctx.clearRect(0, 0, w, h);
+        ctx.globalAlpha = Math.max(0, 1 - t / tier.ms);
+        for (const p of parts) {
+          p.vy += 0.22 * dpr;      // gravity
+          p.vx *= 0.995;
+          p.x += p.vx; p.y += p.vy; p.rot += p.spin;
+          ctx.save();
+          ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+          ctx.fillStyle = p.color;
+          ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size * 0.6);
+          ctx.restore();
+        }
+        requestAnimationFrame(frame);
+      })(start);
+    }
+
+    // ---- orchestration -----------------------------------------------------
+    async function celebrate(payments, withheld) {
+      if (!payments.length || stored(OFF_KEY)) return;
+
+      // ONE sound for the whole burst — several payments close together must
+      // not stack overlapping audio.
+      const analyser = await play();
+      const first = tierFor(Math.max.apply(null, payments.map((p) => p.amount_minor)));
+      reactOrb(analyser, first.ms);
+
+      payments.forEach((payment, i) => {
+        setTimeout(() => burst(payment, { withheld: i === 0 ? withheld : 0 }), i * 550);
+      });
+
+      // Marked as celebrated regardless of whether the sound played — the
+      // visual is the celebration; the audio is decoration.
+      try {
+        await fetch('/api/revenue/celebrated', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ charge_ids: payments.map((p) => p.charge_id) }),
+        });
+      } catch (e) {
+        // If this fails the payment stays uncelebrated and replays next
+        // connect. Celebrating twice is a far smaller sin than never.
+      }
+    }
+
+    async function check() {
+      try {
+        const res = await fetch('/api/revenue/catchup', { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.payments && data.payments.length) {
+          // Oldest first, so a burst replays in the order it happened.
+          await celebrate(data.payments.slice().reverse(), data.withheld || 0);
+        }
+      } catch (e) {
+        // Endpoint unreachable — degrade quietly, same as every other panel.
+      }
+    }
+
+    // A manual trigger, because every tier is otherwise only testable by
+    // taking real money. Writes a real row, so it travels the exact same
+    // catch-up path a Stripe charge does.
+    window.trillionCelebrate = {
+      test: async function (dollars) {
+        await fetch('/api/revenue/test', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ amount_minor: Math.round((dollars || 1300) * 100) }),
+        });
+        return check();
+      },
+      mute: function (on) { try { localStorage.setItem(MUTE_KEY, on ? '1' : '0'); } catch (e) {} },
+      off:  function (on) { try { localStorage.setItem(OFF_KEY,  on ? '1' : '0'); } catch (e) {} },
+      check: check,
+    };
+
+    check();                                   // catch-up on connect
+    setInterval(() => { if (!document.hidden) check(); }, POLL_MS);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) check(); });
+  })();
+  </script>
+
+  <!-- ========================= PWA SERVICE WORKER ========================= -->
+  <script>
+  (function () {
+    // playbook/mobile-pwa.md §7. sw.js caches nothing — it exists so iOS
+    // treats this as installable and gives it a standalone window. Register
+    // after load so it never competes with the first paint or the Three.js
+    // scene for the main thread.
+    if (!('serviceWorker' in navigator)) return;
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {
+        // Insecure origin (plain http on a LAN address), private mode, or a
+        // browser with workers disabled. The app is fully functional without
+        // one; only the install prompt is lost. Nothing to report.
+      });
+    });
   })();
   </script>
 </body>

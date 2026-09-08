@@ -1,6 +1,6 @@
 """
 Tests for the preview scaffold and component catalog — Tiers 2 and 4 of
-playbooks/design-subagent.md.
+playbook/design-subagent.md.
 
 The three next.config settings are asserted individually rather than as "a
 config was written", because each is one of the playbook's named failure

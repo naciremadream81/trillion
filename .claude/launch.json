@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "orb",
-      "runtimeExecutable": "python3",
-      "runtimeArgs": ["serve.py"],
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", ".venv/bin/python serve.py"],
       "port": 8123
     },
     {

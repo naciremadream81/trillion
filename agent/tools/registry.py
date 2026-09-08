@@ -19,6 +19,8 @@ process-wide, rather than per spawned agent.
 
 from __future__ import annotations
 
+import os
+
 from typing import Callable
 
 from ..providers.base import ToolCall
@@ -184,6 +186,30 @@ def build_registry(settings) -> ToolRegistry:
             print(
                 "Design agent enabled but the `claude` CLI is not on PATH; "
                 "design tools not registered."
+            )
+
+    # Board of advisors — off by default, and additionally gated on a
+    # non-empty roster. Same posture as the design agent above: a registered
+    # convene_board with no seats behind it would offer the model a tool that
+    # can only ever fail, and absent beats registered-and-broken.
+    if getattr(settings, "board_enabled", False):
+        from ..board.ask import make_ask_model
+        from ..board.convene import load_seats
+        from .board import ConveneBoardTool
+
+        if load_seats():
+            from ..providers import get_provider
+
+            registry.register(
+                ConveneBoardTool(
+                    make_ask_model(get_provider(os.getenv("TRILLION_PROVIDER", "claude"))),
+                    ceiling_usd=settings.board_meeting_ceiling_usd,
+                )
+            )
+        else:
+            print(
+                "Board enabled but no seats are configured; convene_board not "
+                "registered. See agent/board/seats/README.md."
             )
 
     registry.register(SearchNotesTool(settings.notes_index_path))

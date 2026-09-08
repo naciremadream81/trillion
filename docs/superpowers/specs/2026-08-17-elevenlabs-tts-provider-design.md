@@ -6,7 +6,7 @@
 
 Voice V1 TTS currently runs on Piper only ([agent/voice/piper_tts.py](../../../agent/voice/piper_tts.py)) — local, offline, free. That choice was made deliberately: `piper_tts.py`'s own docstring and `agent/config.py`'s comment both record that ElevenLabs' free tier blocks all API voice access (premade *and* custom/cloned voices both require a paid plan — confirmed live, not assumed).
 
-Sean now has a paid ElevenLabs plan and wants it wired in as a second option, not a replacement. This matches a ground rule already written into this project's own playbook ([playbooks/smooth-voice_2.md](../../../playbooks/smooth-voice_2.md), line 19): "never swap out your speech-to-text or text-to-speech provider without asking you first." Piper stays the default; ElevenLabs is opt-in via config.
+Sean now has a paid ElevenLabs plan and wants it wired in as a second option, not a replacement. This matches a ground rule already written into this project's own playbook ([playbook/smooth-voice.md](../../../playbook/smooth-voice.md), line 19): "never swap out your speech-to-text or text-to-speech provider without asking you first." Piper stays the default; ElevenLabs is opt-in via config.
 
 ## Scope
 

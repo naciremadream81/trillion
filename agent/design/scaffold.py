@@ -1,5 +1,5 @@
 """
-The per-project preview app — playbooks/design-subagent.md, Tier 2, which
+The per-project preview app — playbook/design-subagent.md, Tier 2, which
 the playbook calls the architectural keystone.
 
 Every project gets a Next.js + Tailwind + shadcn app at

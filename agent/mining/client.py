@@ -1,5 +1,5 @@
 """
-Ocean mining pool client — playbooks/btc-mining-tracker.md, Step 2.
+Ocean mining pool client — playbook/btc-mining-tracker.md, Step 2.
 
 The playbook is emphatic on one point: "Read its docs (or ask me for a sample
 response) before you write any parsing code — do **not** invent field names or

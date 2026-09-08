@@ -2,7 +2,7 @@
 Tests for streaming STT — agent/voice/deepgram_stream.py, the /api/transcribe
 /stream relay, and the WebSocket hole it would have opened in the origin gate.
 
-smooth-voice_2 Tier 2 assumes you can lean on the recognizer's own
+smooth-voice Tier 2 assumes you can lean on the recognizer's own
 end-of-utterance signal. Batch Deepgram has none, which is why index.html's
 hands-free VAD infers "they're done" from microphone energy alone. These
 cover the signal that replaces that inference.

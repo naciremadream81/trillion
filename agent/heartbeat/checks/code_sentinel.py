@@ -1,5 +1,5 @@
 """
-Code Sentinel — the five GitHub-watching checks from playbooks/the-code-
+Code Sentinel — the five GitHub-watching checks from playbook/the-code-
 sentinel.md, built on the Check protocol (base.py) and GitHubClient
 (../github_client.py).
 

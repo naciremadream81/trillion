@@ -1,5 +1,5 @@
 """
-Tests for the voice-persistence layer (P3 — playbooks/agent-personality.md).
+Tests for the voice-persistence layer (P3 — playbook/agent-personality.md).
 
 Run: python -m unittest tests.test_personality
 """

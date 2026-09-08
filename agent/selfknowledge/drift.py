@@ -36,13 +36,20 @@ def check_no_drift(path: str = render.DOC_PATH, settings: Settings | None = None
     an accidental deletion must fail this check the same way a stale block
     would, not pass silently.
 
-    settings defaults to None, which render_blocks() in turn resolves to
-    agent.config.get_settings() (live env) — the right default for the
-    real guardrail (does the checked-in file match this actual deployment
-    right now). Pass an explicit Settings() when the file being checked was
-    itself generated against an explicit Settings() rather than live env —
-    otherwise this recomputes against whatever the process's environment
-    happens to be at call time, which doesn't have to match."""
+    settings defaults to None, which render_blocks() resolves to
+    render.baseline_settings() — the dataclass defaults, with no environment
+    read. That is deliberate and it is what makes this check portable: the
+    document is committed to a shared repo, so recomputing it against
+    whatever `.env` the running process happens to have made the gate fail
+    for everyone except whoever refreshed it last, CI included. A guardrail
+    that fails on a clean checkout is one people learn to skip.
+
+    What the gate still catches, which is the whole point: a change to
+    agent/tools/registry.py or agent/config.py landing without a refresh.
+    That shifts the baseline output, and this trips.
+
+    Pass an explicit Settings() (e.g. get_settings()) to check a document
+    generated against that same configuration instead."""
     if not os.path.isfile(path):
         raise DriftError(
             f"{path} is missing. Run `python -m agent.selfknowledge --refresh` to create it."

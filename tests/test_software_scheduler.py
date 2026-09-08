@@ -20,6 +20,8 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from agent.config import Settings
+from agent.factory.software import doctrine
+from agent.factory.software.doctrine import EMERGENCY_LANE_LABEL, active_lanes
 from agent.factory.software.scheduler import AutonomousScheduler
 from agent.factory.software.storage import BUILT, BuildRepo
 from agent.providers.base import BaseProvider, ProviderResponse, TextChunk, ToolCall, TokenUsage
@@ -179,6 +181,57 @@ class TestAutonomousScheduler(unittest.TestCase):
         self.assertIn("Problem 2", task["description"])
         self.assertIn("Clear evidence", task["description"])
 
+    def test_the_lane_that_fired_is_recorded_on_the_build(self):
+        # opportunity-scout.md Tier 3: the lane label is the record of which
+        # hunting strategy found a thing, so it has to survive the run.
+        settings = self._settings()
+        provider = FakeProvider([
+            SCOUT_REPORT_REPLY, VALID_PLAN_REPLY, ARCHITECTURE_REPLY,
+            "CODING_COMPLETE", QA_PASS_REPLY, INTEGRATION_READY_REPLY,
+        ])
+        bg = set()
+        scheduler = AutonomousScheduler(self.repo, provider, settings, background_tasks=bg)
+
+        async def scenario():
+            await scheduler.tick_once()
+            await asyncio.gather(*bg)
+
+        with patch.object(
+            WebSearchTool, "_search", new=AsyncMock(return_value={"web": {"results": []}})
+        ):
+            run(scenario())
+
+        description = self.repo.get_build_task(1)["description"]
+        labels = [lane.label for lane in active_lanes(None)]
+        self.assertTrue(
+            any(f"(Lane: {label})" in description for label in labels),
+            f"no shipped lane label found in {description!r}",
+        )
+
+    def test_a_tick_still_runs_with_the_lanes_document_gone(self):
+        # The degradation that matters: a scheduled job at an hour nobody is
+        # watching must not die because a document was deleted.
+        settings = self._settings()
+        provider = FakeProvider([
+            SCOUT_REPORT_REPLY, VALID_PLAN_REPLY, ARCHITECTURE_REPLY,
+            "CODING_COMPLETE", QA_PASS_REPLY, INTEGRATION_READY_REPLY,
+        ])
+        bg = set()
+        scheduler = AutonomousScheduler(self.repo, provider, settings, background_tasks=bg)
+
+        async def scenario():
+            await scheduler.tick_once()
+            await asyncio.gather(*bg)
+
+        with patch.object(doctrine, "LANES_PATH", os.path.join(self.tmp, "deleted.md")), \
+             patch.object(
+                 WebSearchTool, "_search", new=AsyncMock(return_value={"web": {"results": []}})
+             ):
+            run(scenario())
+
+        self.assertEqual(self.repo.count_builds_today(), 1)
+        self.assertIn(f"(Lane: {EMERGENCY_LANE_LABEL})", self.repo.get_build_task(1)["description"])
+
     def test_tick_skips_when_opportunity_scout_fails(self):
         settings = self._settings()
         provider = FakeProvider(["not json", "still not json"])
@@ -194,7 +247,14 @@ class TestAutonomousScheduler(unittest.TestCase):
         provider = FakeProvider([])  # never actually consulted — the scout call is patched below
 
         async def fake_scout_then_fill_cap(
-            themes, provider, api_key, search_provider="brave", firecrawl_base_url=""
+            themes,
+            provider,
+            api_key,
+            search_provider="brave",
+            firecrawl_base_url="",
+            lane=None,
+            overrides=None,
+            already_seen=None,
         ):
             self.repo.create_build_task("a concurrent /build got here first")
             return {

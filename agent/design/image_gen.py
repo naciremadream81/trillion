@@ -1,5 +1,5 @@
 """
-AI image generation — playbooks/design-subagent.md, Tier 5.
+AI image generation — playbook/design-subagent.md, Tier 5.
 
 Pure-TSX composition gets most of the way to a visually rich mockup;
 atmospheric backdrops and conceptual illustrations are the last stretch that

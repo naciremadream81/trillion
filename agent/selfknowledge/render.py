@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 
-from ..config import Settings, get_settings
+from ..config import Settings
 from ..memory import DEFAULT_MEMORY_PATH
 from ..tools.confirm import ConfirmActionTool
 from ..tools.memory import ForgetFactTool, RememberFactTool
@@ -30,11 +30,27 @@ INITIAL_DOCUMENT = """\
 # What Trillion knows about itself
 
 This file is generated from agent/tools/registry.py and agent/config.py by
-agent/selfknowledge — it answers "what tools do you have, and what turns
-them on" from the source, not from memory. Everything between a block's
-`START`/`END` markers below is rewritten by `python -m agent.selfknowledge
---refresh`; hand-written notes are safe anywhere outside those markers.
+agent/selfknowledge — it answers "what tools exist, and what turns them on"
+from the source, not from memory.
 
+**It describes the BASELINE, not your deployment.** It is generated with no
+environment read at all, so it is identical on every machine and can be
+committed and checked in CI. The capabilities table therefore lists only the
+unconditional tools; the config-gating section below is the interesting half,
+because it lists every switch that adds more.
+
+To see what *this* machine actually offers:
+
+    python -m agent.selfknowledge --live
+
+Nothing depends on this file being live-accurate. agent/system_prompt.py's
+_load_self_knowledge() computes the summary from the calling Agent's own
+registry every turn; the SLIM block below is only a fallback for a bare Agent
+that has no registry — which has no tools, which is what the baseline says.
+
+Everything between a block's `START`/`END` markers is rewritten by
+`python -m agent.selfknowledge --refresh`; hand-written notes are safe
+anywhere outside those markers.
 ## Capabilities
 
 <!-- AUTO-START: capabilities -->
@@ -72,21 +88,52 @@ def _with_always_on_tools(registry: ToolRegistry) -> ToolRegistry:
     return registry
 
 
+def baseline_settings() -> Settings:
+    """
+    The canonical configuration the CHECKED-IN document describes: the
+    dataclass defaults, with no environment read at all.
+
+    This used to be live settings, and that was a real bug rather than a
+    preference. The file is committed to a shared repo, so generating it
+    from `.env` made it a per-machine artifact: whoever refreshed it last
+    stamped their own configuration into it, and the drift gate then failed
+    for everyone else — including CI, which has no `.env` at all. A guardrail
+    that fails on a clean checkout is one people learn to skip.
+
+    Nothing is lost by making it deterministic, because THE RUNTIME NEVER
+    READS THIS FILE WHEN IT HAS A REGISTRY. agent/system_prompt.py's
+    _load_self_knowledge() computes the summary live from the exact registry
+    the calling Agent was built with; the committed SLIM block is only a
+    fallback for a bare Agent that has no registry — and a bare Agent has no
+    tools, which is precisely what the baseline describes.
+
+    So the file's job is to be a readable, reviewable record of what the
+    SOURCE offers, and the gate's job is to catch registry.py or config.py
+    changing without a refresh. Both are better served by a baseline than by
+    a snapshot of one laptop.
+
+    Use `--live` (or pass get_settings()) for a deployment-specific view.
+    """
+    return Settings()
+
+
 def render_blocks(settings: Settings | None = None) -> dict[str, str]:
     """
-    Fresh content for each named block, computed from live settings
-    (agent.config.get_settings() when none is given — the SLIM block that
-    rides on every turn should describe what's actually deployed, not a
-    hypothetical default configuration).
+    Fresh content for each named block.
 
-    Gating is probed from this same settings baseline (not a blank
-    Settings()), so conditional interactions like resolve_search_provider()'s
-    fail-closed explicit-provider selection are reflected correctly, and a
-    key that's already set doesn't get listed as "unset config that would
-    add more" for a tool the capabilities table already shows as available.
+    Defaults to baseline_settings() — see its docstring for why the checked-in
+    document must not depend on the environment it was generated in.
+
+    Gating is probed from whatever settings baseline is used, so conditional
+    interactions like resolve_search_provider()'s fail-closed explicit-provider
+    selection are reflected correctly, and a key that's already set doesn't get
+    listed as "unset config that would add more" for a tool the capabilities
+    table already shows as available. Against the baseline nothing is set, so
+    the config-gating block lists the COMPLETE set of gates — which is what
+    makes it useful documentation rather than a description of one machine.
     """
     if settings is None:
-        settings = get_settings()
+        settings = baseline_settings()
     registry = _with_always_on_tools(build_registry(settings))
     gates = generators.probe_config_gating(settings)
     return {

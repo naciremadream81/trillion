@@ -1,5 +1,5 @@
 """
-The three-tier document model — playbooks/design-subagent.md, Tier 1.
+The three-tier document model — playbook/design-subagent.md, Tier 1.
 
 Three documents per project, each with different volatility and audience:
 

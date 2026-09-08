@@ -72,6 +72,43 @@ CREATE TABLE IF NOT EXISTS build_tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_build_tasks_status ON build_tasks(status);
 CREATE INDEX IF NOT EXISTS idx_build_tasks_created_at ON build_tasks(created_at);
+
+-- playbook/opportunity-scout.md Tier 4: an operator-set document that
+-- shadows the file default shipped next to the code, so retuning the
+-- scout's doctrine or its hunting lanes doesn't need a deploy.
+--
+-- The key is an arbitrary string, deliberately NOT a foreign key to any
+-- agent table: an extra document *belongs to* an agent without *being* the
+-- agent, so it is keyed "scout_lanes", not "scout". One row, one document.
+CREATE TABLE IF NOT EXISTS agent_documents (
+    key         TEXT    PRIMARY KEY,
+    body        TEXT    NOT NULL,
+    updated_at  TEXT    NOT NULL
+);
+
+-- playbook/opportunity-scout.md Tier 7: every candidate the scout EXAMINED,
+-- not only the one it picked. Four of five candidates are thrown away today;
+-- kept, they are the cheapest signal in the system — the delta between two
+-- runs that saw the same problem is something you get for free, and it is
+-- the only way to know whether a candidate is growing or going stale.
+--
+-- `fingerprint` is a stable identity for "the same problem", so repeat
+-- sightings collapse onto one row rather than accumulating duplicates. It is
+-- also what the repetition memory reads back to tell the next run what it
+-- has already seen.
+CREATE TABLE IF NOT EXISTS scout_sightings (
+    fingerprint     TEXT    PRIMARY KEY,
+    lane            TEXT,
+    problem         TEXT    NOT NULL,
+    evidence        TEXT    NOT NULL DEFAULT '',
+    source_url      TEXT    NOT NULL DEFAULT '',
+    times_seen      INTEGER NOT NULL DEFAULT 1,
+    times_selected  INTEGER NOT NULL DEFAULT 0,
+    first_seen_at   TEXT    NOT NULL,
+    last_seen_at    TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_scout_sightings_last_seen ON scout_sightings(last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_scout_sightings_lane ON scout_sightings(lane);
 """
 
 
@@ -234,3 +271,123 @@ class BuildRepo:
         with self._connect() as conn:
             row = conn.execute("SELECT 1 FROM build_tasks WHERE slug = ?", (slug,)).fetchone()
         return row is not None
+
+    # ── Operator document overrides (opportunity-scout.md Tier 4) ────────────
+
+    def get_document(self, key: str) -> str | None:
+        """The operator's override for `key`, or None if they haven't set one.
+
+        None and "" are different answers and both are meaningful: None means
+        "no override, use the shipped file", while "" means the operator
+        saved an empty document — which agent/factory/software/doctrine.py
+        treats as unusable and falls back on, loudly. Returning "" for a
+        missing row would collapse those two cases into one."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT body FROM agent_documents WHERE key = ?", (key,)
+            ).fetchone()
+        return None if row is None else row["body"]
+
+    def set_document(self, key: str, body: str) -> None:
+        """Write (or replace) the operator's override for `key`."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_documents (key, body, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET body = excluded.body,
+                                               updated_at = excluded.updated_at
+                """,
+                (key, body, _now()),
+            )
+
+    def delete_document(self, key: str) -> None:
+        """Drop the override so the shipped file default returns. Idempotent."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM agent_documents WHERE key = ?", (key,))
+
+    # ── Scout sightings (opportunity-scout.md Tier 7) ────────────────────────
+
+    def record_sighting(
+        self,
+        *,
+        fingerprint: str,
+        problem: str,
+        evidence: str = "",
+        source_url: str = "",
+        lane: str | None = None,
+        selected: bool = False,
+    ) -> None:
+        """
+        Record one candidate the scout examined.
+
+        Called once per candidate, and the caller wraps each call in its own
+        try/except — one malformed candidate must not discard the four good
+        ones beside it. Seeing the same fingerprint again bumps the counters
+        and refreshes the evidence rather than inserting a duplicate: that is
+        what makes "this problem has been sighted four times across three
+        weeks" a fact the next run can use.
+
+        The stored problem/evidence text is deliberately the LATEST wording,
+        not the first — a second sighting usually has better evidence, and
+        the first_seen_at column already preserves when it started.
+        """
+        ts = _now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO scout_sightings
+                    (fingerprint, lane, problem, evidence, source_url,
+                     times_seen, times_selected, first_seen_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+                ON CONFLICT(fingerprint) DO UPDATE SET
+                    lane           = excluded.lane,
+                    problem        = excluded.problem,
+                    evidence       = excluded.evidence,
+                    source_url     = excluded.source_url,
+                    times_seen     = scout_sightings.times_seen + 1,
+                    times_selected = scout_sightings.times_selected + excluded.times_selected,
+                    last_seen_at   = excluded.last_seen_at
+                """,
+                (fingerprint, lane, problem, evidence, source_url,
+                 1 if selected else 0, ts, ts),
+            )
+
+    def recent_sightings(self, limit: int = 40) -> list[dict]:
+        """The most recently seen candidates, newest first — the input to the
+        next run's "you have already seen these" instruction."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM scout_sightings ORDER BY last_seen_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def repeat_sightings(self, limit: int = 20) -> list[dict]:
+        """
+        Candidates seen more than once, most-seen first.
+
+        This is the compounding part: a problem that keeps reappearing across
+        runs and lanes is evidence of persistence that no single run could
+        have produced.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM scout_sightings
+                WHERE times_seen > 1
+                ORDER BY times_seen DESC, last_seen_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def all_documents(self) -> dict[str, str]:
+        """Every override, for the whole-cache refresh in doctrine.py.
+
+        A full read rather than a per-key fetch on purpose: this table holds
+        a handful of rows, and partial invalidation is more bug surface than
+        the work it saves."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT key, body FROM agent_documents").fetchall()
+        return {row["key"]: row["body"] for row in rows}

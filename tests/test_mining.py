@@ -1,5 +1,5 @@
 """
-Tests for the Bitcoin mining tracker — playbooks/btc-mining-tracker.md.
+Tests for the Bitcoin mining tracker — playbook/btc-mining-tracker.md.
 
 Parsing is tested against **real captured responses** in
 tests/fixtures/ocean/, not hand-written shapes. That matters here more than

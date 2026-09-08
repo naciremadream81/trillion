@@ -1,5 +1,5 @@
 """
-Tests for the Piper warm-up startup hook in serve.py (smooth-voice_2 Tier 4).
+Tests for the Piper warm-up startup hook in serve.py (smooth-voice Tier 4).
 
 The measured cost this removes is a real model load, which needs the
 gitignored ~63MB voice file — so these cover the wiring around it: that the

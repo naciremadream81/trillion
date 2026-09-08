@@ -1,5 +1,5 @@
 """
-Voice-persistence layer (P3 — playbooks/agent-personality.md).
+Voice-persistence layer (P3 — playbook/agent-personality.md).
 
 A strong personality prompt still drifts toward generic-assistant register
 over a long conversation: the model's own prior replies become the

@@ -1,5 +1,5 @@
 """
-The component palette — playbooks/design-subagent.md, Tier 4.
+The component palette — playbook/design-subagent.md, Tier 4.
 
 The premise this tier rests on, from the playbook's opening: "modern
 award-winning design is composed from high-quality primitives, not authored

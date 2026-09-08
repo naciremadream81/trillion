@@ -1,5 +1,5 @@
 """
-Tests for the composer — playbooks/design-subagent.md Tier 3, plus Tier 6's
+Tests for the composer — playbook/design-subagent.md Tier 3, plus Tier 6's
 prompt sections and the cost ceiling from the Tier 0 interview.
 
 This is the most dangerous part of the design agent: it spawns a subprocess

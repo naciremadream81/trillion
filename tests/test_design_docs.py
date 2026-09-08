@@ -1,6 +1,6 @@
 """
 Tests for the design agent's document model and token system —
-playbooks/design-subagent.md Tier 1.
+playbook/design-subagent.md Tier 1.
 
 Two things carry the weight here and both are tested hard:
 

@@ -21,6 +21,15 @@ import re
 _PATTERNS: list[tuple[re.Pattern, str]] = [
     # Bearer auth headers -> mask the token, keep the header shape.
     (re.compile(r"(Authorization:\s*Bearer)\s+\S+", re.I), r"\1 <redacted>"),
+    # X-Auth-Token header — the alternate channel accepted by
+    # agent/security/auth.py, and just as much a credential.
+    (re.compile(r"(X-Auth-Token:)\s*\S+", re.I), r"\1 <redacted>"),
+    # The same token riding in a URL. playbook/mobile-pwa.md §6 requires a
+    # ?token= param because an `<audio src>` element and a WebSocket upgrade
+    # cannot set a header — which puts a live credential into every request
+    # line this process might log. Mask the value, keep the param visible so
+    # a log still shows that a request was authenticated.
+    (re.compile(r"([?&](?:token|access_token|auth_token)=)[^&\s\"']+", re.I), r"\1<redacted>"),
     # Common provider API key prefixes (Anthropic, Stripe/OpenAI-style
     # sk-live/sk-test, GitHub personal access tokens, Slack, generic sk_).
     (re.compile(r"\bsk-ant-[A-Za-z0-9_-]{10,}\b"), "<redacted-api-key>"),
@@ -30,7 +39,7 @@ _PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "<redacted-api-key>"),
     # JWT-shaped strings: three base64url segments separated by dots.
     (re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"), "<redacted-jwt>"),
-    # Bitcoin payout addresses — playbooks/btc-mining-tracker.md's privacy
+    # Bitcoin payout addresses — playbook/btc-mining-tracker.md's privacy
     # guardrail. Not a credential, but it is Sean's financial identity: an
     # address in a log line ties this machine to a public ledger of every
     # payout he has ever received. bech32 (bc1...), plus legacy P2PKH/P2SH.
