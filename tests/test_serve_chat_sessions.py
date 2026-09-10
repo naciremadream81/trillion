@@ -209,3 +209,13 @@ class TestOverlappingChatPostsSerialize(AioHTTPTestCase):
         self.assertEqual(roles, ["user", "assistant", "user", "assistant"])
         contents = [m["content"] for m in agent.history if m["role"] == "user"]
         self.assertEqual(sorted(contents), ["alpha", "beta"])
+
+    def test_chat_wires_disconnect_into_the_turn_lock(self):
+        import inspect
+
+        source = inspect.getsource(serve_module.build_app)
+        self.assertIn(
+            "should_abort=lambda: _client_gone(request)",
+            source,
+            "/api/chat must refuse a queued turn whose client already dropped",
+        )
