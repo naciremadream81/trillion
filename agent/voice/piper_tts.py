@@ -27,6 +27,11 @@ import os
 import threading
 import wave
 
+# Disable ONNX Runtime telemetry before Piper imports its native runtime.
+# Its telemetry session store can create a literal :memory:.ses sidecar;
+# local speech synthesis does not need that store or its uploader.
+os.environ["ORT_DISABLE_TELEMETRY"] = "1"
+
 from piper.voice import PiperVoice
 
 # The loaded voice and the path it came from are published as ONE tuple in a
