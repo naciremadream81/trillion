@@ -1057,7 +1057,10 @@
     starPos[i*3+1] = (Math.random() - 0.5) * 24;
     starPos[i*3+2] = -6 - Math.random() * 22;
     starPhase[i]   = Math.random() * Math.PI * 2;
-    starSize[i]    = 0.6 + Math.random() * 1.8;
+    // gl_PointSize below multiplies this by 300/-mv.z, and the stars sit
+    // 12-34 units out — so 0.6-2.4 rendered 5-70px blobs that washed the
+    // whole scene out. These give the 2-12px points the field wants.
+    starSize[i]    = 0.18 + Math.random() * 0.5;
   }
   starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
   starGeo.setAttribute('aPhase', new THREE.BufferAttribute(starPhase, 1));
@@ -1238,9 +1241,10 @@
   composer.addPass(new RenderPass(scene, camera));
   const bloom = new UnrealBloomPass(
     new THREE.Vector2(window.innerWidth, window.innerHeight),
-    0.6,   // strength
+    0.32,  // strength
     0.45,  // radius — tighter so the glow hugs the orb
-    0.15   // threshold
+    0.75   // threshold — above the orb's own mid-tones, so bloom adds a
+           // halo instead of flattening the sphere into a white disc
   );
   composer.addPass(bloom);
   composer.addPass(new OutputPass());
@@ -1249,7 +1253,16 @@
   // RESIZE
   // ============================================================
   function onResize() {
-    const w = window.innerWidth, h = window.innerHeight;
+    // window.innerWidth/innerHeight read 0 in some embedded and hidden-pane
+    // contexts. Sizing to 0 there is unrecoverable: every composer target
+    // and bloom mip is allocated at zero size (WebGL then logs
+    // "Framebuffer is incomplete: Attachment has zero size" every frame),
+    // and no 'resize' event fires when the page is later revealed — so the
+    // orb stays invisible for the rest of the session. Prefer the canvas's
+    // own box, fall back to the window, and refuse to size to zero.
+    const w = canvas.clientWidth || window.innerWidth;
+    const h = canvas.clientHeight || window.innerHeight;
+    if (!w || !h) return;
     // perfMode (declared below, in the Tier 6 section) is read here too —
     // onResize() only ever runs after the whole module has evaluated once
     // (the initial call at the bottom, or a later 'resize'/perf-toggle
@@ -1272,6 +1285,12 @@
     starMat.uniforms.uPixelRatio.value = renderer.getPixelRatio();
   }
   window.addEventListener('resize', onResize);
+  // 'resize' does not fire when the canvas goes from zero-sized to laid out
+  // (a hidden pane shown, a display:none ancestor revealed). Observing the
+  // element is what lets the orb recover instead of staying invisible.
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(onResize).observe(canvas);
+  }
 
   // ============================================================
   // OPTIONAL DEMO: hover to preview voice reactivity.
