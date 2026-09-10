@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from agent.remote.proxy import RemoteDispatchProxy, register_proxies
 from agent.remote.runners import head_of_design_runner
 from agent.remote.storage import (
+    CLAIMED,
     COMPLETED,
     FAILED,
     KIND_NOOP,
@@ -111,6 +112,31 @@ class TestQueue(QueueTestCase):
         self.queue.claim(ROLE, "worker-a")
         self.assertEqual(self.queue.release_stale_claims(), 0)
 
+    def test_release_claim_returns_a_live_claim_to_pending(self):
+        task_id = self.queue.enqueue(ROLE, KIND_NOOP, {})
+        self.queue.claim(ROLE, "worker-a")
+        self.assertTrue(self.queue.release_claim(task_id))
+        task = self.queue.get(task_id)
+        self.assertEqual(task["status"], PENDING)
+        self.assertIsNone(task["claimed_by"])
+        self.assertIsNone(task["claimed_at"])
+
+    def test_release_claim_is_a_noop_on_a_completed_row(self):
+        task_id = self.queue.enqueue(ROLE, KIND_NOOP, {})
+        self.queue.complete(task_id, {"status": "ok"})
+        self.assertFalse(self.queue.release_claim(task_id))
+        self.assertEqual(self.queue.get(task_id)["status"], COMPLETED)
+
+    def test_release_claims_by_only_touches_that_worker(self):
+        ours = self.queue.enqueue(ROLE, KIND_NOOP, {})
+        theirs = self.queue.enqueue(ROLE, KIND_NOOP, {})
+        self.queue.claim(ROLE, "worker-a")
+        self.queue.claim(ROLE, "worker-b")
+        self.assertEqual(self.queue.release_claims_by("worker-a"), 1)
+        self.assertEqual(self.queue.get(ours)["status"], PENDING)
+        self.assertEqual(self.queue.get(theirs)["status"], CLAIMED)
+        self.assertEqual(self.queue.get(theirs)["claimed_by"], "worker-b")
+
 
 class TestDrainOnStartup(QueueTestCase):
     def test_a_task_enqueued_while_the_worker_was_down_runs_on_startup(self):
@@ -135,6 +161,76 @@ class TestDrainOnStartup(QueueTestCase):
     def test_draining_an_empty_queue_is_a_no_op(self):
         worker = RemoteWorker(self.queue, worker_role=ROLE, claimed_by="w")
         self.assertEqual(run(worker.drain()), 0)
+
+
+class TestClaimRecoveryOnRestartAndShutdown(QueueTestCase):
+    """
+    A claimed row that the worker will not finish must go back to pending.
+
+    The two concrete triggers this defends:
+
+      1. `systemctl restart` / aiohttp cleanup cancels run_forever() while
+         `_run_one` is awaiting a runner. CancelledError is a BaseException,
+         so drain()'s `except Exception` never calls fail().
+      2. OOM or kill -9, then Restart=always. Startup used to call only
+         release_stale_claims() (1 hour horizon), so a restart seconds later
+         left the row claimed forever — the worker never rechecks the
+         horizon on the tick loop.
+    """
+
+    def test_restart_recovers_this_workers_inflight_claim_immediately(self):
+        task_id = self.queue.enqueue(ROLE, KIND_NOOP, {})
+        self.queue.claim(ROLE, "w")
+        # The claim is seconds old — release_stale_claims would refuse it.
+        self.assertEqual(self.queue.release_stale_claims(), 0)
+
+        worker = RemoteWorker(self.queue, worker_role=ROLE, claimed_by="w")
+        self.assertEqual(worker.recover_stranded_claims(), 1)
+        self.assertEqual(self.queue.get(task_id)["status"], PENDING)
+        self.assertEqual(run(worker.drain()), 1)
+        self.assertEqual(self.queue.get(task_id)["status"], COMPLETED)
+
+    def test_restart_does_not_steal_another_workers_recent_claim(self):
+        task_id = self.queue.enqueue(ROLE, KIND_NOOP, {})
+        self.queue.claim(ROLE, "other-host")
+        worker = RemoteWorker(self.queue, worker_role=ROLE, claimed_by="w")
+        self.assertEqual(worker.recover_stranded_claims(), 0)
+        self.assertEqual(self.queue.get(task_id)["status"], CLAIMED)
+        self.assertEqual(self.queue.get(task_id)["claimed_by"], "other-host")
+
+    def test_cancelling_an_in_flight_task_returns_it_to_pending(self):
+        started = asyncio.Event()
+
+        async def slow(args, deps):
+            started.set()
+            await asyncio.sleep(60)
+            return {"status": "ok"}
+
+        task_id = self.queue.enqueue(
+            ROLE, KIND_REMOTE_DISPATCH, {"agent": "a", "args": {}}
+        )
+        worker = RemoteWorker(
+            self.queue, worker_role=ROLE, claimed_by="w", runners={"a": slow}
+        )
+
+        async def scenario():
+            drain = asyncio.create_task(worker.drain())
+            await started.wait()
+            drain.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await drain
+
+        run(scenario())
+        task = self.queue.get(task_id)
+        self.assertEqual(task["status"], PENDING)
+        self.assertIsNone(task["claimed_by"])
+        # The next drain must be able to pick it up and finish it.
+        async def instant(args, deps):
+            return {"status": "ok"}
+
+        worker.runners["a"] = instant
+        self.assertEqual(run(worker.drain()), 1)
+        self.assertEqual(self.queue.get(task_id)["status"], COMPLETED)
 
 
 # ── Tier 2 ──────────────────────────────────────────────────────────────────
