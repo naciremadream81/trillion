@@ -12,12 +12,41 @@ Run from the project root:
 """
 
 import asyncio
+import os
 
 from aiohttp.test_utils import AioHTTPTestCase
 
 import serve as serve_module
 from agent.providers.base import BaseProvider, ProviderResponse, TextChunk, TokenUsage
 from agent.tools.registry import ToolRegistry
+
+
+class _NoBackgroundSchedulers:
+    """
+    Keep serve.py's startup schedulers out of these tests.
+
+    build_app() runs the real on_startup handlers, and _start_software_factory
+    starts the AutonomousScheduler whenever TRILLION_FACTORY_AUTONOMOUS_THEMES
+    is set — which it is in a developer .env that has autonomous themes turned
+    on. The scheduler then drives the opportunity scout through the SAME
+    module-global fake provider these tests install, so any assertion about
+    how much the provider produced (TestChatCancellation counts chunks) is
+    polluted by a scout run and its invalid-JSON retry: 120 chunks instead of
+    60 on such a machine, green in CI where the variable is unset.
+
+    get_settings() reads the environment live, so clearing the variable
+    before build_app() is enough. Restored afterwards so the test leaves the
+    process as it found it.
+    """
+
+    _SCHEDULER_ENV = "TRILLION_FACTORY_AUTONOMOUS_THEMES"
+
+    def _quarantine_schedulers(self):
+        self._prev_scheduler_env = os.environ.pop(self._SCHEDULER_ENV, None)
+
+    def _restore_schedulers(self):
+        if self._prev_scheduler_env is not None:
+            os.environ[self._SCHEDULER_ENV] = self._prev_scheduler_env
 
 
 class FakeProvider(BaseProvider):
@@ -30,8 +59,9 @@ class FakeProvider(BaseProvider):
         yield ProviderResponse(text="ok", tool_calls=[], usage=TokenUsage(), model=self.model_name)
 
 
-class TestChatSessionIsolation(AioHTTPTestCase):
+class TestChatSessionIsolation(_NoBackgroundSchedulers, AioHTTPTestCase):
     async def get_application(self):
+        self._quarantine_schedulers()
         serve_module._provider = FakeProvider()
         serve_module._registry = ToolRegistry()
         serve_module._agent_sessions.clear()
@@ -42,6 +72,7 @@ class TestChatSessionIsolation(AioHTTPTestCase):
         serve_module._provider = None
         serve_module._registry = None
         serve_module._agent_sessions.clear()
+        self._restore_schedulers()
 
     async def test_missing_cookie_gets_a_fresh_session_cookie_set(self):
         resp = await self.client.post("/api/chat", json={"message": "hi"})
@@ -92,7 +123,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class TestChatCancellation(AioHTTPTestCase):
+class TestChatCancellation(_NoBackgroundSchedulers, AioHTTPTestCase):
     """
     An aborted /api/chat must stop generating, not keep billing.
 
@@ -104,6 +135,7 @@ class TestChatCancellation(AioHTTPTestCase):
     """
 
     async def get_application(self):
+        self._quarantine_schedulers()
         self.chunks_produced = 0
 
         test = self
@@ -137,6 +169,7 @@ class TestChatCancellation(AioHTTPTestCase):
         serve_module._provider = None
         serve_module._registry = None
         serve_module._agent_sessions.clear()
+        self._restore_schedulers()
 
     async def test_a_live_client_receives_the_whole_reply(self):
         # The control: without a drop, nothing is cut short.
@@ -175,7 +208,7 @@ class _SlowThenOkProvider(BaseProvider):
         yield ProviderResponse(text="ok", tool_calls=[], usage=TokenUsage(), model=self.model_name)
 
 
-class TestOverlappingChatPostsSerialize(AioHTTPTestCase):
+class TestOverlappingChatPostsSerialize(_NoBackgroundSchedulers, AioHTTPTestCase):
     """
     Two tabs (or barge-in) share the trillion_session cookie, so they share
     one Agent. Overlapping POSTs used to interleave history into consecutive
@@ -183,6 +216,7 @@ class TestOverlappingChatPostsSerialize(AioHTTPTestCase):
     """
 
     async def get_application(self):
+        self._quarantine_schedulers()
         serve_module._provider = _SlowThenOkProvider()
         serve_module._registry = ToolRegistry()
         serve_module._agent_sessions.clear()
@@ -193,6 +227,7 @@ class TestOverlappingChatPostsSerialize(AioHTTPTestCase):
         serve_module._provider = None
         serve_module._registry = None
         serve_module._agent_sessions.clear()
+        self._restore_schedulers()
 
     async def test_overlapping_posts_on_one_session_keep_alternating_roles(self):
         async def post(message: str) -> str:
