@@ -246,6 +246,40 @@ class TestOverlappingTurnsDoNotCorruptHistory(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(a == "user" == b, f"consecutive user roles: {roles}")
             self.assertFalse(a == "assistant" == b, f"consecutive assistant roles: {roles}")
 
+    async def test_queued_turn_does_not_start_if_caller_already_gave_up(self):
+        """
+        Rapid barge-in: POST B waits on the lock, the browser aborts B,
+        POST C is now the live utterance. When A releases, B must not hit
+        the provider or write history — otherwise a tool-only first round
+        (remember_fact, dispatch) runs from stale input with no text
+        chunk for serve.py to notice the disconnect.
+        """
+        provider = _HangOnceThenReply()
+        agent = Agent(provider=provider)
+        first = agent.turn("first, in flight")
+        self.assertEqual(await first.__anext__(), "partial")
+        self.assertEqual(provider.calls, 1)
+
+        stale_chunks: list[str] = []
+
+        async def run_stale() -> None:
+            async for piece in agent.turn(
+                "stale barge-in",
+                should_abort=lambda: True,
+            ):
+                stale_chunks.append(piece)
+
+        stale = asyncio.create_task(run_stale())
+        await asyncio.sleep(0.05)
+        self.assertFalse(stale.done(), "stale turn ran before the in-flight one released")
+
+        await first.aclose()
+        await asyncio.wait_for(stale, timeout=1)
+
+        self.assertEqual(stale_chunks, [])
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(agent.history, [])
+
 
 class _ToolThenTextProvider(BaseProvider):
     """Round 1: calls a tool. Round 2: finishes with plain text. Records the

@@ -779,7 +779,16 @@ def build_app(dashboard: UsageDashboard | None = None) -> web.Application:
             turn = None
             try:
                 agent = _get_agent(session_id)
-                turn = agent.turn(message)
+                # Recheck after the per-Agent lock is acquired (inside
+                # turn()), not only on each yielded chunk: a rapid second
+                # barge-in aborts this POST while it is still queued, and a
+                # tool-only first round yields nothing for _client_gone to
+                # see. Starting that abandoned utterance would still run
+                # LOW-risk tools (remember_fact, dispatch) and bill a
+                # provider call the user already talked over.
+                turn = agent.turn(
+                    message, should_abort=lambda: _client_gone(request)
+                )
                 async for piece in turn:
                     if _client_gone(request):
                         # Stop generating — and stop paying — for a reply
