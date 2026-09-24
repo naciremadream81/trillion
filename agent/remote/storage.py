@@ -150,6 +150,58 @@ class RemoteQueue:
                 raise
         return self.get(row["id"])
 
+    def release_claim(self, task_id: str) -> bool:
+        """
+        Return one claimed task to pending so the next drain retries it.
+
+        Used when THIS worker is shutting down mid-run and will not complete
+        the row. Without this, CancelledError bypasses drain()'s
+        `except Exception` (it is a BaseException) and the task sits
+        `claimed` forever — claim() only picks pending rows, and
+        release_stale_claims() runs at startup with a one-hour horizon, so a
+        systemd restart during a dispatch strands the job.
+
+        The status predicate keeps this a no-op if the row is already
+        terminal (another worker finished it).
+        """
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE remote_tasks
+                SET status = ?, claimed_by = NULL, claimed_at = NULL
+                WHERE id = ? AND status = ?
+                """,
+                (PENDING, task_id, CLAIMED),
+            )
+            return (cur.rowcount or 0) > 0
+
+    def release_claims_by(self, claimed_by: str) -> int:
+        """
+        Return every task this worker still has claimed.
+
+        A process that is starting cannot still be running those tasks —
+        they belong to a previous incarnation that died. Releasing them
+        here, regardless of age, is what makes `systemctl restart` (or an
+        OOM + Restart=always) recover work instead of leaving it claimed
+        until a second restart happens after STALE_CLAIM_SECONDS.
+
+        Scoped to `claimed_by` so a second worker on a different host does
+        not steal an in-flight run. Same-host two-process is already a
+        misconfiguration (one role, two drain loops).
+        """
+        if not claimed_by:
+            return 0
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE remote_tasks
+                SET status = ?, claimed_by = NULL, claimed_at = NULL
+                WHERE status = ? AND claimed_by = ?
+                """,
+                (PENDING, CLAIMED, claimed_by),
+            )
+            return cur.rowcount or 0
+
     def complete(self, task_id: str, result: dict | None = None) -> None:
         with self._connect() as conn:
             conn.execute(

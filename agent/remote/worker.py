@@ -127,7 +127,21 @@ class RemoteWorker:
         return summary
 
     async def _run_one(self, task: dict) -> None:
-        summary = await self.handle(task)
+        try:
+            summary = await self.handle(task)
+        except asyncio.CancelledError:
+            # Shutdown (aiohttp cleanup / SIGTERM) cancels the worker task
+            # while a runner is awaited. CancelledError is a BaseException,
+            # so drain()'s `except Exception` never records a failure and
+            # the row stays claimed — claim() will not pick it again.
+            try:
+                self.queue.release_claim(task["id"])
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "remote worker: could not release claim for %s on shutdown",
+                    task["id"],
+                )
+            raise
         # A local agent that persists a `failed` status and returns NORMALLY
         # is common, and treating only exceptions as failure is how you
         # cheerfully report a failure as a success. Every terminal-failure
@@ -173,13 +187,32 @@ class RemoteWorker:
         except Exception:  # noqa: BLE001 — presence is advisory; never fatal
             logger.warning("remote worker: heartbeat failed")
 
+    def recover_stranded_claims(self) -> int:
+        """
+        Undo claims this process can no longer be running.
+
+        Two horizons, on purpose:
+
+          * Ours, any age — this worker is starting, so a previous
+            incarnation that claimed under our `claimed_by` is dead. A
+            deploy or OOM + Restart=always is seconds, not an hour; waiting
+            on STALE_CLAIM_SECONDS would strand the row until another
+            restart happens after that window, which in practice is never.
+          * Anyone's, older than STALE_CLAIM_SECONDS — a different host
+            that died and never came back. Must stay generous so we do not
+            steal a run that is still in flight there.
+        """
+        own = self.queue.release_claims_by(self.claimed_by)
+        stale = self.queue.release_stale_claims()
+        return own + stale
+
     async def run_forever(self) -> None:
         """
         Startup: reclaim anything a dead worker stranded, beat once so the
         cloud stops saying "offline", then DRAIN — all before the first tick.
         """
         try:
-            released = self.queue.release_stale_claims()
+            released = self.recover_stranded_claims()
             if released:
                 logger.info("remote worker: returned %d stranded task(s) to pending", released)
         except Exception:  # noqa: BLE001
