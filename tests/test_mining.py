@@ -19,6 +19,8 @@ import pathlib
 import shutil
 import tempfile
 import unittest
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 from agent.mining.client import (
     SATS_PER_BTC,
@@ -218,7 +220,12 @@ class TestStorage(unittest.TestCase):
             last_share_at=snap.last_share_at, btc_usd=73720.0,
         )
         self.repo.record_workers(self.wallet_id, parse_workers(fixture("user_hashrate_full.json")))
-        self.repo.record_payouts(self.wallet_id, parse_payouts(fixture("earnpay.json")))
+        # The captured fixture has fixed dates, but payouts_30d is measured
+        # from the wall clock — re-date the payouts into the window so this
+        # test does not start failing once the capture is a month old.
+        recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        payouts = [replace(p, paid_at=recent) for p in parse_payouts(fixture("earnpay.json"))]
+        self.repo.record_payouts(self.wallet_id, payouts)
         summary = self.repo.summary("bc1qtest").to_dict()
         self.assertGreater(summary["hashrate_60s"], 0)
         self.assertGreater(summary["payouts_30d_btc"], 0)
